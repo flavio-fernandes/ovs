@@ -1866,6 +1866,10 @@ static const struct ctl_table_class tables[] = {
        NULL},
       {NULL, NULL, NULL}}},
 
+    {&nbrec_table_address_set,
+     {{&nbrec_table_address_set, &nbrec_address_set_col_name, NULL},
+      {NULL, NULL, NULL}}},
+
     {NULL, {{NULL, NULL, NULL}, {NULL, NULL, NULL}}}
 };
 
