@@ -48,4 +48,16 @@ script: ./.travis/${TRAVIS_OS_NAME}-build.sh $OPTS
 notifications:
   email:
     recipients:
-      - build@openvswitch.org
+      - flavio@flaviof.com
+
+# blacklist
+branches:
+  except:
+    - master
+    - experimental
+
+# whitelist
+branches:
+  only:
+    - devel
+    - stable
