@@ -4,7 +4,7 @@ Open vSwitch
 Build Status:
 -------------
 
-[![Build Status](https://travis-ci.org/openvswitch/ovs.png)](https://travis-ci.org/openvswitch/ovs)
+[![Build Status](https://travis-ci.org/flavio-fernandes/ovs.png)](https://travis-ci.org/flavio-fernandes/ovs)
 
 What is Open vSwitch?
 ---------------------
