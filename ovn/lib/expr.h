@@ -343,8 +343,10 @@ expr_from_node(const struct ovs_list *node)
 void expr_format(const struct expr *, struct ds *);
 void expr_print(const struct expr *);
 struct expr *expr_parse(struct lexer *, const struct shash *symtab,
+                        const struct shash *macros,
                         char **errorp);
 struct expr *expr_parse_string(const char *, const struct shash *symtab,
+                               const struct shash *macros,
                                char **errorp);
 
 struct expr *expr_clone(struct expr *);
@@ -390,5 +392,20 @@ char *expr_parse_assignment(struct lexer *lexer, const struct shash *symtab,
 char *expr_parse_field(struct lexer *, int n_bits, bool rw,
                        const struct shash *symtab, struct mf_subfield *,
                        struct expr **prereqsp);
+
+
+/* MACRO Variables
+ *
+ * Instead of referring to a set of value as:
+ *    {addr1, addr2, ..., addrN}
+ * You can register a set of values and refer to them as:
+ *    $name
+ * The macros should all have integer/masked-integer values.
+ * The values that don't qualify are ingnored
+ */
+void expr_macros_add(struct shash *macros, const char *name,
+                     const char * const *values, size_t n_values);
+void expr_macros_remove(struct shash *macros, const char *name);
+void expr_macros_destroy(struct shash *macros);
 
 #endif /* ovn/expr.h */

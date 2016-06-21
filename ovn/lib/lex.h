@@ -36,6 +36,7 @@ enum lex_type {
     LEX_T_STRING,               /* "foo" */
     LEX_T_INTEGER,              /* 12345 or 1.2.3.4 or ::1 or 01:02:03:04:05 */
     LEX_T_MASKED_INTEGER,       /* 12345/10 or 1.2.0.0/16 or ::2/127 or... */
+    LEX_T_MACRO,                /* $NAME */
     LEX_T_ERROR,                /* invalid input */
 
     /* Bare tokens. */

@@ -227,6 +227,10 @@ lex_token_format(const struct lex_token *token, struct ds *s)
         lex_token_format_masked_integer(token, s);
         break;
 
+    case LEX_T_MACRO:
+        ds_put_cstr(s, token->s);
+        break;
+
     case LEX_T_LPAREN:
         ds_put_cstr(s, "(");
         break;
@@ -527,6 +531,14 @@ lex_parse_id(const char *p, struct lex_token *token)
     return p;
 }
 
+static const char *
+lex_parse_macro(const char *p, struct lex_token *token)
+{
+    p = lex_parse_id(++p, token);
+    token->type = LEX_T_MACRO;
+    return p;
+}
+
 /* Initializes 'token' and parses the first token from the beginning of
  * null-terminated string 'p' into 'token'.  Stores a pointer to the start of
  * the token (after skipping white space and comments, if any) into '*startp'.
@@ -695,6 +707,10 @@ next:
         } else {
             lex_error(token, "`-' is only valid as part of `--'.");
         }
+        break;
+
+    case '$':
+        p = lex_parse_macro(p, token);
         break;
 
     case '0': case '1': case '2': case '3': case '4':
