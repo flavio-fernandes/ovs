@@ -259,6 +259,9 @@ ip4.src == ::1 => 128-bit constant is not compatible with 32-bit field ip4.src.
 1 == eth.type == 2 => Range expressions must have the form `x < field < y' or `x > field > y', with each `<' optionally replaced by `<=' or `>' by `>=').
 
 eth.dst[40] x => Extra tokens at end of input.
+
+ip4.src == {1.2.3.4, $set1, $unkownset} => Syntax error at `$unkownset' Unknown macro: 'unkownset'.
+eth.src == {$set3, badmac, 00:00:00:00:00:01} => Syntax error at `badmac' expecting constant.
 ]])
 sed 's/ =>.*//' test-cases.txt > input.txt
 sed 's/.* => //' test-cases.txt > expout
@@ -481,6 +484,12 @@ AT_CHECK([expr_to_flow 'eth.src == {$set3}'], [0], [dnl
 dl_src=00:00:00:00:00:01
 dl_src=00:00:00:00:00:02
 dl_src=00:00:00:00:00:03
+])
+AT_CHECK([expr_to_flow 'eth.src == {00:00:00:00:00:01, $set3, ba:be:be:ef:de:ad, $set3}'], [0], [dnl
+dl_src=00:00:00:00:00:01
+dl_src=00:00:00:00:00:02
+dl_src=00:00:00:00:00:03
+dl_src=ba:be:be:ef:de:ad
 ])
 AT_CLEANUP
 

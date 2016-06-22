@@ -784,7 +784,7 @@ parse_macros(struct expr_context *ctx, struct expr_constant_set *cs,
     struct expr_constant_set *addr_set
         = shash_find_data(ctx->macros, ctx->lexer->token.s);
     if (!addr_set) {
-        expr_syntax_error(ctx, "Unknown macro: '%s'", ctx->lexer->token.s);
+        expr_syntax_error(ctx, "Unknown macro: '%s'.", ctx->lexer->token.s);
         return false;
     }
 
