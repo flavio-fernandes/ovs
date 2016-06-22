@@ -788,7 +788,10 @@ parse_macros(struct expr_context *ctx, struct expr_constant_set *cs,
         return false;
     }
 
-    cs->type = EXPR_C_INTEGER;
+    if (!assign_constant_set_type(ctx, cs, EXPR_C_INTEGER)) {
+        return false;
+    }
+
     size_t n_values = cs->n_values + addr_set->n_values;
     if (n_values >= *allocated_values) {
         cs->values = xrealloc(cs->values, n_values * sizeof *cs->values);
