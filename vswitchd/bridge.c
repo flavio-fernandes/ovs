@@ -1212,9 +1212,7 @@ bridge_configure_ipfix(struct bridge *br)
                                               "enable-output-sampling", false);
 
         virtual_obs_id = smap_get(&be_cfg->other_config, "virtual_obs_id");
-        be_opts.virtual_obs_id = (virtual_obs_id
-                                  ? xstrdup(virtual_obs_id)
-                                  : NULL);
+        be_opts.virtual_obs_id = nullable_xstrdup(virtual_obs_id);
     }
 
     if (n_fe_opts > 0) {
@@ -1234,11 +1232,9 @@ bridge_configure_ipfix(struct bridge *br)
                 opts->enable_tunnel_sampling = smap_get_bool(
                                                    &fe_cfg->ipfix->other_config,
                                                   "enable-tunnel-sampling", true);
-                virtual_obs_id = smap_get(&be_cfg->other_config,
+                virtual_obs_id = smap_get(&fe_cfg->ipfix->other_config,
                                           "virtual_obs_id");
-                opts->virtual_obs_id = (virtual_obs_id
-                                        ? xstrdup(virtual_obs_id)
-                                        : NULL);
+                opts->virtual_obs_id = nullable_xstrdup(virtual_obs_id);
                 opts++;
             }
         }
@@ -3574,8 +3570,9 @@ bridge_configure_remotes(struct bridge *br,
     for (i = 0; i < n_controllers; i++) {
         struct ovsrec_controller *c = controllers[i];
 
-        if (!strncmp(c->target, "punix:", 6)
-            || !strncmp(c->target, "unix:", 5)) {
+        if (daemon_should_self_confine()
+            && (!strncmp(c->target, "punix:", 6)
+            || !strncmp(c->target, "unix:", 5))) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
             char *whitelist;
 
