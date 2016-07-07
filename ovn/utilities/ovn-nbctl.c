@@ -1383,6 +1383,10 @@ nbctl_lr_route_add(struct ctl_context *ctx)
         nbrec_logical_router_static_route_verify_nexthop(route);
         nbrec_logical_router_static_route_set_ip_prefix(route, prefix);
         nbrec_logical_router_static_route_set_nexthop(route, next_hop);
+        if (ctx->argc == 5) {
+            nbrec_logical_router_static_route_set_output_port(route,
+                                                              ctx->argv[4]);
+        }
         free(rt_prefix);
         free(next_hop);
         free(prefix);
@@ -1795,7 +1799,8 @@ nbctl_lr_route_list(struct ctl_context *ctx)
             free(error);
 
             struct in6_addr ipv6;
-            if (!ipv6_parse_cidr(route->ip_prefix, &ipv6, &plen)) {
+            error = ipv6_parse_cidr(route->ip_prefix, &ipv6, &plen);
+            if (!error) {
                 ipv6_routes[n_ipv6_routes].plen = plen;
                 ipv6_routes[n_ipv6_routes].addr = ipv6;
                 ipv6_routes[n_ipv6_routes].route = route;
@@ -1847,6 +1852,10 @@ static const struct ctl_table_class tables[] = {
      {{NULL, NULL, NULL},
       {NULL, NULL, NULL}}},
 
+    {&nbrec_table_load_balancer,
+     {{NULL, NULL, NULL},
+      {NULL, NULL, NULL}}},
+
     {&nbrec_table_logical_router,
      {{&nbrec_table_logical_router, &nbrec_logical_router_col_name, NULL},
       {NULL, NULL, NULL}}},
@@ -1864,6 +1873,10 @@ static const struct ctl_table_class tables[] = {
     {&nbrec_table_nat,
      {{&nbrec_table_nat, NULL,
        NULL},
+      {NULL, NULL, NULL}}},
+
+    {&nbrec_table_address_set,
+     {{&nbrec_table_address_set, &nbrec_address_set_col_name, NULL},
       {NULL, NULL, NULL}}},
 
     {NULL, {{NULL, NULL, NULL}, {NULL, NULL, NULL}}}
