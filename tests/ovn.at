@@ -1325,7 +1325,7 @@ ovn-nbctl lsp-set-addresses lp2 f0:00:00:00:00:02
 
 ovn-nbctl lsp-add lsw0 lp-gw
 ovn-nbctl lsp-set-type lp-gw l2gateway
-ovn-nbctl lsp-set-options lp-gw network_name=physnet1
+ovn-nbctl lsp-set-options lp-gw network_name=physnet1 l2gateway-chassis=hv_gw
 ovn-nbctl lsp-set-addresses lp-gw unknown
 
 net_add n1               # Network to connect hv1, hv2, and gw
@@ -1354,9 +1354,6 @@ ovn_attach n1 br-phys 192.168.0.3
 ovs-vsctl add-br br-phys2
 net_attach n2 br-phys2
 ovs-vsctl set open . external_ids:ovn-bridge-mappings="physnet1:br-phys2"
-
-# Bind our gateway port to the hv_gw chassis
-ovn-sbctl lport-bind lp-gw hv_gw
 
 # Add hv3 on the other side of the GW
 sim_add hv3
@@ -2705,6 +2702,7 @@ AT_CLEANUP
 
 AT_SETUP([ovn -- send gratuitous arp on localnet])
 AT_KEYWORDS([ovn])
+AT_SKIP_IF([test $HAVE_PYTHON = no])
 ovn_start
 ovn-nbctl ls-add lsw0
 net_add n1
@@ -3084,6 +3082,27 @@ $PYTHON "$top_srcdir/utilities/ovs-pcap.in" hv2/vif1-tx.pcap | trim_zeros > rece
 echo $expected | trim_zeros > expout
 AT_CHECK([cat received1.packets], [0], [expout])
 
+# Delete the router and re-create it. Things should work as before.
+ovn-nbctl  lr-del R2
+ovn-nbctl create Logical_Router name=R2 options:chassis="hv2"
+# Connect alice to R2
+ovn-nbctl lrp-add R2 alice 00:00:02:01:02:03 172.16.1.1/24
+# Connect R2 to join
+ovn-nbctl lrp-add R2 R2_join 00:00:04:01:02:04 20.0.0.2/24
+
+ovn-nbctl -- --id=@lrt create Logical_Router_Static_Route \
+ip_prefix=192.168.1.0/24 nexthop=20.0.0.1 -- add Logical_Router \
+R2 static_routes @lrt
+
+# Wait for ovn-controller to catch up.
+sleep 1
+
+# Send the packet again.
+as hv1 ovs-appctl netdev-dummy/receive hv1-vif1 $packet
+$PYTHON "$top_srcdir/utilities/ovs-pcap.in" hv2/vif1-tx.pcap | trim_zeros > received1.packets
+echo $expected | trim_zeros >> expout
+AT_CHECK([cat received1.packets], [0], [expout])
+
 OVN_CLEANUP([hv1],[hv2])
 
 AT_CLEANUP
@@ -3344,6 +3363,34 @@ for i in 1 2; do
     cat $i.expected > expout
     AT_CHECK([cat $i.packets], [0], [expout])
 done
+
+OVN_CLEANUP([hv1])
+
+AT_CLEANUP
+
+AT_SETUP([ovn -- address sets modification/removal smoke test])
+AT_KEYWORDS([ovn-addr])
+ovn_start
+
+net_add n1
+
+sim_add hv1
+as hv1
+ovs-vsctl add-br br-phys
+ovn_attach n1 br-phys 192.168.0.1
+
+row=`ovn-nbctl create Address_Set name=set1 addresses=\"1.1.1.1\"`
+ovn-nbctl set Address_Set $row name=set1 addresses=\"1.1.1.1,1.1.1.2\"
+ovn-nbctl destroy Address_Set $row
+
+sleep 1
+
+# A bug previously existed in the address set support code
+# that caused ovn-controller to crash after an address set
+# was updated and then removed.  This test case ensures
+# that ovn-controller is at least still running after
+# creating, updating, and deleting an address set.
+AT_CHECK([ovs-appctl -t ovn-controller version], [0], [ignore])
 
 OVN_CLEANUP([hv1])
 
