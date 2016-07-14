@@ -19,6 +19,11 @@ Post-v2.5.0
        packet to size M bytes when outputting to port N.
      * New command OFPGC_ADD_OR_MOD for OFPT_GROUP_MOD message that adds a
        new group or modifies an existing groups
+   - Improved OpenFlow version compatibility for actions:
+     * New OpenFlow extension to support the "group" action in OpenFlow 1.0.
+     * OpenFlow 1.0 "enqueue" action now properly translated to OpenFlow 1.1+.
+     * OpenFlow 1.1 "mod_nw_ecn" and OpenFlow 1.1+ "mod_nw_ttl" actions now
+       properly translated to OpenFlow 1.0.
    - ovs-ofctl:
      * queue-get-config command now allows a queue ID to be specified.
      * '--bundle' option can now be used with OpenFlow 1.3.
@@ -53,6 +58,7 @@ Post-v2.5.0
      * PMD threads servicing vHost User ports can now come from the NUMA
        node that device memory is located on if CONFIG_RTE_LIBRTE_VHOST_NUMA
        is enabled in DPDK.
+   - Increase number of registers to 16.
    - ovs-benchmark: This utility has been removed due to lack of use and
      bitrot.
    - ovs-appctl:
