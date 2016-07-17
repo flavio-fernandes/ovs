@@ -1,4 +1,4 @@
-/* Copyright (c) 2015 Nicira, Inc.
+/* Copyright (c) 2015, 2016 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -74,7 +74,7 @@ static bool process_full_encaps = false;
 struct port_hash_node {
     struct hmap_node node;
     struct hmap_node uuid_node;
-    const struct uuid *uuid;
+    struct uuid uuid;
     const struct ovsrec_port *port;
     const struct ovsrec_bridge *bridge;
 };
@@ -131,7 +131,7 @@ port_lookup_by_uuid(struct hmap *hmap_p, const struct uuid *uuid)
     struct port_hash_node *answer;
     HMAP_FOR_EACH_WITH_HASH (answer, uuid_node, uuid_hash(uuid),
                              hmap_p) {
-        if (uuid_equals(uuid, answer->uuid)) {
+        if (uuid_equals(uuid, &answer->uuid)) {
             return answer;
         }
     }
@@ -186,11 +186,12 @@ tunnel_add(const struct sbrec_chassis *chassis_rec,
             && !strcmp(encap->type, iface->type)
             && !strcmp(encap->ip, ip)) {
 
-            hash_node->uuid = &chassis_rec->header_.uuid;
+            memcpy(&hash_node->uuid, &chassis_rec->header_.uuid,
+                   sizeof hash_node->uuid);
             if (!port_lookup_by_uuid(&tc.tunnel_hmap_by_uuid,
-                                     hash_node->uuid)) {
+                                     &hash_node->uuid)) {
                 hmap_insert(&tc.tunnel_hmap_by_uuid, &hash_node->uuid_node,
-                            uuid_hash(hash_node->uuid));
+                            uuid_hash(&hash_node->uuid));
             }
             return;
         }
@@ -380,17 +381,19 @@ encaps_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int,
         SBREC_CHASSIS_FOR_EACH (chassis_rec, ctx->ovnsb_idl) {
             check_and_add_tunnel(chassis_rec, chassis_id);
             struct port_hash_node *hash_node = xzalloc(sizeof *hash_node);
-            hash_node->uuid = &chassis_rec->header_.uuid;
+            memcpy(&hash_node->uuid, &chassis_rec->header_.uuid,
+                   sizeof hash_node->uuid);
             hmap_insert(&keep_tunnel_hmap_by_uuid, &hash_node->uuid_node,
-                        uuid_hash(hash_node->uuid));
+                        uuid_hash(&hash_node->uuid));
         }
 
         /* Delete any tunnels that weren't recreated above. */
         struct port_hash_node *old_hash_node, *next_hash_node;
         HMAP_FOR_EACH_SAFE (old_hash_node, next_hash_node,
                             node, &tc.tunnel_hmap) {
-            if (!port_lookup_by_uuid(&keep_tunnel_hmap_by_uuid,
-                                     old_hash_node->uuid)) {
+            if (!uuid_is_zero(&old_hash_node->uuid)
+                && !port_lookup_by_uuid(&keep_tunnel_hmap_by_uuid,
+                                        &old_hash_node->uuid)) {
                 bridge_delete_port(old_hash_node->bridge, old_hash_node->port);
                 sset_find_and_delete(&tc.port_names,
                                      old_hash_node->port->name);
@@ -404,12 +407,7 @@ encaps_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int,
         process_full_encaps = false;
     } else {
         SBREC_CHASSIS_FOR_EACH_TRACKED (chassis_rec, ctx->ovnsb_idl) {
-            bool is_deleted = sbrec_chassis_row_get_seqno(chassis_rec,
-                                                          OVSDB_IDL_CHANGE_DELETE) > 0;
-            bool is_new = sbrec_chassis_row_get_seqno(chassis_rec,
-                                                      OVSDB_IDL_CHANGE_MODIFY) == 0;
-
-            if (is_deleted) {
+            if (sbrec_chassis_is_deleted(chassis_rec)) {
                 /* Lookup the tunnel by row uuid and remove it. */
                 struct port_hash_node *port_hash =
                     port_lookup_by_uuid(&tc.tunnel_hmap_by_uuid,
@@ -424,14 +422,10 @@ encaps_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int,
                     free(port_hash);
                     binding_reset_processing();
                 }
-                continue;
-            }
-            if (!is_new) {
-                check_and_update_tunnel(chassis_rec);
-                continue;
-            } else {
+            } else if (sbrec_chassis_is_new(chassis_rec)) {
                 check_and_add_tunnel(chassis_rec, chassis_id);
-                continue;
+            } else {
+                check_and_update_tunnel(chassis_rec);
             }
         }
     }

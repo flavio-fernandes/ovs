@@ -28,7 +28,7 @@ struct lport {
     struct hmap_node name_node;  /* Index by name. */
     struct hmap_node key_node;   /* Index by (dp_key, port_key). */
     struct hmap_node uuid_node;  /* Index by row uuid. */
-    const struct uuid *uuid;
+    struct uuid uuid;
     const struct sbrec_port_binding *pb;
 };
 
@@ -91,7 +91,7 @@ consider_lport_index(struct lport_index *lports,
                 hash_int(pb->tunnel_key, pb->datapath->tunnel_key));
     hmap_insert(&lports->by_uuid, &p->uuid_node,
                 uuid_hash(&pb->header_.uuid));
-    p->uuid = &pb->header_.uuid;
+    memcpy(&p->uuid, &pb->header_.uuid, sizeof p->uuid);
     p->pb = pb;
 }
 
@@ -107,14 +107,11 @@ lport_index_fill(struct lport_index *lports, struct ovsdb_idl *ovnsb_idl)
         full_lport_rebuild = false;
     } else {
         SBREC_PORT_BINDING_FOR_EACH_TRACKED (pb, ovnsb_idl) {
-            bool is_delete = sbrec_port_binding_row_get_seqno(pb,
-                OVSDB_IDL_CHANGE_DELETE) > 0;
-
-            if (is_delete) {
+            if (sbrec_port_binding_is_deleted(pb)) {
                 lport_index_remove(lports, &pb->header_.uuid);
-                continue;
+            } else {
+                consider_lport_index(lports, pb);
             }
-            consider_lport_index(lports, pb);
         }
     }
 }
@@ -151,7 +148,7 @@ lport_lookup_by_uuid(const struct lport_index *lports,
     const struct lport *lport;
     HMAP_FOR_EACH_WITH_HASH (lport, uuid_node, uuid_hash(uuid),
                              &lports->by_uuid) {
-        if (uuid_equals(uuid, lport->uuid)) {
+        if (uuid_equals(uuid, &lport->uuid)) {
             return lport;
         }
     }
@@ -176,7 +173,7 @@ lport_lookup_by_key(const struct lport_index *lports,
 struct mcgroup {
     struct hmap_node dp_name_node; /* Index by (logical datapath, name). */
     struct hmap_node uuid_node;    /* Index by insert uuid. */
-    const struct uuid *uuid;
+    struct uuid uuid;
     const struct sbrec_multicast_group *mg;
 };
 
@@ -232,7 +229,7 @@ consider_mcgroup_index(struct mcgroup_index *mcgroups,
                 hash_string(mg->name, uuid_hash(dp_uuid)));
     hmap_insert(&mcgroups->by_uuid, &m->uuid_node,
                 uuid_hash(&mg->header_.uuid));
-    m->uuid = &mg->header_.uuid;
+    memcpy(&m->uuid, &mg->header_.uuid, sizeof m->uuid);
     m->mg = mg;
 }
 
@@ -248,14 +245,11 @@ mcgroup_index_fill(struct mcgroup_index *mcgroups, struct ovsdb_idl *ovnsb_idl)
         full_mc_rebuild = false;
     } else {
         SBREC_MULTICAST_GROUP_FOR_EACH_TRACKED (mg, ovnsb_idl) {
-            bool is_delete = sbrec_multicast_group_row_get_seqno(mg,
-                OVSDB_IDL_CHANGE_DELETE) > 0;
-
-            if (is_delete) {
+            if (sbrec_multicast_group_is_deleted(mg)) {
                 mcgroup_index_remove(mcgroups, &mg->header_.uuid);
-                continue;
+            } else {
+                consider_mcgroup_index(mcgroups, mg);
             }
-            consider_mcgroup_index(mcgroups, mg);
         }
     }
 }
@@ -275,7 +269,7 @@ mcgroup_lookup_by_uuid(const struct mcgroup_index *mcgroups,
     const struct mcgroup *mcgroup;
     HMAP_FOR_EACH_WITH_HASH (mcgroup, uuid_node, uuid_hash(uuid),
                              &mcgroups->by_uuid) {
-        if (uuid_equals(mcgroup->uuid, uuid)) {
+        if (uuid_equals(&mcgroup->uuid, uuid)) {
             return mcgroup;
         }
     }
