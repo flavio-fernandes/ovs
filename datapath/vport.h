@@ -142,8 +142,9 @@ struct vport_ops {
 	int (*get_options)(const struct vport *, struct sk_buff *);
 
 	netdev_tx_t (*send)(struct sk_buff *skb);
+#ifndef USE_UPSTREAM_TUNNEL
 	int  (*fill_metadata_dst)(struct net_device *dev, struct sk_buff *skb);
-
+#endif
 	struct module *owner;
 	struct list_head list;
 };
@@ -186,13 +187,6 @@ static inline struct vport *vport_from_priv(void *priv)
 
 int ovs_vport_receive(struct vport *, struct sk_buff *,
 		      const struct ip_tunnel_info *);
-
-static inline void ovs_skb_postpush_rcsum(struct sk_buff *skb,
-				      const void *start, unsigned int len)
-{
-	if (skb->ip_summed == CHECKSUM_COMPLETE)
-		skb->csum = csum_add(skb->csum, csum_partial(start, len, 0));
-}
 
 static inline const char *ovs_vport_name(struct vport *vport)
 {

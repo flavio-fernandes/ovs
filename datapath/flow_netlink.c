@@ -263,7 +263,7 @@ size_t ovs_tun_key_attr_size(void)
 	/* Whenever adding new OVS_TUNNEL_KEY_ FIELDS, we should consider
 	 * updating this function.
 	 */
-	return    nla_total_size(8) /* OVS_TUNNEL_KEY_ATTR_ID */
+	return    nla_total_size_64bit(8) /* OVS_TUNNEL_KEY_ATTR_ID */
 		+ nla_total_size(16)   /* OVS_TUNNEL_KEY_ATTR_IPV[46]_SRC */
 		+ nla_total_size(16)   /* OVS_TUNNEL_KEY_ATTR_IPV[46]_DST */
 		+ nla_total_size(1)    /* OVS_TUNNEL_KEY_ATTR_TOS */
@@ -722,7 +722,8 @@ static int __ip_tun_to_nlattr(struct sk_buff *skb,
 			      unsigned short tun_proto)
 {
 	if (output->tun_flags & TUNNEL_KEY &&
-	    nla_put_be64(skb, OVS_TUNNEL_KEY_ATTR_ID, output->tun_id))
+	    nla_put_be64(skb, OVS_TUNNEL_KEY_ATTR_ID, output->tun_id,
+			 OVS_TUNNEL_KEY_ATTR_PAD))
 		return -EMSGSIZE;
 	switch (tun_proto) {
 	case AF_INET:
@@ -1254,7 +1255,7 @@ int ovs_nla_get_match(struct net *net, struct sw_flow_match *match,
 			/* The userspace does not send tunnel attributes that
 			 * are 0, but we should not wildcard them nonetheless.
 			 */
-			if (match->key->tun_key.u.ipv4.dst)
+			if (match->key->tun_proto)
 				SW_FLOW_KEY_MEMSET_FIELD(match, tun_key,
 							 0xff, true);
 
@@ -1405,7 +1406,6 @@ int ovs_nla_get_flow_metadata(struct net *net, const struct nlattr *attr,
 	memset(&match, 0, sizeof(match));
 	match.key = key;
 
-	memset(key, 0, OVS_SW_FLOW_KEY_METADATA_SIZE);
 	memset(&key->ct, 0, sizeof(key->ct));
 	key->phy.in_port = DP_MAX_PORTS;
 
@@ -1800,10 +1800,8 @@ int ovs_nla_add_action(struct sw_flow_actions **sfa, int attrtype, void *data,
 	struct nlattr *a;
 
 	a = __add_action(sfa, attrtype, data, len, log);
-	if (IS_ERR(a))
-		return PTR_ERR(a);
 
-	return 0;
+	return PTR_ERR_OR_ZERO(a);
 }
 
 static inline int add_nested_action_start(struct sw_flow_actions **sfa,
@@ -2048,9 +2046,10 @@ static int validate_set(const struct nlattr *a,
 		break;
 
 	case OVS_KEY_ATTR_TUNNEL:
+#ifndef USE_UPSTREAM_TUNNEL
 		if (eth_p_mpls(eth_type))
 			return -EINVAL;
-
+#endif
 		if (masked)
 			return -EINVAL; /* Masked tunnel set not supported. */
 

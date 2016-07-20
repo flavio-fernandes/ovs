@@ -59,7 +59,7 @@ void netdev_port_receive(struct sk_buff *skb, struct ip_tunnel_info *tun_info)
 		return;
 
 	skb_push(skb, ETH_HLEN);
-	ovs_skb_postpush_rcsum(skb, skb->data, ETH_HLEN);
+	skb_postpush_rcsum(skb, skb->data, ETH_HLEN);
 	ovs_vport_receive(vport, skb, tun_info);
 	return;
 error:
@@ -110,7 +110,7 @@ struct vport *ovs_netdev_link(struct vport *vport, const char *name)
 
 	rtnl_lock();
 	err = netdev_master_upper_dev_link(vport->dev,
-					   get_dpdev(vport->dp));
+					   get_dpdev(vport->dp), NULL, NULL);
 	if (err)
 		goto error_unlock;
 

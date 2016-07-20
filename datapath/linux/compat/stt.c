@@ -1413,7 +1413,7 @@ static int __stt_rcv(struct stt_dev *stt_dev, struct sk_buff *skb)
 {
 	struct metadata_dst tun_dst;
 
-	ovs_ip_tun_rx_dst(&tun_dst.u.tun_info, skb, TUNNEL_KEY | TUNNEL_CSUM,
+	ovs_ip_tun_rx_dst(&tun_dst, skb, TUNNEL_KEY | TUNNEL_CSUM,
 			  get_unaligned(&stt_hdr(skb)->key), 0);
 	tun_dst.u.tun_info.key.tp_src = tcp_hdr(skb)->source;
 	tun_dst.u.tun_info.key.tp_dst = tcp_hdr(skb)->dest;
@@ -1554,7 +1554,11 @@ static void clean_percpu(struct work_struct *work)
 #ifdef HAVE_NF_HOOKFN_ARG_OPS
 #define FIRST_PARAM const struct nf_hook_ops *ops
 #else
+#ifdef HAVE_NF_HOOKFN_ARG_PRIV
+#define FIRST_PARAM void *priv
+#else
 #define FIRST_PARAM unsigned int hooknum
+#endif
 #endif
 
 #ifdef HAVE_NF_HOOK_STATE
@@ -1600,7 +1604,9 @@ static unsigned int nf_ip_hook(FIRST_PARAM, struct sk_buff *skb, LAST_PARAM)
 
 static struct nf_hook_ops nf_hook_ops __read_mostly = {
 	.hook           = nf_ip_hook,
+#ifdef HAVE_NF_HOOKS_OPS_OWNER
 	.owner          = THIS_MODULE,
+#endif
 	.pf             = NFPROTO_IPV4,
 	.hooknum        = NF_INET_LOCAL_IN,
 	.priority       = INT_MAX,
@@ -1845,8 +1851,10 @@ static const struct net_device_ops stt_netdev_ops = {
 	.ndo_change_mtu         = stt_change_mtu,
 	.ndo_validate_addr      = eth_validate_addr,
 	.ndo_set_mac_address    = eth_mac_addr,
+#ifdef USE_UPSTREAM_TUNNEL
 #ifdef HAVE_NDO_FILL_METADATA_DST
 	.ndo_fill_metadata_dst  = stt_fill_metadata_dst,
+#endif
 #endif
 };
 
