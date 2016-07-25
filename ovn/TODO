@@ -38,12 +38,6 @@ ovn-sb.xml includes a tentative specification for this action.
 IPv6 will probably need an action or actions for ND that is similar to
 the "arp" action, and an action for generating
 
-*** ct_label 128-bit support.
-
-We only support 64-bits for the ct_label argument to ct_commit(), but ct_label
-is a 128-bit field.  The OVN lexer only supports parsing 64-bit integers, but
-we can use parse_int_string() to support larger integers.
-
 ** IPv6
 
 *** ND versus ARP
@@ -130,12 +124,6 @@ large.
     The part of OpenStack that manages VMs (Nova) tells the networking component
     (Neutron) where a port will be located, as opposed to the networking
     component discovering it.
-
-** Gratuitous ARP generation
-
-   ovn-controller should generate a GARP when a port is bound to a chassis.
-   This is needed when ports are migrated from one chassis to another, such
-   as live migrating a VM.
 
 * ovsdb-server
 
@@ -247,3 +235,9 @@ large.
 ** Support reject action.
 
 ** Support log option.
+
+** We currently use ct_label[0] to mark connections that have been blocked
+   by an ACL.  It would be nice in the logical flow syntax to have a
+   symbolic name like "ct_label.blocked" to make things more clear, as
+   well as to change the implementation of "blocked" in the future
+   if needed.

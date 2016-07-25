@@ -36,7 +36,7 @@
 #include "packets.h"
 #include "pcap-file.h"
 #include "poll-loop.h"
-#include "shash.h"
+#include "openvswitch/shash.h"
 #include "sset.h"
 #include "stream.h"
 #include "unaligned.h"
@@ -68,7 +68,7 @@ enum dummy_netdev_conn_state {
 
 struct dummy_packet_pconn {
     struct pstream *pstream;
-    struct dummy_packet_stream *streams;
+    struct dummy_packet_stream **streams;
     size_t n_streams;
 };
 
@@ -328,7 +328,8 @@ dummy_packet_conn_close(struct dummy_packet_conn *conn)
     case PASSIVE:
         pstream_close(pconn->pstream);
         for (i = 0; i < pconn->n_streams; i++) {
-            dummy_packet_stream_close(&pconn->streams[i]);
+            dummy_packet_stream_close(pconn->streams[i]);
+            free(pconn->streams[i]);
         }
         free(pconn->streams);
         pconn->pstream = NULL;
@@ -446,8 +447,9 @@ dummy_pconn_run(struct netdev_dummy *dev)
 
         pconn->streams = xrealloc(pconn->streams,
                                 ((pconn->n_streams + 1)
-                                 * sizeof *s));
-        s = &pconn->streams[pconn->n_streams++];
+                                 * sizeof s));
+        s = xmalloc(sizeof *s);
+        pconn->streams[pconn->n_streams++] = s;
         dummy_packet_stream_init(s, new_stream);
     } else if (error != EAGAIN) {
         VLOG_WARN("%s: accept failed (%s)",
@@ -457,8 +459,8 @@ dummy_pconn_run(struct netdev_dummy *dev)
         dev->conn.type = NONE;
     }
 
-    for (i = 0; i < pconn->n_streams; i++) {
-        struct dummy_packet_stream *s = &pconn->streams[i];
+    for (i = 0; i < pconn->n_streams; ) {
+        struct dummy_packet_stream *s = pconn->streams[i];
 
         error = dummy_packet_stream_run(dev, s);
         if (error) {
@@ -466,7 +468,10 @@ dummy_pconn_run(struct netdev_dummy *dev)
                      stream_get_name(s->stream),
                      ovs_retval_to_string(error));
             dummy_packet_stream_close(s);
+            free(s);
             pconn->streams[i] = pconn->streams[--pconn->n_streams];
+        } else {
+            i++;
         }
     }
 }
@@ -553,7 +558,7 @@ dummy_packet_conn_wait(struct dummy_packet_conn *conn)
     case PASSIVE:
         pstream_wait(conn->u.pconn.pstream);
         for (i = 0; i < conn->u.pconn.n_streams; i++) {
-            struct dummy_packet_stream *s = &conn->u.pconn.streams[i];
+            struct dummy_packet_stream *s = conn->u.pconn.streams[i];
             dummy_packet_stream_wait(s);
         }
         break;
@@ -578,7 +583,7 @@ dummy_packet_conn_send(struct dummy_packet_conn *conn,
     switch (conn->type) {
     case PASSIVE:
         for (i = 0; i < conn->u.pconn.n_streams; i++) {
-            struct dummy_packet_stream *s = &conn->u.pconn.streams[i];
+            struct dummy_packet_stream *s = conn->u.pconn.streams[i];
 
             dummy_packet_stream_send(s, buffer, size);
             pstream_wait(conn->u.pconn.pstream);
@@ -947,8 +952,7 @@ netdev_dummy_rxq_dealloc(struct netdev_rxq *rxq_)
 }
 
 static int
-netdev_dummy_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet **arr,
-                      int *c)
+netdev_dummy_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet_batch *batch)
 {
     struct netdev_rxq_dummy *rx = netdev_rxq_dummy_cast(rxq_);
     struct netdev_dummy *netdev = netdev_dummy_cast(rx->up.netdev);
@@ -991,8 +995,8 @@ netdev_dummy_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet **arr,
 
     dp_packet_pad(packet);
 
-    arr[0] = packet;
-    *c = 1;
+    batch->packets[0] = packet;
+    batch->count = 1;
     return 0;
 }
 
@@ -1030,17 +1034,17 @@ netdev_dummy_rxq_drain(struct netdev_rxq *rxq_)
 
 static int
 netdev_dummy_send(struct netdev *netdev, int qid OVS_UNUSED,
-                  struct dp_packet **pkts, int cnt, bool may_steal)
+                  struct dp_packet_batch *batch, bool may_steal)
 {
     struct netdev_dummy *dev = netdev_dummy_cast(netdev);
     int error = 0;
     int i;
 
-    for (i = 0; i < cnt; i++) {
-        const void *buffer = dp_packet_data(pkts[i]);
-        size_t size = dp_packet_size(pkts[i]);
+    for (i = 0; i < batch->count; i++) {
+        const void *buffer = dp_packet_data(batch->packets[i]);
+        size_t size = dp_packet_size(batch->packets[i]);
 
-        size -= dp_packet_get_cutlen(pkts[i]);
+        size -= dp_packet_get_cutlen(batch->packets[i]);
 
         if (size < ETH_HEADER_LEN) {
             error = EMSGSIZE;
@@ -1096,11 +1100,7 @@ netdev_dummy_send(struct netdev *netdev, int qid OVS_UNUSED,
         ovs_mutex_unlock(&dev->mutex);
     }
 
-    if (may_steal) {
-        for (i = 0; i < cnt; i++) {
-            dp_packet_delete(pkts[i]);
-        }
-    }
+    dp_packet_delete_batch(batch, may_steal);
 
     return error;
 }

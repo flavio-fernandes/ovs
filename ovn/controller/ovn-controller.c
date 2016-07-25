@@ -32,7 +32,7 @@
 #include "openvswitch/dynamic-string.h"
 #include "encaps.h"
 #include "fatal-signal.h"
-#include "hmap.h"
+#include "openvswitch/hmap.h"
 #include "lflow.h"
 #include "lib/vswitch-idl.h"
 #include "lport.h"
@@ -441,17 +441,14 @@ main(int argc, char *argv[])
             update_ct_zones(&all_lports, &patched_datapaths, &ct_zones,
                             ct_zone_bitmap);
 
-            struct hmap flow_table = HMAP_INITIALIZER(&flow_table);
             lflow_run(&ctx, &lports, &mcgroups, &local_datapaths,
-                      &patched_datapaths, &group_table, &ct_zones,
-                      &flow_table);
-            if (chassis_id) {
-                physical_run(&ctx, mff_ovn_geneve,
-                             br_int, chassis_id, &ct_zones, &flow_table,
-                             &local_datapaths, &patched_datapaths);
-            }
-            ofctrl_put(&flow_table, &group_table);
-            hmap_destroy(&flow_table);
+                      &patched_datapaths, &group_table, &ct_zones);
+
+            physical_run(&ctx, mff_ovn_geneve,
+                         br_int, chassis_id, &ct_zones,
+                         &local_datapaths, &patched_datapaths);
+
+            ofctrl_put(&group_table);
         }
 
         sset_destroy(&all_lports);

@@ -24,8 +24,8 @@
 #include "openvswitch/dynamic-string.h"
 #include "fatal-signal.h"
 #include "hash.h"
-#include "hmap.h"
-#include "json.h"
+#include "openvswitch/hmap.h"
+#include "openvswitch/json.h"
 #include "ovn/lib/lex.h"
 #include "ovn/lib/ovn-nb-idl.h"
 #include "ovn/lib/ovn-sb-idl.h"
@@ -175,6 +175,20 @@ ovn_stage_to_str(enum ovn_stage stage)
         default: return "<unknown>";
     }
 }
+
+/* Returns the type of the datapath to which a flow with the given 'stage' may
+ * be added. */
+static enum ovn_datapath_type
+ovn_stage_to_datapath_type(enum ovn_stage stage)
+{
+    switch (stage) {
+#define PIPELINE_STAGE(DP_TYPE, PIPELINE, STAGE, TABLE, NAME)       \
+        case S_##DP_TYPE##_##PIPELINE##_##STAGE: return DP_##DP_TYPE;
+    PIPELINE_STAGES
+#undef PIPELINE_STAGE
+    default: OVS_NOT_REACHED();
+    }
+}
 
 static void
 usage(void)
@@ -301,6 +315,13 @@ ovn_datapath_destroy(struct hmap *datapaths, struct ovn_datapath *od)
         free(od->router_ports);
         free(od);
     }
+}
+
+/* Returns 'od''s datapath type. */
+static enum ovn_datapath_type
+ovn_datapath_get_type(const struct ovn_datapath *od)
+{
+    return od->nbs ? DP_SWITCH : DP_ROUTER;
 }
 
 static struct ovn_datapath *
@@ -483,7 +504,7 @@ struct ovn_port {
     const struct sbrec_port_binding *sb;         /* May be NULL. */
 
     /* Logical switch port data. */
-    const struct nbrec_logical_switch_port *nbs; /* May be NULL. */
+    const struct nbrec_logical_switch_port *nbsp; /* May be NULL. */
 
     struct lport_addresses *lsp_addrs;  /* Logical switch port addresses. */
     unsigned int n_lsp_addrs;
@@ -492,10 +513,16 @@ struct ovn_port {
     unsigned int n_ps_addrs;
 
     /* Logical router port data. */
-    const struct nbrec_logical_router_port *nbr; /* May be NULL. */
+    const struct nbrec_logical_router_port *nbrp; /* May be NULL. */
 
     struct lport_addresses lrp_networks;
 
+    /* The port's peer:
+     *
+     *     - A switch port S of type "router" has a router port R as a peer,
+     *       and R in turn has S has its peer.
+     *
+     *     - Two connected logical router ports have each other as peer. */
     struct ovn_port *peer;
 
     struct ovn_datapath *od;
@@ -505,8 +532,8 @@ struct ovn_port {
 
 static struct ovn_port *
 ovn_port_create(struct hmap *ports, const char *key,
-                const struct nbrec_logical_switch_port *nbs,
-                const struct nbrec_logical_router_port *nbr,
+                const struct nbrec_logical_switch_port *nbsp,
+                const struct nbrec_logical_router_port *nbrp,
                 const struct sbrec_port_binding *sb)
 {
     struct ovn_port *op = xzalloc(sizeof *op);
@@ -517,8 +544,8 @@ ovn_port_create(struct hmap *ports, const char *key,
 
     op->key = xstrdup(key);
     op->sb = sb;
-    op->nbs = nbs;
-    op->nbr = nbr;
+    op->nbsp = nbsp;
+    op->nbrp = nbrp;
     hmap_insert(ports, &op->key_node, hash_string(op->key, 0));
     return op;
 }
@@ -591,17 +618,18 @@ join_logical_ports(struct northd_context *ctx,
     HMAP_FOR_EACH (od, key_node, datapaths) {
         if (od->nbs) {
             for (size_t i = 0; i < od->nbs->n_ports; i++) {
-                const struct nbrec_logical_switch_port *nbs = od->nbs->ports[i];
-                struct ovn_port *op = ovn_port_find(ports, nbs->name);
+                const struct nbrec_logical_switch_port *nbsp
+                    = od->nbs->ports[i];
+                struct ovn_port *op = ovn_port_find(ports, nbsp->name);
                 if (op) {
-                    if (op->nbs || op->nbr) {
+                    if (op->nbsp || op->nbrp) {
                         static struct vlog_rate_limit rl
                             = VLOG_RATE_LIMIT_INIT(5, 1);
                         VLOG_WARN_RL(&rl, "duplicate logical port %s",
-                                     nbs->name);
+                                     nbsp->name);
                         continue;
                     }
-                    op->nbs = nbs;
+                    op->nbsp = nbsp;
                     ovs_list_remove(&op->list);
                     ovs_list_push_back(both, &op->list);
 
@@ -609,39 +637,39 @@ join_logical_ports(struct northd_context *ctx,
                      * not have been initialized fully. */
                     ovs_assert(!op->n_lsp_addrs && !op->n_ps_addrs);
                 } else {
-                    op = ovn_port_create(ports, nbs->name, nbs, NULL, NULL);
+                    op = ovn_port_create(ports, nbsp->name, nbsp, NULL, NULL);
                     ovs_list_push_back(nb_only, &op->list);
                 }
 
                 op->lsp_addrs
-                    = xmalloc(sizeof *op->lsp_addrs * nbs->n_addresses);
-                for (size_t j = 0; j < nbs->n_addresses; j++) {
-                    if (!strcmp(nbs->addresses[j], "unknown")) {
+                    = xmalloc(sizeof *op->lsp_addrs * nbsp->n_addresses);
+                for (size_t j = 0; j < nbsp->n_addresses; j++) {
+                    if (!strcmp(nbsp->addresses[j], "unknown")) {
                         continue;
                     }
-                    if (!extract_lsp_addresses(nbs->addresses[j],
+                    if (!extract_lsp_addresses(nbsp->addresses[j],
                                            &op->lsp_addrs[op->n_lsp_addrs])) {
                         static struct vlog_rate_limit rl
                             = VLOG_RATE_LIMIT_INIT(1, 1);
                         VLOG_INFO_RL(&rl, "invalid syntax '%s' in logical "
                                           "switch port addresses. No MAC "
                                           "address found",
-                                          op->nbs->addresses[j]);
+                                          op->nbsp->addresses[j]);
                         continue;
                     }
                     op->n_lsp_addrs++;
                 }
 
                 op->ps_addrs
-                    = xmalloc(sizeof *op->ps_addrs * nbs->n_port_security);
-                for (size_t j = 0; j < nbs->n_port_security; j++) {
-                    if (!extract_lsp_addresses(nbs->port_security[j],
+                    = xmalloc(sizeof *op->ps_addrs * nbsp->n_port_security);
+                for (size_t j = 0; j < nbsp->n_port_security; j++) {
+                    if (!extract_lsp_addresses(nbsp->port_security[j],
                                                &op->ps_addrs[op->n_ps_addrs])) {
                         static struct vlog_rate_limit rl
                             = VLOG_RATE_LIMIT_INIT(1, 1);
                         VLOG_INFO_RL(&rl, "invalid syntax '%s' in port "
                                           "security. No MAC address found",
-                                          op->nbs->port_security[j]);
+                                          op->nbsp->port_security[j]);
                         continue;
                     }
                     op->n_ps_addrs++;
@@ -651,13 +679,14 @@ join_logical_ports(struct northd_context *ctx,
             }
         } else {
             for (size_t i = 0; i < od->nbr->n_ports; i++) {
-                const struct nbrec_logical_router_port *nbr = od->nbr->ports[i];
+                const struct nbrec_logical_router_port *nbrp
+                    = od->nbr->ports[i];
 
                 struct lport_addresses lrp_networks;
-                if (!extract_lrp_networks(nbr, &lrp_networks)) {
+                if (!extract_lrp_networks(nbrp, &lrp_networks)) {
                     static struct vlog_rate_limit rl
                         = VLOG_RATE_LIMIT_INIT(5, 1);
-                    VLOG_WARN_RL(&rl, "bad 'mac' %s", nbr->mac);
+                    VLOG_WARN_RL(&rl, "bad 'mac' %s", nbrp->mac);
                     continue;
                 }
 
@@ -665,16 +694,16 @@ join_logical_ports(struct northd_context *ctx,
                     continue;
                 }
 
-                struct ovn_port *op = ovn_port_find(ports, nbr->name);
+                struct ovn_port *op = ovn_port_find(ports, nbrp->name);
                 if (op) {
-                    if (op->nbs || op->nbr) {
+                    if (op->nbsp || op->nbrp) {
                         static struct vlog_rate_limit rl
                             = VLOG_RATE_LIMIT_INIT(5, 1);
                         VLOG_WARN_RL(&rl, "duplicate logical router port %s",
-                                     nbr->name);
+                                     nbrp->name);
                         continue;
                     }
-                    op->nbr = nbr;
+                    op->nbrp = nbrp;
                     ovs_list_remove(&op->list);
                     ovs_list_push_back(both, &op->list);
 
@@ -683,7 +712,7 @@ join_logical_ports(struct northd_context *ctx,
                     ovs_assert(!op->lrp_networks.n_ipv4_addrs
                                && !op->lrp_networks.n_ipv6_addrs);
                 } else {
-                    op = ovn_port_create(ports, nbr->name, NULL, nbr, NULL);
+                    op = ovn_port_create(ports, nbrp->name, NULL, nbrp, NULL);
                     ovs_list_push_back(nb_only, &op->list);
                 }
 
@@ -697,14 +726,14 @@ join_logical_ports(struct northd_context *ctx,
      * to their peers. */
     struct ovn_port *op;
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (op->nbs && !strcmp(op->nbs->type, "router")) {
-            const char *peer_name = smap_get(&op->nbs->options, "router-port");
+        if (op->nbsp && !strcmp(op->nbsp->type, "router")) {
+            const char *peer_name = smap_get(&op->nbsp->options, "router-port");
             if (!peer_name) {
                 continue;
             }
 
             struct ovn_port *peer = ovn_port_find(ports, peer_name);
-            if (!peer || !peer->nbr) {
+            if (!peer || !peer->nbrp) {
                 continue;
             }
 
@@ -714,8 +743,23 @@ join_logical_ports(struct northd_context *ctx,
                 op->od->router_ports,
                 sizeof *op->od->router_ports * (op->od->n_router_ports + 1));
             op->od->router_ports[op->od->n_router_ports++] = op;
-        } else if (op->nbr && op->nbr->peer) {
-            op->peer = ovn_port_find(ports, op->nbr->peer);
+        } else if (op->nbrp && op->nbrp->peer) {
+            struct ovn_port *peer = ovn_port_find(ports, op->nbrp->peer);
+            if (peer) {
+                if (peer->nbrp) {
+                    op->peer = peer;
+                } else {
+                    /* An ovn_port for a switch port of type "router" does have
+                     * a router port as its peer (see the case above for
+                     * "router" ports), but this is set via options:router-port
+                     * in Logical_Switch_Port and does not involve the
+                     * Logical_Router_Port's 'peer' column. */
+                    static struct vlog_rate_limit rl =
+                            VLOG_RATE_LIMIT_INIT(5, 1);
+                    VLOG_WARN_RL(&rl, "Bad configuration: The peer of router "
+                                 "port %s is a switch port", op->key);
+                }
+            }
         }
     }
 }
@@ -724,7 +768,7 @@ static void
 ovn_port_update_sbrec(const struct ovn_port *op)
 {
     sbrec_port_binding_set_datapath(op->sb, op->od->sb);
-    if (op->nbr) {
+    if (op->nbrp) {
         /* If the router is for l3 gateway, it resides on a chassis
          * and its port type is "gateway". */
         const char *chassis = smap_get(&op->od->nbr->options, "chassis");
@@ -748,9 +792,9 @@ ovn_port_update_sbrec(const struct ovn_port *op)
         sbrec_port_binding_set_tag(op->sb, NULL, 0);
         sbrec_port_binding_set_mac(op->sb, NULL, 0);
     } else {
-        if (strcmp(op->nbs->type, "router")) {
-            sbrec_port_binding_set_type(op->sb, op->nbs->type);
-            sbrec_port_binding_set_options(op->sb, &op->nbs->options);
+        if (strcmp(op->nbsp->type, "router")) {
+            sbrec_port_binding_set_type(op->sb, op->nbsp->type);
+            sbrec_port_binding_set_options(op->sb, &op->nbsp->options);
         } else {
             const char *chassis = NULL;
             if (op->peer && op->peer->od && op->peer->od->nbr) {
@@ -765,7 +809,7 @@ ovn_port_update_sbrec(const struct ovn_port *op)
                 sbrec_port_binding_set_type(op->sb, "patch");
             }
 
-            const char *router_port = smap_get(&op->nbs->options,
+            const char *router_port = smap_get(&op->nbsp->options,
                                                "router-port");
             if (!router_port) {
                 router_port = "<error>";
@@ -779,10 +823,10 @@ ovn_port_update_sbrec(const struct ovn_port *op)
             sbrec_port_binding_set_options(op->sb, &new);
             smap_destroy(&new);
         }
-        sbrec_port_binding_set_parent_port(op->sb, op->nbs->parent_name);
-        sbrec_port_binding_set_tag(op->sb, op->nbs->tag, op->nbs->n_tag);
-        sbrec_port_binding_set_mac(op->sb, (const char **) op->nbs->addresses,
-                                   op->nbs->n_addresses);
+        sbrec_port_binding_set_parent_port(op->sb, op->nbsp->parent_name);
+        sbrec_port_binding_set_tag(op->sb, op->nbsp->tag, op->nbsp->n_tag);
+        sbrec_port_binding_set_mac(op->sb, (const char **) op->nbsp->addresses,
+                                   op->nbsp->n_addresses);
     }
 }
 
@@ -985,6 +1029,8 @@ ovn_lflow_add(struct hmap *lflow_map, struct ovn_datapath *od,
               enum ovn_stage stage, uint16_t priority,
               const char *match, const char *actions)
 {
+    ovs_assert(ovn_stage_to_datapath_type(stage) == ovn_datapath_get_type(od));
+
     struct ovn_lflow *lflow = xmalloc(sizeof *lflow);
     ovn_lflow_init(lflow, od, stage, priority,
                    xstrdup(match), xstrdup(actions));
@@ -1354,7 +1400,7 @@ build_pre_acls(struct ovn_datapath *od, struct hmap *lflows,
      * defragmentation, in order to match L4 headers. */
     if (has_stateful) {
         HMAP_FOR_EACH (op, key_node, ports) {
-            if (op->od == od && !strcmp(op->nbs->type, "router")) {
+            if (op->od == od && !strcmp(op->nbsp->type, "router")) {
                 /* Can't use ct() for router ports. Consider the
                  * following configuration: lp1(10.0.0.2) on
                  * hostA--ls1--lr0--ls2--lp2(10.0.1.2) on hostB, For a
@@ -1538,48 +1584,77 @@ build_acls(struct ovn_datapath *od, struct hmap *lflows)
          * commit IP flows.  This is because, while the initiater's
          * direction may not have any stateful rules, the server's may
          * and then its return traffic would not have an associated
-         * conntrack entry and would return "+invalid". */
-        ovn_lflow_add(lflows, od, S_SWITCH_IN_ACL, 1, "ip",
-                      REGBIT_CONNTRACK_COMMIT" = 1; next;");
-        ovn_lflow_add(lflows, od, S_SWITCH_OUT_ACL, 1, "ip",
-                      REGBIT_CONNTRACK_COMMIT" = 1; next;");
+         * conntrack entry and would return "+invalid".
+         *
+         * We use "ct_commit" for a connection that is not already known
+         * by the connection tracker.  Once a connection is committed,
+         * subsequent packets will hit the flow at priority 0 that just
+         * uses "next;"
+         *
+         * We also check for established connections that have ct_label[0]
+         * set on them.  That's a connection that was disallowed, but is
+         * now allowed by policy again since it hit this default-allow flow.
+         * We need to set ct_label[0]=0 to let the connection continue,
+         * which will be done by ct_commit() in the "stateful" stage.
+         * Subsequent packets will hit the flow at priority 0 that just
+         * uses "next;". */
+        ovn_lflow_add(lflows, od, S_SWITCH_IN_ACL, 1,
+                      "ip && (!ct.est || (ct.est && ct_label[0] == 1))",
+                       REGBIT_CONNTRACK_COMMIT" = 1; next;");
+        ovn_lflow_add(lflows, od, S_SWITCH_OUT_ACL, 1,
+                      "ip && (!ct.est || (ct.est && ct_label[0] == 1))",
+                       REGBIT_CONNTRACK_COMMIT" = 1; next;");
 
         /* Ingress and Egress ACL Table (Priority 65535).
          *
-         * Always drop traffic that's in an invalid state.  This is
-         * enforced at a higher priority than ACLs can be defined. */
+         * Always drop traffic that's in an invalid state.  Also drop
+         * reply direction packets for connections that have been marked
+         * for deletion (bit 0 of ct_label is set).
+         *
+         * This is enforced at a higher priority than ACLs can be defined. */
         ovn_lflow_add(lflows, od, S_SWITCH_IN_ACL, UINT16_MAX,
-                      "ct.inv", "drop;");
+                      "ct.inv || (ct.est && ct.rpl && ct_label[0] == 1)",
+                      "drop;");
         ovn_lflow_add(lflows, od, S_SWITCH_OUT_ACL, UINT16_MAX,
-                      "ct.inv", "drop;");
+                      "ct.inv || (ct.est && ct.rpl && ct_label[0] == 1)",
+                      "drop;");
 
         /* Ingress and Egress ACL Table (Priority 65535).
          *
-         * Always allow traffic that is established to a committed
-         * conntrack entry.  This is enforced at a higher priority than
-         * ACLs can be defined. */
+         * Allow reply traffic that is part of an established
+         * conntrack entry that has not been marked for deletion
+         * (bit 0 of ct_label).  We only match traffic in the
+         * reply direction because we want traffic in the request
+         * direction to hit the currently defined policy from ACLs.
+         *
+         * This is enforced at a higher priority than ACLs can be defined. */
         ovn_lflow_add(lflows, od, S_SWITCH_IN_ACL, UINT16_MAX,
-                      "ct.est && !ct.rel && !ct.new && !ct.inv",
+                      "ct.est && !ct.rel && !ct.new && !ct.inv "
+                      "&& ct.rpl && ct_label[0] == 0",
                       "next;");
         ovn_lflow_add(lflows, od, S_SWITCH_OUT_ACL, UINT16_MAX,
-                      "ct.est && !ct.rel && !ct.new && !ct.inv",
+                      "ct.est && !ct.rel && !ct.new && !ct.inv "
+                      "&& ct.rpl && ct_label[0] == 0",
                       "next;");
 
         /* Ingress and Egress ACL Table (Priority 65535).
          *
-         * Always allow traffic that is related to an existing conntrack
-         * entry.  This is enforced at a higher priority than ACLs can
-         * be defined.
+         * Allow traffic that is related to an existing conntrack entry that
+         * has not been marked for deletion (bit 0 of ct_label).
+         *
+         * This is enforced at a higher priority than ACLs can be defined.
          *
          * NOTE: This does not support related data sessions (eg,
          * a dynamically negotiated FTP data channel), but will allow
          * related traffic such as an ICMP Port Unreachable through
          * that's generated from a non-listening UDP port.  */
         ovn_lflow_add(lflows, od, S_SWITCH_IN_ACL, UINT16_MAX,
-                      "!ct.est && ct.rel && !ct.new && !ct.inv",
+                      "!ct.est && ct.rel && !ct.new && !ct.inv "
+                      "&& ct_label[0] == 0",
                       "next;");
         ovn_lflow_add(lflows, od, S_SWITCH_OUT_ACL, UINT16_MAX,
-                      "!ct.est && ct.rel && !ct.new && !ct.inv",
+                      "!ct.est && ct.rel && !ct.new && !ct.inv "
+                      "&& ct_label[0] == 0",
                       "next;");
 
         /* Ingress and Egress ACL Table (Priority 65535).
@@ -1595,41 +1670,108 @@ build_acls(struct ovn_datapath *od, struct hmap *lflows)
         bool ingress = !strcmp(acl->direction, "from-lport") ? true :false;
         enum ovn_stage stage = ingress ? S_SWITCH_IN_ACL : S_SWITCH_OUT_ACL;
 
-        if (!strcmp(acl->action, "allow")) {
+        if (!strcmp(acl->action, "allow")
+            || !strcmp(acl->action, "allow-related")) {
             /* If there are any stateful flows, we must even commit "allow"
              * actions.  This is because, while the initiater's
              * direction may not have any stateful rules, the server's
              * may and then its return traffic would not have an
              * associated conntrack entry and would return "+invalid". */
-            const char *actions = has_stateful
-                                    ? REGBIT_CONNTRACK_COMMIT" = 1; next;"
-                                    : "next;";
-            ovn_lflow_add(lflows, od, stage,
-                          acl->priority + OVN_ACL_PRI_OFFSET,
-                          acl->match, actions);
-        } else if (!strcmp(acl->action, "allow-related")) {
+            if (!has_stateful) {
+                ovn_lflow_add(lflows, od, stage,
+                              acl->priority + OVN_ACL_PRI_OFFSET,
+                              acl->match, "next;");
+            } else {
+                struct ds match = DS_EMPTY_INITIALIZER;
+
+                /* Commit the connection tracking entry if it's a new
+                 * connection that matches this ACL.  After this commit,
+                 * the reply traffic is allowed by a flow we create at
+                 * priority 65535, defined earlier.
+                 *
+                 * It's also possible that a known connection was marked for
+                 * deletion after a policy was deleted, but the policy was
+                 * re-added while that connection is still known.  We catch
+                 * that case here and un-set ct_label[0] (which will be done
+                 * by ct_commit in the "stateful" stage) to indicate that the
+                 * connection should be allowed to resume.
+                 */
+                ds_put_format(&match, "((ct.new && !ct.est)"
+                                      " || (!ct.new && ct.est && !ct.rpl "
+                                           "&& ct_label[0] == 1)) "
+                                      "&& (%s)", acl->match);
+                ovn_lflow_add(lflows, od, stage,
+                              acl->priority + OVN_ACL_PRI_OFFSET,
+                              ds_cstr(&match),
+                               REGBIT_CONNTRACK_COMMIT" = 1; next;");
+
+                /* Match on traffic in the request direction for an established
+                 * connection tracking entry that has not been marked for
+                 * deletion.  There is no need to commit here, so we can just
+                 * proceed to the next table. We use this to ensure that this
+                 * connection is still allowed by the currently defined
+                 * policy. */
+                ds_clear(&match);
+                ds_put_format(&match,
+                              "!ct.new && ct.est && !ct.rpl"
+                              " && ct_label[0] == 0 && (%s)",
+                              acl->match);
+                ovn_lflow_add(lflows, od, stage,
+                              acl->priority + OVN_ACL_PRI_OFFSET,
+                              ds_cstr(&match), "next;");
+
+                ds_destroy(&match);
+            }
+        } else if (!strcmp(acl->action, "drop")
+                   || !strcmp(acl->action, "reject")) {
             struct ds match = DS_EMPTY_INITIALIZER;
 
-            /* Commit the connection tracking entry, which allows all
-             * other traffic related to this entry to flow due to the
-             * 65535 priority flow defined earlier. */
-            ds_put_format(&match, "ct.new && (%s)", acl->match);
-            ovn_lflow_add(lflows, od, stage,
-                          acl->priority + OVN_ACL_PRI_OFFSET,
-                          ds_cstr(&match),
-                          REGBIT_CONNTRACK_COMMIT" = 1; next;");
+            /* XXX Need to support "reject", treat it as "drop;" for now. */
+            if (!strcmp(acl->action, "reject")) {
+                VLOG_INFO("reject is not a supported action");
+            }
 
-            ds_destroy(&match);
-        } else if (!strcmp(acl->action, "drop")) {
-            ovn_lflow_add(lflows, od, stage,
-                          acl->priority + OVN_ACL_PRI_OFFSET,
-                          acl->match, "drop;");
-        } else if (!strcmp(acl->action, "reject")) {
-            /* xxx Need to support "reject". */
-            VLOG_INFO("reject is not a supported action");
-            ovn_lflow_add(lflows, od, stage,
-                          acl->priority + OVN_ACL_PRI_OFFSET,
-                          acl->match, "drop;");
+            /* The implementation of "drop" differs if stateful ACLs are in
+             * use for this datapath.  In that case, the actions differ
+             * depending on whether the connection was previously committed
+             * to the connection tracker with ct_commit. */
+            if (has_stateful) {
+                /* If the packet is not part of an established connection, then
+                 * we can simply drop it. */
+                ds_put_format(&match,
+                              "(!ct.est || (ct.est && ct_label[0] == 1)) "
+                              "&& (%s)",
+                              acl->match);
+                ovn_lflow_add(lflows, od, stage, acl->priority +
+                        OVN_ACL_PRI_OFFSET, ds_cstr(&match), "drop;");
+
+                /* For an existing connection without ct_label set, we've
+                 * encountered a policy change. ACLs previously allowed
+                 * this connection and we committed the connection tracking
+                 * entry.  Current policy says that we should drop this
+                 * connection.  First, we set bit 0 of ct_label to indicate
+                 * that this connection is set for deletion.  By not
+                 * specifying "next;", we implicitly drop the packet after
+                 * updating conntrack state.  We would normally defer
+                 * ct_commit() to the "stateful" stage, but since we're
+                 * dropping the packet, we go ahead and do it here. */
+                ds_clear(&match);
+                ds_put_format(&match,
+                              "ct.est && ct_label[0] == 0 && (%s)",
+                              acl->match);
+                ovn_lflow_add(lflows, od, stage,
+                              acl->priority + OVN_ACL_PRI_OFFSET,
+                              ds_cstr(&match), "ct_commit(ct_label=1/1);");
+
+                ds_destroy(&match);
+            } else {
+                /* There are no stateful ACLs in use on this datapath,
+                 * so a "drop" ACL is simply the "drop" logical flow action
+                 * in all cases. */
+                ovn_lflow_add(lflows, od, stage,
+                              acl->priority + OVN_ACL_PRI_OFFSET,
+                              acl->match, "drop;");
+            }
         }
     }
 }
@@ -1664,11 +1806,13 @@ build_stateful(struct ovn_datapath *od, struct hmap *lflows)
     ovn_lflow_add(lflows, od, S_SWITCH_OUT_STATEFUL, 0, "1", "next;");
 
     /* If REGBIT_CONNTRACK_COMMIT is set as 1, then the packets should be
-     * committed to conntrack. */
+     * committed to conntrack. We always set ct_label[0] to 0 here as
+     * any packet that makes it this far is part of a connection we
+     * want to allow to continue. */
     ovn_lflow_add(lflows, od, S_SWITCH_IN_STATEFUL, 100,
-                  REGBIT_CONNTRACK_COMMIT" == 1", "ct_commit; next;");
+                  REGBIT_CONNTRACK_COMMIT" == 1", "ct_commit(ct_label=0/1); next;");
     ovn_lflow_add(lflows, od, S_SWITCH_OUT_STATEFUL, 100,
-                  REGBIT_CONNTRACK_COMMIT" == 1", "ct_commit; next;");
+                  REGBIT_CONNTRACK_COMMIT" == 1", "ct_commit(ct_label=0/1); next;");
 
     /* If REGBIT_CONNTRACK_NAT is set as 1, then packets should just be sent
      * through nat (without committing).
@@ -1777,11 +1921,11 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
      */
     struct ovn_port *op;
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (!op->nbs) {
+        if (!op->nbsp) {
             continue;
         }
 
-        if (!lsp_is_enabled(op->nbs)) {
+        if (!lsp_is_enabled(op->nbsp)) {
             /* Drop packets from disabled logical ports (since logical flow
              * tables are default-drop). */
             continue;
@@ -1794,7 +1938,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
         ovn_lflow_add(lflows, op->od, S_SWITCH_IN_PORT_SEC_L2, 50,
                       ds_cstr(&match), "next;");
 
-        if (op->nbs->n_port_security) {
+        if (op->nbsp->n_port_security) {
             build_port_security_ip(P_IN, op, lflows);
             build_port_security_nd(op, lflows);
         }
@@ -1814,11 +1958,11 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
     /* Ingress table 9: ARP responder, skip requests coming from localnet ports.
      * (priority 100). */
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (!op->nbs) {
+        if (!op->nbsp) {
             continue;
         }
 
-        if (!strcmp(op->nbs->type, "localnet")) {
+        if (!strcmp(op->nbsp->type, "localnet")) {
             ds_clear(&match);
             ds_put_format(&match, "inport == %s", op->json_key);
             ovn_lflow_add(lflows, op->od, S_SWITCH_IN_ARP_ND_RSP, 100,
@@ -1829,7 +1973,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
     /* Ingress table 9: ARP/ND responder, reply for known IPs.
      * (priority 50). */
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (!op->nbs) {
+        if (!op->nbsp) {
             continue;
         }
 
@@ -1838,7 +1982,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
          *  - port is up or
          *  - port type is router
          */
-        if (!lsp_is_up(op->nbs) && strcmp(op->nbs->type, "router")) {
+        if (!lsp_is_up(op->nbsp) && strcmp(op->nbsp->type, "router")) {
             continue;
         }
 
@@ -1911,11 +2055,11 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
     /* Ingress table 10: Destination lookup, broadcast and multicast handling
      * (priority 100). */
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (!op->nbs) {
+        if (!op->nbsp) {
             continue;
         }
 
-        if (lsp_is_enabled(op->nbs)) {
+        if (lsp_is_enabled(op->nbsp)) {
             ovn_multicast_add(mcgroups, &mc_flood, op);
         }
     }
@@ -1930,14 +2074,14 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
 
     /* Ingress table 10: Destination lookup, unicast handling (priority 50), */
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (!op->nbs) {
+        if (!op->nbsp) {
             continue;
         }
 
-        for (size_t i = 0; i < op->nbs->n_addresses; i++) {
+        for (size_t i = 0; i < op->nbsp->n_addresses; i++) {
             struct eth_addr mac;
 
-            if (eth_addr_from_string(op->nbs->addresses[i], &mac)) {
+            if (eth_addr_from_string(op->nbsp->addresses[i], &mac)) {
                 ds_clear(&match);
                 ds_put_format(&match, "eth.dst == "ETH_ADDR_FMT,
                               ETH_ADDR_ARGS(mac));
@@ -1946,8 +2090,8 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                 ds_put_format(&actions, "outport = %s; output;", op->json_key);
                 ovn_lflow_add(lflows, op->od, S_SWITCH_IN_L2_LKUP, 50,
                               ds_cstr(&match), ds_cstr(&actions));
-            } else if (!strcmp(op->nbs->addresses[i], "unknown")) {
-                if (lsp_is_enabled(op->nbs)) {
+            } else if (!strcmp(op->nbsp->addresses[i], "unknown")) {
+                if (lsp_is_enabled(op->nbsp)) {
                     ovn_multicast_add(mcgroups, &mc_unknown, op);
                     op->od->has_unknown = true;
                 }
@@ -1956,7 +2100,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
 
                 VLOG_INFO_RL(&rl,
                              "%s: invalid syntax '%s' in addresses column",
-                             op->nbs->name, op->nbs->addresses[i]);
+                             op->nbsp->name, op->nbsp->addresses[i]);
             }
         }
     }
@@ -1996,13 +2140,13 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
      * Priority 150 rules drop packets to disabled logical ports, so that they
      * don't even receive multicast or broadcast packets. */
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (!op->nbs) {
+        if (!op->nbsp) {
             continue;
         }
 
         ds_clear(&match);
         ds_put_format(&match, "outport == %s", op->json_key);
-        if (lsp_is_enabled(op->nbs)) {
+        if (lsp_is_enabled(op->nbsp)) {
             build_port_security_l2("eth.dst", op->ps_addrs, op->n_ps_addrs,
                                    &match);
             ovn_lflow_add(lflows, op->od, S_SWITCH_OUT_PORT_SEC_L2, 50,
@@ -2012,7 +2156,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                           ds_cstr(&match), "drop;");
         }
 
-        if (op->nbs->n_port_security) {
+        if (op->nbsp->n_port_security) {
             build_port_security_ip(P_OUT, op, lflows);
         }
     }
@@ -2206,11 +2350,11 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
     /* Logical router ingress table 0: match (priority 50). */
     struct ovn_port *op;
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (!op->nbr) {
+        if (!op->nbrp) {
             continue;
         }
 
-        if (!lrport_is_enabled(op->nbr)) {
+        if (!lrport_is_enabled(op->nbrp)) {
             /* Drop packets from disabled logical ports (since logical flow
              * tables are default-drop). */
             continue;
@@ -2265,7 +2409,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
     }
 
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (!op->nbr) {
+        if (!op->nbrp) {
             continue;
         }
 
@@ -2556,7 +2700,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
      * next-hop IP address (leaving ip4.dst, the packet’s final destination,
      * unchanged), and advances to the next table for ARP resolution. */
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (!op->nbr) {
+        if (!op->nbrp) {
             continue;
         }
 
@@ -2589,7 +2733,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
      * resolves the IP address in reg0 into an output port in outport and an
      * Ethernet address in eth.dst. */
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (op->nbr) {
+        if (op->nbrp) {
             /* This is a logical router port. If next-hop IP address in 'reg0'
              * matches ip address of this router port, then the packet is
              * intended to eventually be sent to this logical port. Set the
@@ -2597,24 +2741,19 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
              *
              * The packet is still in peer's logical pipeline. So the match
              * should be on peer's outport. */
-            if (op->nbr->peer) {
-                struct ovn_port *peer = ovn_port_find(ports, op->nbr->peer);
-                if (!peer) {
-                    continue;
-                }
-
+            if (op->peer && op->peer->nbrp) {
                 ds_clear(&match);
                 ds_put_format(&match, "outport == %s && reg0 == ",
-                              peer->json_key);
+                              op->peer->json_key);
                 op_put_networks(&match, op, false);
 
                 ds_clear(&actions);
                 ds_put_format(&actions, "eth.dst = %s; next;",
                               op->lrp_networks.ea_s);
-                ovn_lflow_add(lflows, peer->od, S_ROUTER_IN_ARP_RESOLVE,
+                ovn_lflow_add(lflows, op->peer->od, S_ROUTER_IN_ARP_RESOLVE,
                               100, ds_cstr(&match), ds_cstr(&actions));
             }
-        } else if (op->od->n_router_ports && strcmp(op->nbs->type, "router")) {
+        } else if (op->od->n_router_ports && strcmp(op->nbsp->type, "router")) {
             /* This is a logical switch port that backs a VM or a container.
              * Extract its addresses. For each of the address, go through all
              * the router ports attached to the switch (to which this port
@@ -2630,14 +2769,14 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                          * Logical_Switch_Port is connected to, as
                          * 'peer'. */
                         const char *peer_name = smap_get(
-                            &op->od->router_ports[k]->nbs->options,
+                            &op->od->router_ports[k]->nbsp->options,
                             "router-port");
                         if (!peer_name) {
                             continue;
                         }
 
                         struct ovn_port *peer = ovn_port_find(ports, peer_name);
-                        if (!peer || !peer->nbr) {
+                        if (!peer || !peer->nbrp) {
                             continue;
                         }
 
@@ -2657,7 +2796,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                     }
                 }
             }
-        } else if (!strcmp(op->nbs->type, "router")) {
+        } else if (!strcmp(op->nbsp->type, "router")) {
             /* This is a logical switch port that connects to a router. */
 
             /* The peer of this switch port is the router port for which
@@ -2665,24 +2804,24 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
              * ARP entries for all the other router ports connected to
              * the switch in question. */
 
-            const char *peer_name = smap_get(&op->nbs->options,
+            const char *peer_name = smap_get(&op->nbsp->options,
                                              "router-port");
             if (!peer_name) {
                 continue;
             }
 
             struct ovn_port *peer = ovn_port_find(ports, peer_name);
-            if (!peer || !peer->nbr) {
+            if (!peer || !peer->nbrp) {
                 continue;
             }
 
             for (size_t i = 0; i < op->od->n_router_ports; i++) {
                 const char *router_port_name = smap_get(
-                                    &op->od->router_ports[i]->nbs->options,
+                                    &op->od->router_ports[i]->nbsp->options,
                                     "router-port");
                 struct ovn_port *router_port = ovn_port_find(ports,
                                                              router_port_name);
-                if (!router_port || !router_port->nbr) {
+                if (!router_port || !router_port->nbrp) {
                     continue;
                 }
 
@@ -2739,11 +2878,11 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
      *
      * Priority 100 rules deliver packets to enabled logical ports. */
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (!op->nbr) {
+        if (!op->nbrp) {
             continue;
         }
 
-        if (!lrport_is_enabled(op->nbr)) {
+        if (!lrport_is_enabled(op->nbrp)) {
             /* Drop packets to disabled logical ports (since logical flow
              * tables are default-drop). */
             continue;
@@ -2923,45 +3062,45 @@ ovnsb_db_run(struct northd_context *ctx)
     }
     struct hmap lports_hmap;
     const struct sbrec_port_binding *sb;
-    const struct nbrec_logical_switch_port *nb;
+    const struct nbrec_logical_switch_port *nbsp;
 
     struct lport_hash_node {
         struct hmap_node node;
-        const struct nbrec_logical_switch_port *nb;
+        const struct nbrec_logical_switch_port *nbsp;
     } *hash_node;
 
     hmap_init(&lports_hmap);
 
-    NBREC_LOGICAL_SWITCH_PORT_FOR_EACH(nb, ctx->ovnnb_idl) {
+    NBREC_LOGICAL_SWITCH_PORT_FOR_EACH(nbsp, ctx->ovnnb_idl) {
         hash_node = xzalloc(sizeof *hash_node);
-        hash_node->nb = nb;
-        hmap_insert(&lports_hmap, &hash_node->node, hash_string(nb->name, 0));
+        hash_node->nbsp = nbsp;
+        hmap_insert(&lports_hmap, &hash_node->node, hash_string(nbsp->name, 0));
     }
 
     SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
-        nb = NULL;
+        nbsp = NULL;
         HMAP_FOR_EACH_WITH_HASH(hash_node, node,
                                 hash_string(sb->logical_port, 0),
                                 &lports_hmap) {
-            if (!strcmp(sb->logical_port, hash_node->nb->name)) {
-                nb = hash_node->nb;
+            if (!strcmp(sb->logical_port, hash_node->nbsp->name)) {
+                nbsp = hash_node->nbsp;
                 break;
             }
         }
 
-        if (!nb) {
+        if (!nbsp) {
             /* The logical port doesn't exist for this port binding.  This can
              * happen under normal circumstances when ovn-northd hasn't gotten
              * around to pruning the Port_Binding yet. */
             continue;
         }
 
-        if (sb->chassis && (!nb->up || !*nb->up)) {
+        if (sb->chassis && (!nbsp->up || !*nbsp->up)) {
             bool up = true;
-            nbrec_logical_switch_port_set_up(nb, &up, 1);
-        } else if (!sb->chassis && (!nb->up || *nb->up)) {
+            nbrec_logical_switch_port_set_up(nbsp, &up, 1);
+        } else if (!sb->chassis && (!nbsp->up || *nbsp->up)) {
             bool up = false;
-            nbrec_logical_switch_port_set_up(nb, &up, 1);
+            nbrec_logical_switch_port_set_up(nbsp, &up, 1);
         }
     }
 

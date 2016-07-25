@@ -17,6 +17,7 @@
 #include "encaps.h"
 #include "binding.h"
 #include "lflow.h"
+#include "lport.h"
 
 #include "lib/hash.h"
 #include "lib/sset.h"
@@ -102,6 +103,10 @@ port_hash_rec(const struct ovsrec_port *port)
 
     iface = port->interfaces[0];
     ip = smap_get(&iface->options, "remote_ip");
+    if (!ip) {
+        /* This should not happen for an OVN-created port. */
+        return 0;
+    }
 
     return port_hash(chassis_id, iface->type, ip);
 }
@@ -237,6 +242,9 @@ tunnel_add(const struct sbrec_chassis *chassis_rec,
     free(port_name);
     free(ports);
     binding_reset_processing();
+    lport_index_reset();
+    mcgroup_index_reset();
+    lflow_reset_processing();
     process_full_encaps = true;
 }
 
@@ -310,7 +318,8 @@ check_and_update_tunnel(const struct sbrec_chassis *chassis_rec)
         if (strcmp(encap->type, iface->type)) {
             ovsrec_interface_set_type(iface, encap->type);
         }
-        if (strcmp(encap->ip, smap_get(&iface->options, "remote_ip"))) {
+        const char *ip = smap_get(&iface->options, "remote_ip");
+        if (!ip || strcmp(encap->ip, ip)) {
             struct smap options = SMAP_INITIALIZER(&options);
             smap_add(&options, "remote_ip", encap->ip);
             smap_add(&options, "key", "flow");
@@ -318,8 +327,8 @@ check_and_update_tunnel(const struct sbrec_chassis *chassis_rec)
             smap_destroy(&options);
         }
 
-        if (strcmp(chassis_rec->name, smap_get(&port->external_ids,
-                                               "ovn-chassis-id"))) {
+        const char *chassis = smap_get(&port->external_ids, "ovn-chassis-id");
+        if (!chassis || strcmp(chassis_rec->name, chassis)) {
             const struct smap id = SMAP_CONST1(&id, "ovn-chassis-id",
                                                chassis_rec->name);
             ovsrec_port_set_external_ids(port, &id);
@@ -421,6 +430,7 @@ encaps_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int,
                                 &port_hash->uuid_node);
                     free(port_hash);
                     binding_reset_processing();
+                    lflow_reset_processing();
                 }
             } else if (sbrec_chassis_is_new(chassis_rec)) {
                 check_and_add_tunnel(chassis_rec, chassis_id);

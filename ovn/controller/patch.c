@@ -18,8 +18,10 @@
 #include "patch.h"
 
 #include "hash.h"
-#include "lib/hmap.h"
+#include "lflow.h"
 #include "lib/vswitch-idl.h"
+#include "lport.h"
+#include "openvswitch/hmap.h"
 #include "openvswitch/vlog.h"
 #include "ovn-controller.h"
 
@@ -93,6 +95,9 @@ create_patch_port(struct controller_ctx *ctx,
     ovsrec_bridge_verify_ports(src);
     ovsrec_bridge_set_ports(src, ports, src->n_ports + 1);
 
+    lport_index_reset();
+    mcgroup_index_reset();
+    lflow_reset_processing();
     free(ports);
 }
 
@@ -125,6 +130,9 @@ remove_port(struct controller_ctx *ctx,
             return;
         }
     }
+    lport_index_reset();
+    mcgroup_index_reset();
+    lflow_reset_processing();
 }
 
 /* Obtains external-ids:ovn-bridge-mappings from OVSDB and adds patch ports for
@@ -341,7 +349,7 @@ add_logical_patch_ports(struct controller_ctx *ctx,
         if (!strcmp(binding->type, "gateway")) {
             const char *chassis = smap_get(&binding->options,
                                            "gateway-chassis");
-            if (!strcmp(local_chassis_id, chassis)) {
+            if (chassis && !strcmp(local_chassis_id, chassis)) {
                 local_port = true;
             }
         }

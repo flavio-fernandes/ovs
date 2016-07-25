@@ -238,7 +238,7 @@ static int lisp_rcv(struct sock *sk, struct sk_buff *skb)
 	/* Save outer tunnel values */
 #ifndef USE_UPSTREAM_TUNNEL
 	tun_dst = &temp;
-	ovs_udp_tun_rx_dst(&tun_dst->u.tun_info, skb, AF_INET, TUNNEL_KEY, key, 0);
+	ovs_udp_tun_rx_dst(tun_dst, skb, AF_INET, TUNNEL_KEY, key, 0);
 #else
 	tun_dst = udp_tun_rx_dst(skb, AF_INET, TUNNEL_KEY, key, 0);
 #endif
@@ -510,8 +510,10 @@ static const struct net_device_ops lisp_netdev_ops = {
 	.ndo_change_mtu         = lisp_change_mtu,
 	.ndo_validate_addr      = eth_validate_addr,
 	.ndo_set_mac_address    = eth_mac_addr,
+#ifdef USE_UPSTREAM_TUNNEL
 #ifdef HAVE_NDO_FILL_METADATA_DST
 	.ndo_fill_metadata_dst  = lisp_fill_metadata_dst,
+#endif
 #endif
 };
 

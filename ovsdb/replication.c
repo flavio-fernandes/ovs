@@ -20,7 +20,7 @@
 #include "replication.h"
 
 #include "condition.h"
-#include "json.h"
+#include "openvswitch/json.h"
 #include "jsonrpc.h"
 #include "ovsdb.h"
 #include "ovsdb-error.h"
@@ -38,7 +38,6 @@ static struct sset monitored_tables = SSET_INITIALIZER(&monitored_tables);
 static struct sset tables_blacklist = SSET_INITIALIZER(&tables_blacklist);
 static bool reset_dbs = true;
 
-void replication_init(void);
 static struct jsonrpc *open_jsonrpc(const char *server);
 static struct ovsdb_error *check_jsonrpc_error(int error,
                                                struct jsonrpc_msg **reply_);
@@ -118,6 +117,12 @@ set_remote_ovsdb_server(const char *remote_server)
     remote_ovsdb_server = nullable_xstrdup(remote_server);
 }
 
+const char *
+get_remote_ovsdb_server(void)
+{
+    return remote_ovsdb_server;
+}
+
 void
 set_tables_blacklist(const char *blacklist)
 {
@@ -125,6 +130,12 @@ set_tables_blacklist(const char *blacklist)
     if (blacklist) {
         sset_from_delimited_string(&tables_blacklist, blacklist, ",");
     }
+}
+
+struct sset
+get_tables_blacklist(void)
+{
+    return tables_blacklist;
 }
 
 void
@@ -535,7 +546,7 @@ execute_delete(struct ovsdb_txn *txn, const char *uuid,
 {
     const struct json *where;
     struct ovsdb_error *error;
-    struct ovsdb_condition condition = OVSDB_CONDITION_INITIALIZER;
+    struct ovsdb_condition condition = OVSDB_CONDITION_INITIALIZER(&condition);
     char where_string[UUID_LEN+29];
 
     if (!table) {
@@ -586,7 +597,7 @@ execute_update(struct ovsdb_txn *txn, const char *uuid,
                struct ovsdb_table *table, struct json *json_row)
 {
     struct ovsdb_column_set columns = OVSDB_COLUMN_SET_INITIALIZER;
-    struct ovsdb_condition condition = OVSDB_CONDITION_INITIALIZER;
+    struct ovsdb_condition condition = OVSDB_CONDITION_INITIALIZER(&condition);
     struct update_row_cbdata ur;
     struct ovsdb_row *row;
     struct ovsdb_error *error;
