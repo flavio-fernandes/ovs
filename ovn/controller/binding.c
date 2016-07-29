@@ -103,6 +103,11 @@ get_local_iface_ids(const struct ovsrec_bridge *br_int,
      * that has been removed. */
     if (!changed && !sset_is_empty(&old_local_ids)) {
         changed = true;
+
+        const char *cur_id;
+        SSET_FOR_EACH(cur_id, &old_local_ids) {
+            sset_find_and_delete(&local_ids, cur_id);
+        }
     }
 
     sset_destroy(&old_local_ids);
@@ -219,7 +224,7 @@ consider_local_datapath(struct controller_ctx *ctx,
             add_local_datapath(local_datapaths, binding_rec);
         }
     } else if (chassis_rec && binding_rec->chassis == chassis_rec
-               && strcmp(binding_rec->type, "gateway")) {
+               && strcmp(binding_rec->type, "l3gateway")) {
         if (ctx->ovnsb_idl_txn) {
             VLOG_INFO("Releasing lport %s from this chassis.",
                       binding_rec->logical_port);

@@ -298,7 +298,7 @@ struct dpdk_tx_queue {
     rte_spinlock_t tx_lock;        /* Protects the members and the NIC queue
                                     * from concurrent access.  It is used only
                                     * if the queue is shared among different
-                                    * pmd threads (see 'txq_needs_locking'). */
+                                    * pmd threads (see 'concurrent_txq'). */
     int map;                       /* Mapping of configured vhost-user queues
                                     * to enabled by guest. */
 };
@@ -348,13 +348,6 @@ struct netdev_dpdk {
 
     struct rte_eth_link link;
     int link_reset_cnt;
-
-    /* Caller of netdev_send() might want to use more txqs than the device has.
-     * For physical NICs, if the 'requested_n_txq' less or equal to 'up.n_txq',
-     * 'txq_needs_locking' is false, otherwise it is true and we will take a
-     * spinlock on transmission.  For vhost devices, 'requested_n_txq' is
-     * always true.  */
-    bool txq_needs_locking;
 
     /* virtio-net structure for vhost device */
     OVSRCU_TYPE(struct virtio_net *) virtio_dev;
@@ -778,10 +771,8 @@ netdev_dpdk_init(struct netdev *netdev, unsigned int port_no,
             goto unlock;
         }
         netdev_dpdk_alloc_txq(dev, netdev->n_txq);
-        dev->txq_needs_locking = netdev->n_txq < dev->requested_n_txq;
     } else {
         netdev_dpdk_alloc_txq(dev, OVS_VHOST_MAX_QUEUE_NUM);
-        dev->txq_needs_locking = true;
         /* Enable DPDK_DEV_VHOST device and set promiscuous mode flag. */
         dev->flags = NETDEV_UP | NETDEV_PROMISC;
     }
@@ -1411,6 +1402,8 @@ dpdk_do_tx_copy(struct netdev *netdev, int qid, struct dp_packet_batch *batch)
         ovs_mutex_lock(&nonpmd_mempool_mutex);
     }
 
+    dp_packet_batch_apply_cutlen(batch);
+
     for (i = 0; i < batch->count; i++) {
         int size = dp_packet_size(batch->packets[i]);
 
@@ -1428,10 +1421,6 @@ dpdk_do_tx_copy(struct netdev *netdev, int qid, struct dp_packet_batch *batch)
             dropped += batch->count - i;
             break;
         }
-
-        /* Cut the size so only the truncated size is copied. */
-        size -= dp_packet_get_cutlen(batch->packets[i]);
-        dp_packet_reset_cutlen(batch->packets[i]);
 
         /* We have to do a copy for now */
         memcpy(rte_pktmbuf_mtod(mbufs[newcnt], void *),
@@ -1470,7 +1459,7 @@ dpdk_do_tx_copy(struct netdev *netdev, int qid, struct dp_packet_batch *batch)
 static int
 netdev_dpdk_vhost_send(struct netdev *netdev, int qid,
                        struct dp_packet_batch *batch,
-                       bool may_steal)
+                       bool may_steal, bool concurrent_txq OVS_UNUSED)
 {
 
     if (OVS_UNLIKELY(batch->packets[0]->source != DPBUF_DPDK)) {
@@ -1486,9 +1475,10 @@ netdev_dpdk_vhost_send(struct netdev *netdev, int qid,
 
 static inline void
 netdev_dpdk_send__(struct netdev_dpdk *dev, int qid,
-                   struct dp_packet_batch *batch, bool may_steal)
+                   struct dp_packet_batch *batch, bool may_steal,
+                   bool concurrent_txq)
 {
-    if (OVS_UNLIKELY(dev->txq_needs_locking)) {
+    if (OVS_UNLIKELY(concurrent_txq)) {
         qid = qid % dev->up.n_txq;
         rte_spinlock_lock(&dev->tx_q[qid].tx_lock);
     }
@@ -1506,11 +1496,10 @@ netdev_dpdk_send__(struct netdev_dpdk *dev, int qid,
         unsigned int temp_cnt = 0;
         int cnt = batch->count;
 
+        dp_packet_batch_apply_cutlen(batch);
+
         for (int i = 0; i < cnt; i++) {
             int size = dp_packet_size(batch->packets[i]);
-
-            size -= dp_packet_get_cutlen(batch->packets[i]);
-            dp_packet_set_size(batch->packets[i], size);
 
             if (OVS_UNLIKELY(size > dev->max_packet_len)) {
                 if (next_tx_idx != i) {
@@ -1554,18 +1543,19 @@ netdev_dpdk_send__(struct netdev_dpdk *dev, int qid,
         }
     }
 
-    if (OVS_UNLIKELY(dev->txq_needs_locking)) {
+    if (OVS_UNLIKELY(concurrent_txq)) {
         rte_spinlock_unlock(&dev->tx_q[qid].tx_lock);
     }
 }
 
 static int
 netdev_dpdk_eth_send(struct netdev *netdev, int qid,
-                     struct dp_packet_batch *batch, bool may_steal)
+                     struct dp_packet_batch *batch, bool may_steal,
+                     bool concurrent_txq)
 {
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
 
-    netdev_dpdk_send__(dev, qid, batch, may_steal);
+    netdev_dpdk_send__(dev, qid, batch, may_steal, concurrent_txq);
     return 0;
 }
 
@@ -2084,8 +2074,6 @@ netdev_dpdk_get_status(const struct netdev *netdev, struct smap *args)
     rte_eth_dev_info_get(dev->port_id, &dev_info);
     ovs_mutex_unlock(&dev->mutex);
 
-    smap_add_format(args, "driver_name", "%s", dev_info.driver_name);
-
     smap_add_format(args, "port_no", "%d", dev->port_id);
     smap_add_format(args, "numa_id", "%d", rte_eth_dev_socket_id(dev->port_id));
     smap_add_format(args, "driver_name", "%s", dev_info.driver_name);
@@ -2538,7 +2526,8 @@ dpdk_ring_open(const char dev_name[], unsigned int *eth_port_id)
 
 static int
 netdev_dpdk_ring_send(struct netdev *netdev, int qid,
-                      struct dp_packet_batch *batch, bool may_steal)
+                      struct dp_packet_batch *batch, bool may_steal,
+                      bool concurrent_txq)
 {
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
     unsigned i;
@@ -2551,7 +2540,7 @@ netdev_dpdk_ring_send(struct netdev *netdev, int qid,
         dp_packet_rss_invalidate(batch->packets[i]);
     }
 
-    netdev_dpdk_send__(dev, qid, batch, may_steal);
+    netdev_dpdk_send__(dev, qid, batch, may_steal, concurrent_txq);
     return 0;
 }
 
@@ -2827,8 +2816,6 @@ netdev_dpdk_reconfigure(struct netdev *netdev)
     rte_free(dev->tx_q);
     err = dpdk_eth_dev_init(dev);
     netdev_dpdk_alloc_txq(dev, netdev->n_txq);
-
-    dev->txq_needs_locking = netdev->n_txq < dev->requested_n_txq;
 
 out:
 
