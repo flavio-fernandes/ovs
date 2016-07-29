@@ -217,6 +217,21 @@ default CFLAGS plus "-mssse3", you might run configure as follows:
 
       `% ./configure CFLAGS="-g -O2 -mssse3"`
 
+For efficient hash computation special flags can be passed to leverage
+built-in intrinsics.  For example on X86_64 with SSE4.2 instruction set
+support, CRC32 intrinsics can be used by passing '-msse4.2'.
+
+      `% ./configure CFLAGS="-g -O2 -msse4.2"`
+
+If you are on a different processor and don't know what flags to choose, it
+is recommended to use '-march=native' settings.
+
+      `% ./configure CFLAGS="-g -O2 -march=native"`
+
+With this, GCC will detect the processor and automatically set appropriate
+flags for it.  This should not be used if you are compiling OVS outside the
+target machine.
+
 Note that these CFLAGS are not applied when building the Linux
 kernel module.  Custom CFLAGS for the kernel module are supplied
 using the EXTRA_CFLAGS variable when running make.  So, for example:
@@ -746,6 +761,28 @@ Instructions to setup travis-ci for your GitHub repository:
 4. Pushing a commit to the repository which breaks the build or the
    testsuite will now trigger a email sent to mylist@mydomain.org
 
+Static Code Analysis
+--------------------
+
+Static Analysis is a method of debugging Software by examining code rather
+than actually executing it. This can be done through 'scan-build' commandline
+utility which internally uses clang (or) gcc to compile the code and also
+invokes a static analyzer to do the code analysis. At the end of the build, the
+reports are aggregated in to a common folder and can later be analyzed using
+'scan-view'.
+
+Open vSwitch includes a Makefile target to trigger static code Analysis and
+the instructions are below.
+
+1. ./boot.sh
+2. ./configure CC=clang (when using clang compiler)
+   ./configure CC=gcc CFLAGS="-std=gnu99" (when using GCC)
+3. make clang-analyze
+
+You should invoke scan-view to view analysis results. The last line of output
+from 'make clang-analyze' shall list the command (containing results directory)
+that you should invoke to view the results on a browser.
+
 Bug Reporting
 =============
 
@@ -757,6 +794,7 @@ Please report problems to bugs@openvswitch.org.
 [INSTALL.RHEL.md]:INSTALL.RHEL.md
 [INSTALL.XenServer.md]:INSTALL.XenServer.md
 [INSTALL.NetBSD.md]:INSTALL.NetBSD.md
+[INSTALL.Windows.md]:INSTALL.Windows.md
 [INSTALL.DPDK.md]:INSTALL.DPDK.md
 [INSTALL.userspace.md]:INSTALL.userspace.md
 [FAQ.md]:FAQ.md

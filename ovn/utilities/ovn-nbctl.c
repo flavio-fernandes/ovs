@@ -49,6 +49,14 @@ static bool oneline;
 /* --dry-run: Do not commit any changes. */
 static bool dry_run;
 
+/* --wait=TYPE: Wait for configuration change to take effect? */
+enum nbctl_wait_type {
+    NBCTL_WAIT_NONE,            /* Do not wait. */
+    NBCTL_WAIT_SB,              /* Wait for southbound database updates. */
+    NBCTL_WAIT_HV               /* Wait for hypervisors to catch up. */
+};
+static enum nbctl_wait_type wait_type = NBCTL_WAIT_NONE;
+
 /* --timeout: Time to wait for a connection to 'db'. */
 static int timeout;
 
@@ -70,6 +78,8 @@ static void run_prerequisites(struct ctl_command[], size_t n_commands,
                               struct ovsdb_idl *);
 static bool do_nbctl(const char *args, struct ctl_command *, size_t n,
                      struct ovsdb_idl *);
+static const struct nbrec_dhcp_options *dhcp_options_get(
+    struct ctl_context *ctx, const char *id, bool must_exist);
 
 int
 main(int argc, char *argv[])
@@ -158,6 +168,8 @@ parse_options(int argc, char *argv[], struct shash *local_options)
     enum {
         OPT_DB = UCHAR_MAX + 1,
         OPT_NO_SYSLOG,
+        OPT_NO_WAIT,
+        OPT_WAIT,
         OPT_DRY_RUN,
         OPT_ONELINE,
         OPT_LOCAL,
@@ -169,6 +181,8 @@ parse_options(int argc, char *argv[], struct shash *local_options)
     static const struct option global_long_options[] = {
         {"db", required_argument, NULL, OPT_DB},
         {"no-syslog", no_argument, NULL, OPT_NO_SYSLOG},
+        {"no-wait", no_argument, NULL, OPT_NO_WAIT},
+        {"wait", required_argument, NULL, OPT_WAIT},
         {"dry-run", no_argument, NULL, OPT_DRY_RUN},
         {"oneline", no_argument, NULL, OPT_ONELINE},
         {"timeout", required_argument, NULL, 't'},
@@ -223,6 +237,23 @@ parse_options(int argc, char *argv[], struct shash *local_options)
 
         case OPT_NO_SYSLOG:
             vlog_set_levels(&this_module, VLF_SYSLOG, VLL_WARN);
+            break;
+
+        case OPT_NO_WAIT:
+            wait_type = NBCTL_WAIT_NONE;
+            break;
+
+        case OPT_WAIT:
+            if (!strcmp(optarg, "none")) {
+                wait_type = NBCTL_WAIT_NONE;
+            } else if (!strcmp(optarg, "sb")) {
+                wait_type = NBCTL_WAIT_SB;
+            } else if (!strcmp(optarg, "hv")) {
+                wait_type = NBCTL_WAIT_HV;
+            } else {
+                ctl_fatal("argument to --wait must be "
+                          "\"none\", \"sb\", or \"hv\"");
+            }
             break;
 
         case OPT_DRY_RUN:
@@ -292,6 +323,7 @@ usage(void)
 usage: %s [OPTIONS] COMMAND [ARG...]\n\
 \n\
 General commands:\n\
+  init                      initialize the database\n\
   show                      print overview of database contents\n\
   show SWITCH               print overview of database contents for SWITCH\n\
   show ROUTER               print overview of database contents for ROUTER\n\
@@ -334,6 +366,9 @@ Logical switch port commands:\n\
   lsp-set-options PORT KEY=VALUE [KEY=VALUE]...\n\
                             set options related to the type of PORT\n\
   lsp-get-options PORT      get the type specific options for PORT\n\
+  lsp-set-dhcpv4-options PORT [DHCP_OPTIONS_UUID]\n\
+                            set dhcpv4 options for PORT\n\
+  lsp-get-dhcpv4-options PORT  get the dhcpv4 options for PORT\n\
 \n\
 Logical router commands:\n\
   lr-add [ROUTER]           create a logical router named ROUTER\n\
@@ -358,11 +393,27 @@ Route commands:\n\
                             remove routes from ROUTER\n\
   lr-route-list ROUTER      print routes for ROUTER\n\
 \n\
+\n\
+DHCP Options commands:\n\
+  dhcp-options-create CIDR [EXTERNAL_IDS]\n\
+                           create a DHCP options row with CIDR\n\
+  dhcp-options-del DHCP_OPTIONS_UUID\n\
+                           delete DHCP_OPTIONS_UUID\n\
+  dhcp-options-list        \n\
+                           lists the DHCP_Options rows\n\
+  dhcp-options-set-options DHCP_OPTIONS_UUID  KEY=VALUE [KEY=VALUE]...\n\
+                           set DHCP options for DHCP_OPTIONS_UUID\n\
+  dhcp-options-get-options DHCO_OPTIONS_UUID \n\
+                           displays the DHCP options for DHCP_OPTIONS_UUID\n\
+\n\
 %s\
 \n\
 Options:\n\
   --db=DATABASE               connect to DATABASE\n\
                               (default: %s)\n\
+  --no-wait, --wait=none      do not wait for OVN reconfiguration (default)\n\
+  --wait=sb                   wait for southbound database update\n\
+  --wait=hv                   wait for all chassis to catch up\n\
   -t, --timeout=SECS          wait at most SECS seconds\n\
   --dry-run                   do not commit changes to database\n\
   --oneline                   print exactly one line of output per command\n",
@@ -500,6 +551,11 @@ print_ls(const struct nbrec_logical_switch *ls, struct ds *s)
             ds_put_cstr(s, "]\n");
         }
     }
+}
+
+static void
+nbctl_init(struct ctl_context *ctx OVS_UNUSED)
+{
 }
 
 static void
@@ -855,7 +911,7 @@ nbctl_lsp_set_addresses(struct ctl_context *ctx)
     for (i = 2; i < ctx->argc; i++) {
         struct eth_addr ea;
 
-        if (strcmp(ctx->argv[i], "unknown")
+        if (strcmp(ctx->argv[i], "unknown") && strcmp(ctx->argv[i], "dynamic")
             && !ovs_scan(ctx->argv[i], ETH_ADDR_SCAN_FMT,
                          ETH_ADDR_SCAN_ARGS(ea))) {
             ctl_fatal("%s: Invalid address format. See ovn-nb(5). "
@@ -1024,6 +1080,45 @@ nbctl_lsp_get_options(struct ctl_context *ctx)
     lsp = lsp_by_name_or_uuid(ctx, id, true);
     SMAP_FOR_EACH(node, &lsp->options) {
         ds_put_format(&ctx->output, "%s=%s\n", node->key, node->value);
+    }
+}
+
+static void
+nbctl_lsp_set_dhcpv4_options(struct ctl_context *ctx)
+{
+    const char *id = ctx->argv[1];
+    const struct nbrec_logical_switch_port *lsp;
+
+    lsp = lsp_by_name_or_uuid(ctx, id, true);
+    const struct nbrec_dhcp_options *dhcp_opt = NULL;
+    if (ctx->argc == 3 ) {
+        dhcp_opt = dhcp_options_get(ctx, ctx->argv[2], true);
+    }
+
+    if (dhcp_opt) {
+        ovs_be32 ip;
+        unsigned int plen;
+        char *error = ip_parse_cidr(dhcp_opt->cidr, &ip, &plen);
+        if (error){
+            free(error);
+            ctl_fatal("DHCP options cidr '%s' is not IPv4", dhcp_opt->cidr);
+            return;
+        }
+    }
+    nbrec_logical_switch_port_set_dhcpv4_options(lsp, dhcp_opt);
+}
+
+static void
+nbctl_lsp_get_dhcpv4_options(struct ctl_context *ctx)
+{
+    const char *id = ctx->argv[1];
+    const struct nbrec_logical_switch_port *lsp;
+
+    lsp = lsp_by_name_or_uuid(ctx, id, true);
+    if (lsp->dhcpv4_options) {
+        ds_put_format(&ctx->output, UUID_FMT " (%s)\n",
+                      UUID_ARGS(&lsp->dhcpv4_options->header_.uuid),
+                      lsp->dhcpv4_options->cidr);
     }
 }
 
@@ -1280,6 +1375,126 @@ nbctl_lr_list(struct ctl_context *ctx)
         ds_put_format(&ctx->output, "%s\n", node->value);
     }
     smap_destroy(&lrs);
+    free(nodes);
+}
+
+static const struct nbrec_dhcp_options *
+dhcp_options_get(struct ctl_context *ctx, const char *id, bool must_exist)
+{
+    struct uuid dhcp_opts_uuid;
+    const struct nbrec_dhcp_options *dhcp_opts = NULL;
+    if (uuid_from_string(&dhcp_opts_uuid, id)) {
+        dhcp_opts = nbrec_dhcp_options_get_for_uuid(ctx->idl, &dhcp_opts_uuid);
+    }
+
+    if (!dhcp_opts && must_exist) {
+        ctl_fatal("%s: dhcp options UUID not found", id);
+    }
+    return dhcp_opts;
+}
+
+static void
+nbctl_dhcp_options_create(struct ctl_context *ctx)
+{
+    /* Validate the cidr */
+    ovs_be32 ip;
+    unsigned int plen;
+    char *error = ip_parse_cidr(ctx->argv[1], &ip, &plen);
+    if (error){
+        /* check if its IPv6 cidr */
+        free(error);
+        struct in6_addr ipv6;
+        error = ipv6_parse_cidr(ctx->argv[1], &ipv6, &plen);
+        if (error) {
+            free(error);
+            ctl_fatal("Invalid cidr format '%s'", ctx->argv[1]);
+            return;
+        }
+    }
+
+    struct nbrec_dhcp_options *dhcp_opts = nbrec_dhcp_options_insert(ctx->txn);
+    nbrec_dhcp_options_set_cidr(dhcp_opts, ctx->argv[1]);
+
+    struct smap ext_ids = SMAP_INITIALIZER(&ext_ids);
+    for (size_t i = 2; i < ctx->argc; i++) {
+        char *key, *value;
+        value = xstrdup(ctx->argv[i]);
+        key = strsep(&value, "=");
+        if (value) {
+            smap_add(&ext_ids, key, value);
+        }
+        free(key);
+    }
+
+    nbrec_dhcp_options_set_external_ids(dhcp_opts, &ext_ids);
+    smap_destroy(&ext_ids);
+}
+
+static void
+nbctl_dhcp_options_set_options(struct ctl_context *ctx)
+{
+    const struct nbrec_dhcp_options *dhcp_opts = dhcp_options_get(
+        ctx, ctx->argv[1], true);
+
+    struct smap dhcp_options = SMAP_INITIALIZER(&dhcp_options);
+    for (size_t i = 2; i < ctx->argc; i++) {
+        char *key, *value;
+        value = xstrdup(ctx->argv[i]);
+        key = strsep(&value, "=");
+        if (value) {
+            smap_add(&dhcp_options, key, value);
+        }
+        free(key);
+    }
+
+    nbrec_dhcp_options_set_options(dhcp_opts, &dhcp_options);
+    smap_destroy(&dhcp_options);
+}
+
+static void
+nbctl_dhcp_options_get_options(struct ctl_context *ctx)
+{
+    const struct nbrec_dhcp_options *dhcp_opts = dhcp_options_get(
+        ctx, ctx->argv[1], true);
+
+    struct smap_node *node;
+    SMAP_FOR_EACH(node, &dhcp_opts->options) {
+        ds_put_format(&ctx->output, "%s=%s\n", node->key, node->value);
+    }
+}
+
+static void
+nbctl_dhcp_options_del(struct ctl_context *ctx)
+{
+    bool must_exist = !shash_find(&ctx->options, "--if-exists");
+    const char *id = ctx->argv[1];
+    const struct nbrec_dhcp_options *dhcp_opts;
+
+    dhcp_opts = dhcp_options_get(ctx, id, must_exist);
+    if (!dhcp_opts) {
+        return;
+    }
+
+    nbrec_dhcp_options_delete(dhcp_opts);
+}
+
+static void
+nbctl_dhcp_options_list(struct ctl_context *ctx)
+{
+    const struct nbrec_dhcp_options *dhcp_opts;
+    struct smap dhcp_options;
+
+    smap_init(&dhcp_options);
+    NBREC_DHCP_OPTIONS_FOR_EACH(dhcp_opts, ctx->idl) {
+        smap_add_format(&dhcp_options, dhcp_opts->cidr, UUID_FMT,
+                        UUID_ARGS(&dhcp_opts->header_.uuid));
+    }
+    const struct smap_node **nodes = smap_sort(&dhcp_options);
+    for (size_t i = 0; i < smap_count(&dhcp_options); i++) {
+        const struct smap_node *node = nodes[i];
+        ds_put_format(&ctx->output, "%s\n", node->value);
+    }
+    smap_destroy(&dhcp_options);
     free(nodes);
 }
 
@@ -1887,6 +2102,10 @@ nbctl_lr_route_list(struct ctl_context *ctx)
 }
 
 static const struct ctl_table_class tables[] = {
+    {&nbrec_table_nb_global,
+     {{&nbrec_table_nb_global, NULL, NULL},
+      {NULL, NULL, NULL}}},
+
     {&nbrec_table_logical_switch,
      {{&nbrec_table_logical_switch, &nbrec_logical_switch_col_name, NULL},
       {NULL, NULL, NULL}}},
@@ -1927,6 +2146,11 @@ static const struct ctl_table_class tables[] = {
      {{&nbrec_table_address_set, &nbrec_address_set_col_name, NULL},
       {NULL, NULL, NULL}}},
 
+    {&nbrec_table_dhcp_options,
+     {{&nbrec_table_dhcp_options, NULL,
+       NULL},
+      {NULL, NULL, NULL}}},
+
     {NULL, {{NULL, NULL, NULL}, {NULL, NULL, NULL}}}
 };
 
@@ -1934,9 +2158,14 @@ static void
 run_prerequisites(struct ctl_command *commands, size_t n_commands,
                   struct ovsdb_idl *idl)
 {
-    struct ctl_command *c;
+    ovsdb_idl_add_table(idl, &nbrec_table_nb_global);
+    if (wait_type == NBCTL_WAIT_SB) {
+        ovsdb_idl_add_column(idl, &nbrec_nb_global_col_sb_cfg);
+    } else if (wait_type == NBCTL_WAIT_HV) {
+        ovsdb_idl_add_column(idl, &nbrec_nb_global_col_hv_cfg);
+    }
 
-    for (c = commands; c < &commands[n_commands]; c++) {
+    for (struct ctl_command *c = commands; c < &commands[n_commands]; c++) {
         if (c->syntax->prerequisites) {
             struct ctl_context ctx;
 
@@ -1963,6 +2192,7 @@ do_nbctl(const char *args, struct ctl_command *commands, size_t n_commands,
     struct ctl_context ctx;
     struct ctl_command *c;
     struct shash_node *node;
+    int64_t next_cfg = 0;
     char *error = NULL;
 
     txn = the_idl_txn = ovsdb_idl_txn_create(idl);
@@ -1971,6 +2201,17 @@ do_nbctl(const char *args, struct ctl_command *commands, size_t n_commands,
     }
 
     ovsdb_idl_txn_add_comment(txn, "ovs-nbctl: %s", args);
+
+    const struct nbrec_nb_global *nb = nbrec_nb_global_first(idl);
+    if (!nb) {
+        /* XXX add verification that table is empty */
+        nb = nbrec_nb_global_insert(txn);
+    }
+
+    if (wait_type != NBCTL_WAIT_NONE) {
+        ovsdb_idl_txn_increment(txn, &nb->header_,
+                                &nbrec_nb_global_col_nb_cfg);
+    }
 
     symtab = ovsdb_symbol_table_create();
     for (c = commands; c < &commands[n_commands]; c++) {
@@ -2013,6 +2254,9 @@ do_nbctl(const char *args, struct ctl_command *commands, size_t n_commands,
     }
 
     status = ovsdb_idl_txn_commit_block(txn);
+    if (wait_type != NBCTL_WAIT_NONE && status == TXN_SUCCESS) {
+        next_cfg = ovsdb_idl_txn_get_increment_new_value(txn);
+    }
     if (status == TXN_UNCHANGED || status == TXN_SUCCESS) {
         for (c = commands; c < &commands[n_commands]; c++) {
             if (c->syntax->postprocess) {
@@ -2089,6 +2333,25 @@ do_nbctl(const char *args, struct ctl_command *commands, size_t n_commands,
         shash_destroy_free_data(&c->options);
     }
     free(commands);
+
+    if (wait_type != NBCTL_WAIT_NONE && status != TXN_UNCHANGED) {
+        ovsdb_idl_enable_reconnect(idl);
+        for (;;) {
+            ovsdb_idl_run(idl);
+            NBREC_NB_GLOBAL_FOR_EACH (nb, idl) {
+                int64_t cur_cfg = (wait_type == NBCTL_WAIT_SB
+                                   ? nb->sb_cfg
+                                   : nb->hv_cfg);
+                if (cur_cfg >= next_cfg) {
+                    goto done;
+                }
+            }
+            ovsdb_idl_wait(idl);
+            poll_block();
+        }
+    done: ;
+    }
+
     ovsdb_idl_txn_destroy(txn);
     ovsdb_idl_destroy(idl);
 
@@ -2130,6 +2393,7 @@ nbctl_exit(int status)
 }
 
 static const struct ctl_command_syntax nbctl_commands[] = {
+    { "init", 0, 0, "", NULL, nbctl_init, NULL, "", RW },
     { "show", 0, 1, "[SWITCH]", NULL, nbctl_show, NULL, "", RO },
 
     /* logical switch commands. */
@@ -2173,6 +2437,10 @@ static const struct ctl_command_syntax nbctl_commands[] = {
       nbctl_lsp_set_options, NULL, "", RW },
     { "lsp-get-options", 1, 1, "PORT", NULL, nbctl_lsp_get_options, NULL,
       "", RO },
+    { "lsp-set-dhcpv4-options", 1, 2, "PORT [DHCP_OPT_UUID]", NULL,
+      nbctl_lsp_set_dhcpv4_options, NULL, "", RW },
+    { "lsp-get-dhcpv4-options", 1, 1, "PORT", NULL,
+      nbctl_lsp_get_dhcpv4_options, NULL, "", RO },
 
     /* logical router commands. */
     { "lr-add", 0, 1, "[ROUTER]", NULL, nbctl_lr_add, NULL,
@@ -2198,6 +2466,17 @@ static const struct ctl_command_syntax nbctl_commands[] = {
       NULL, "--if-exists", RW },
     { "lr-route-list", 1, 1, "ROUTER", NULL, nbctl_lr_route_list, NULL,
       "", RO },
+
+    /* DHCP_Options commands */
+    {"dhcp-options-create", 1, INT_MAX, "CIDR [EXTERNAL:IDS]", NULL,
+     nbctl_dhcp_options_create, NULL, "", RW },
+    {"dhcp-options-del", 1, 1, "DHCP_OPT_UUID", NULL,
+     nbctl_dhcp_options_del, NULL, "", RW},
+    {"dhcp-options-list", 0, 0, "", NULL, nbctl_dhcp_options_list, NULL, "", RO},
+    {"dhcp-options-set-options", 1, INT_MAX, "DHCP_OPT_UUID KEY=VALUE [KEY=VALUE]...",
+    NULL, nbctl_dhcp_options_set_options, NULL, "", RW },
+    {"dhcp-options-get-options", 1, 1, "DHCP_OPT_UUID", NULL,
+     nbctl_dhcp_options_get_options, NULL, "", RO },
 
     {NULL, 0, 0, NULL, NULL, NULL, NULL, "", RO},
 };

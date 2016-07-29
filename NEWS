@@ -45,6 +45,8 @@ Post-v2.5.0
        Old 'other_config:n-dpdk-rxqs' is no longer supported.
        Not supported by vHost interfaces. For them number of rx and tx queues
        is applied from connected virtio device.
+     * New 'other_config:pmd-rxq-affinity' field for PMD interfaces, that
+       allows to pin port's rx queues to desired cores.
      * New appctl command 'dpif-netdev/pmd-rxq-show' to check the port/rxq
        assignment.
      * Type of log messages from PMD threads changed from INFO to DBG.
@@ -59,6 +61,8 @@ Post-v2.5.0
      * PMD threads servicing vHost User ports can now come from the NUMA
        node that device memory is located on if CONFIG_RTE_LIBRTE_VHOST_NUMA
        is enabled in DPDK.
+     * Basic connection tracking for the userspace datapath (no ALG,
+       fragmentation or NAT support yet)
    - Increase number of registers to 16.
    - ovs-benchmark: This utility has been removed due to lack of use and
      bitrot.
@@ -79,6 +83,7 @@ Post-v2.5.0
      * Dropped support for kernel older than 3.10.
      * Removed VLAN splinters feature.
      * Support for truncate action.
+     * Datapath supports kernel upto 4.6.
    - Tunnels:
      * Flow based tunnel match and action can be used for IPv6 address using
        tun_ipv6_src, tun_ipv6_dst fields.
