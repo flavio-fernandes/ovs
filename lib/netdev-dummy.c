@@ -993,8 +993,6 @@ netdev_dummy_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet_batch *batch)
     netdev->stats.rx_bytes += dp_packet_size(packet);
     ovs_mutex_unlock(&netdev->mutex);
 
-    dp_packet_pad(packet);
-
     batch->packets[0] = packet;
     batch->count = 1;
     return 0;
@@ -1146,7 +1144,7 @@ netdev_dummy_get_mtu(const struct netdev *netdev, int *mtup)
 }
 
 static int
-netdev_dummy_set_mtu(const struct netdev *netdev, int mtu)
+netdev_dummy_set_mtu(struct netdev *netdev, int mtu)
 {
     struct netdev_dummy *dev = netdev_dummy_cast(netdev);
 

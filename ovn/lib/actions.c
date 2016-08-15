@@ -47,6 +47,8 @@ struct action_context {
 static bool parse_action(struct action_context *);
 static void parse_put_dhcp_opts_action(struct action_context *,
                                        const struct expr_field *dst);
+static void parse_put_dhcpv6_opts_action(struct action_context *ctx,
+                                         const struct expr_field *dst);
 
 static bool
 action_error_handle_common(struct action_context *ctx)
@@ -132,6 +134,12 @@ parse_set_action(struct action_context *ctx)
                 lexer_get(ctx->lexer); /* Skip put_dhcp_opts. */
                 lexer_get(ctx->lexer); /* Skip '('. */
                 parse_put_dhcp_opts_action(ctx, &dst);
+            } else if (ctx->lexer->token.type == LEX_T_ID
+                       && !strcmp(ctx->lexer->token.s, "put_dhcpv6_opts")
+                       && lexer_lookahead(ctx->lexer) == LEX_T_LPAREN) {
+                lexer_get(ctx->lexer); /* Skip put_dhcpv6_opts. */
+                lexer_get(ctx->lexer); /* Skip '('. */
+                parse_put_dhcpv6_opts_action(ctx, &dst);
             } else {
                 error = expr_parse_assignment(
                     ctx->lexer, &dst, ctx->ap->symtab, ctx->ap->lookup_port,
@@ -249,8 +257,8 @@ put_controller_op(struct ofpbuf *ofpacts, enum action_opcode opcode)
     finish_controller_op(ofpacts, ofs);
 }
 
-/* Implements the "arp" and "na" actions, which execute nested actions on a
- * packet derived from the one being processed. */
+/* Implements the "arp" and "nd_na" actions, which execute nested
+ * actions on a packet derived fro: the one being processed. */
 static void
 parse_nested_action(struct action_context *ctx, enum action_opcode opcode,
                     const char *prereq)
@@ -278,10 +286,11 @@ parse_nested_action(struct action_context *ctx, enum action_opcode opcode,
 
     ctx->ofpacts = outer_ofpacts;
 
-    /* Add a "controller" action with the actions nested inside "{...}",
-     * converted to OpenFlow, as its userdata.  ovn-controller will convert the
-     * packet to ARP or NA and then send the packet and actions back to the
-     * switch inside an OFPT_PACKET_OUT message. */
+    /* Add a "controller" OpenFlow action with the actions nested inside the
+     * requested OVN action's "{...}", converted to OpenFlow, as its userdata.
+     * ovn-controller will convert the packet to the requested type and
+     * then send the packet and actions back to the switch inside an
+     * OFPT_PACKET_OUT message. */
     size_t oc_offset = start_controller_op(ctx->ofpacts, opcode, false);
     ofpacts_put_openflow_actions(inner_ofpacts.data, inner_ofpacts.size,
                                  ctx->ofpacts, OFP13_VERSION);
@@ -423,7 +432,7 @@ parse_get_arp_action(struct action_context *ctx)
     setup_args(ctx, args, ARRAY_SIZE(args));
 
     put_load(0, MFF_ETH_DST, 0, 48, ctx->ofpacts);
-    emit_resubmit(ctx, ctx->ap->arp_ptable);
+    emit_resubmit(ctx, ctx->ap->mac_bind_ptable);
 
     restore_args(ctx, args, ARRAY_SIZE(args));
 }
@@ -627,6 +636,112 @@ parse_put_dhcp_opts_action(struct action_context *ctx,
     finish_controller_op(ctx->ofpacts, oc_offset);
 }
 
+static void
+parse_dhcpv6_opt(struct action_context *ctx, struct ofpbuf *ofpacts)
+{
+    if (ctx->lexer->token.type != LEX_T_ID) {
+        action_syntax_error(ctx, NULL);
+        return;
+    }
+
+    const struct dhcp_opts_map *dhcp_opt = dhcp_opts_find(
+        ctx->ap->dhcpv6_opts, ctx->lexer->token.s);
+
+    if (!dhcp_opt) {
+        action_syntax_error(ctx, "expecting DHCPv6 option name");
+        return;
+    }
+
+    lexer_get(ctx->lexer);
+    if (!action_force_match(ctx, LEX_T_EQUALS)) {
+        return;
+    }
+
+    struct expr_constant_set cs;
+    memset(&cs, 0, sizeof(struct expr_constant_set));
+    char *error = expr_parse_constant_set(ctx->lexer, NULL, &cs);
+    if (error) {
+        action_error(ctx, "%s", error);
+        free(error);
+        return;
+    }
+
+    if (!strcmp(dhcp_opt->type, "str")) {
+        if (cs.type != EXPR_C_STRING) {
+            action_error(ctx, "DHCPv6 option %s requires string value.",
+                         dhcp_opt->name);
+            return;
+        }
+    } else {
+        if (cs.type != EXPR_C_INTEGER) {
+            action_error(ctx, "DHCPv6 option %s requires numeric value.",
+                         dhcp_opt->name);
+            return;
+        }
+    }
+
+    if (!lexer_match(ctx->lexer, LEX_T_COMMA) && (
+        ctx->lexer->token.type != LEX_T_RPAREN)) {
+        action_syntax_error(ctx, NULL);
+        return;
+    }
+
+    struct dhcp_opt6_header *opt = ofpbuf_put_uninit(ofpacts, sizeof *opt);
+    opt->code = dhcp_opt->code;
+
+    if (!strcmp(dhcp_opt->type, "ipv6")) {
+        opt->len = cs.n_values * sizeof(struct in6_addr);
+        for (size_t i = 0; i < cs.n_values; i++) {
+            ofpbuf_put(ofpacts, &cs.values[i].value.ipv6,
+                       sizeof(struct in6_addr));
+        }
+    } else if (!strcmp(dhcp_opt->type, "mac")) {
+        opt->len = sizeof(struct eth_addr);
+        ofpbuf_put(ofpacts, &cs.values[0].value.mac, opt->len);
+    } else if (!strcmp(dhcp_opt->type, "str")) {
+        opt->len = strlen(cs.values[0].string);
+        ofpbuf_put(ofpacts, cs.values[0].string, opt->len);
+    }
+
+    expr_constant_set_destroy(&cs);
+    return;
+}
+
+/* Parses the "put_dhcpv6_opts" action.  The result should be stored into 'dst'.
+ *
+ * The caller has already consumed "put_dhcpv6_opts(", so this just parses the
+ * rest. */
+static void
+parse_put_dhcpv6_opts_action(struct action_context *ctx,
+                             const struct expr_field *dst)
+{
+    /* Validate that the destination is a 1-bit, modifiable field. */
+    struct mf_subfield sf;
+    struct expr *prereqs;
+    char *error = expr_expand_field(ctx->lexer, ctx->ap->symtab,
+                                    dst, 1, true, &sf, &prereqs);
+    if (error) {
+        action_error(ctx, "%s", error);
+        free(error);
+        return;
+    }
+    ctx->prereqs = expr_combine(EXPR_T_AND, ctx->prereqs, prereqs);
+
+    /* controller. */
+    size_t oc_offset = start_controller_op(
+        ctx->ofpacts, ACTION_OPCODE_PUT_DHCPV6_OPTS, true);
+    nx_put_header(ctx->ofpacts, sf.field->id, OFP13_VERSION, false);
+    ovs_be32 ofs = htonl(sf.ofs);
+    ofpbuf_put(ctx->ofpacts, &ofs, sizeof ofs);
+    while (!lexer_match(ctx->lexer, LEX_T_RPAREN)) {
+       parse_dhcpv6_opt(ctx, ctx->ofpacts);
+       if (ctx->error) {
+           return;
+       }
+    }
+    finish_controller_op(ctx->ofpacts, oc_offset);
+}
+
 static bool
 action_parse_port(struct action_context *ctx, uint16_t *port)
 {
@@ -761,6 +876,7 @@ parse_ct_lb_action(struct action_context *ctx)
         group_info = xmalloc(sizeof *group_info);
         group_info->group = ds;
         group_info->group_id = group_id;
+        group_info->lflow_uuid = ctx->ap->lflow_uuid;
         group_info->hmap_node.hash = hash;
 
         hmap_insert(&ctx->ap->group_table->desired_groups,
@@ -772,6 +888,56 @@ parse_ct_lb_action(struct action_context *ctx)
     /* Create an action to set the group. */
     og = ofpact_put_GROUP(ctx->ofpacts);
     og->group_id = group_id;
+}
+
+static void
+parse_get_nd_action(struct action_context *ctx)
+{
+    struct mf_subfield port, ip6;
+
+    if (!action_force_match(ctx, LEX_T_LPAREN)
+        || !action_parse_field(ctx, 0, &port)
+        || !action_force_match(ctx, LEX_T_COMMA)
+        || !action_parse_field(ctx, 128, &ip6)
+        || !action_force_match(ctx, LEX_T_RPAREN)) {
+        return;
+    }
+
+    const struct arg args[] = {
+        { &port, MFF_LOG_OUTPORT },
+        { &ip6, MFF_XXREG0 },
+    };
+    setup_args(ctx, args, ARRAY_SIZE(args));
+
+    put_load(0, MFF_ETH_DST, 0, 48, ctx->ofpacts);
+    emit_resubmit(ctx, ctx->ap->mac_bind_ptable);
+
+    restore_args(ctx, args, ARRAY_SIZE(args));
+}
+
+static void
+parse_put_nd_action(struct action_context *ctx)
+{
+    struct mf_subfield port, ip6, mac;
+
+    if (!action_force_match(ctx, LEX_T_LPAREN)
+        || !action_parse_field(ctx, 0, &port)
+        || !action_force_match(ctx, LEX_T_COMMA)
+        || !action_parse_field(ctx, 128, &ip6)
+        || !action_force_match(ctx, LEX_T_COMMA)
+        || !action_parse_field(ctx, 48, &mac)
+        || !action_force_match(ctx, LEX_T_RPAREN)) {
+        return;
+    }
+
+    const struct arg args[] = {
+        { &port, MFF_LOG_INPORT },
+        { &ip6, MFF_XXREG0 },
+        { &mac, MFF_ETH_SRC }
+    };
+    setup_args(ctx, args, ARRAY_SIZE(args));
+    put_controller_op(ctx->ofpacts, ACTION_OPCODE_PUT_ND);
+    restore_args(ctx, args, ARRAY_SIZE(args));
 }
 
 static void
@@ -1064,12 +1230,16 @@ parse_action(struct action_context *ctx)
         parse_ct_lb_action(ctx);
     } else if (lexer_match_id(ctx->lexer, "arp")) {
         parse_nested_action(ctx, ACTION_OPCODE_ARP, "ip4");
-    } else if (lexer_match_id(ctx->lexer, "na")) {
-        parse_nested_action(ctx, ACTION_OPCODE_NA, "nd");
     } else if (lexer_match_id(ctx->lexer, "get_arp")) {
         parse_get_arp_action(ctx);
     } else if (lexer_match_id(ctx->lexer, "put_arp")) {
         parse_put_arp_action(ctx);
+    } else if (lexer_match_id(ctx->lexer, "nd_na")) {
+        parse_nested_action(ctx, ACTION_OPCODE_ND_NA, "nd_ns");
+    } else if (lexer_match_id(ctx->lexer, "get_nd")) {
+        parse_get_nd_action(ctx);
+    } else if (lexer_match_id(ctx->lexer, "put_nd")) {
+        parse_put_nd_action(ctx);
     } else {
         action_syntax_error(ctx, "expecting action");
     }

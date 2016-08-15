@@ -21,7 +21,7 @@ The DPDK support of Open vSwitch is considered 'experimental'.
 
 ### Prerequisites
 
-* Required: DPDK 16.04, libnuma
+* Required: DPDK 16.07
 * Hardware: [DPDK Supported NICs] when physical ports in use
 
 ## <a name="build"></a> 2. Building and Installation
@@ -42,10 +42,10 @@ advanced install guide [INSTALL.DPDK-ADVANCED.md]
 
      ```
      cd /usr/src/
-     wget http://dpdk.org/browse/dpdk/snapshot/dpdk-16.04.zip
-     unzip dpdk-16.04.zip
+     wget http://dpdk.org/browse/dpdk/snapshot/dpdk-16.07.zip
+     unzip dpdk-16.07.zip
 
-     export DPDK_DIR=/usr/src/dpdk-16.04
+     export DPDK_DIR=/usr/src/dpdk-16.07
      cd $DPDK_DIR
      ```
 
@@ -153,8 +153,8 @@ advanced install guide [INSTALL.DPDK-ADVANCED.md]
     modprobe vfio-pci
     sudo /usr/bin/chmod a+x /dev/vfio
     sudo /usr/bin/chmod 0666 /dev/vfio/*
-    $DPDK_DIR/tools/dpdk_nic_bind.py --bind=vfio-pci eth1
-    $DPDK_DIR/tools/dpdk_nic_bind.py --status
+    $DPDK_DIR/tools/dpdk-devbind.py --bind=vfio-pci eth1
+    $DPDK_DIR/tools/dpdk-devbind.py --status
     ```
 
   Note: If running kernels < 3.6 UIO drivers to be used,
@@ -372,9 +372,9 @@ can be found in [Vhost Walkthrough].
 
   ```
   cd /root/dpdk/
-  wget http://dpdk.org/browse/dpdk/snapshot/dpdk-16.04.zip
-  unzip dpdk-16.04.zip
-  export DPDK_DIR=/root/dpdk/dpdk-16.04
+  wget http://dpdk.org/browse/dpdk/snapshot/dpdk-16.07.zip
+  unzip dpdk-16.07.zip
+  export DPDK_DIR=/root/dpdk/dpdk-16.07
   export DPDK_TARGET=x86_64-native-linuxapp-gcc
   export DPDK_BUILD=$DPDK_DIR/$DPDK_TARGET
   cd $DPDK_DIR
@@ -398,8 +398,8 @@ can be found in [Vhost Walkthrough].
   mount -t hugetlbfs hugetlbfs /dev/hugepages (only if not already mounted)
   modprobe uio
   insmod $DPDK_BUILD/kmod/igb_uio.ko
-  $DPDK_DIR/tools/dpdk_nic_bind.py --status
-  $DPDK_DIR/tools/dpdk_nic_bind.py -b igb_uio 00:03.0 00:04.0
+  $DPDK_DIR/tools/dpdk-devbind.py --status
+  $DPDK_DIR/tools/dpdk-devbind.py -b igb_uio 00:03.0 00:04.0
   ```
 
   vhost ports pci ids can be retrieved using `lspci | grep Ethernet` cmd.
@@ -530,7 +530,7 @@ can be found in [Vhost Walkthrough].
            </disk>
            <disk type='dir' device='disk'>
              <driver name='qemu' type='fat'/>
-             <source dir='/usr/src/dpdk-16.04'/>
+             <source dir='/usr/src/dpdk-16.07'/>
              <target dev='vdb' bus='virtio'/>
              <readonly/>
            </disk>
@@ -570,18 +570,18 @@ can be found in [Vhost Walkthrough].
        ```
        cd $DPDK_DIR/app/test-pmd;
        ./testpmd -c 0x3 -n 4 --socket-mem 1024 -- --burst=64 -i --txqflags=0xf00 --disable-hw-vlan
-       set fwd mac_retry
+       set fwd mac retry
        start
        ```
 
        * Bind vNIC back to kernel once the test is completed.
 
        ```
-       $DPDK_DIR/tools/dpdk_nic_bind.py --bind=virtio-pci 0000:00:03.0
-       $DPDK_DIR/tools/dpdk_nic_bind.py --bind=virtio-pci 0000:00:04.0
+       $DPDK_DIR/tools/dpdk-devbind.py --bind=virtio-pci 0000:00:03.0
+       $DPDK_DIR/tools/dpdk-devbind.py --bind=virtio-pci 0000:00:04.0
        ```
        Note: Appropriate PCI IDs to be passed in above example. The PCI IDs can be
-       retrieved using '$DPDK_DIR/tools/dpdk_nic_bind.py --status' cmd.
+       retrieved using '$DPDK_DIR/tools/dpdk-devbind.py --status' cmd.
 
 ### 5.3 PHY-VM-PHY [IVSHMEM]
 
@@ -590,7 +590,6 @@ can be found in [Vhost Walkthrough].
 
 ## <a name="ovslimits"></a> 6. Limitations
 
-  - Supports MTU size 1500, MTU setting for DPDK netdevs will be in future OVS release.
   - Currently DPDK ports does not use HW offload functionality.
   - Network Interface Firmware requirements:
     Each release of DPDK is validated against a specific firmware version for
@@ -600,9 +599,9 @@ can be found in [Vhost Walkthrough].
     DPDK. It is recommended that users update Network Interface firmware to
     match what has been validated for the DPDK release.
 
-    For DPDK 16.04, the list of validated firmware versions can be found at:
+    For DPDK 16.07, the list of validated firmware versions can be found at:
 
-    http://dpdk.org/doc/guides/rel_notes/release_16_04.html
+    http://dpdk.org/doc/guides/rel_notes/release_16.07.html
 
 
 Bug Reporting:

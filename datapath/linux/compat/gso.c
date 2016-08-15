@@ -132,7 +132,7 @@ drop:
 EXPORT_SYMBOL_GPL(rpl_dev_queue_xmit);
 #endif /* OVS_USE_COMPAT_GSO_SEGMENTATION */
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0)
+#ifndef USE_UPSTREAM_TUNNEL_GSO
 static __be16 __skb_network_protocol(struct sk_buff *skb)
 {
 	__be16 type = skb->protocol;
@@ -171,6 +171,7 @@ static struct sk_buff *tnl_skb_gso_segment(struct sk_buff *skb,
 	__be16 proto = skb->protocol;
 	char cb[sizeof(skb->cb)];
 
+	BUILD_BUG_ON(sizeof(struct ovs_gso_cb) > FIELD_SIZEOF(struct sk_buff, cb));
 	OVS_GSO_CB(skb)->ipv6 = (sa_family == AF_INET6);
 	/* setup whole inner packet to get protocol. */
 	__skb_pull(skb, mac_offset);
@@ -185,8 +186,6 @@ static struct sk_buff *tnl_skb_gso_segment(struct sk_buff *skb,
 	/* From 3.9 kernel skb->cb is used by skb gso. Therefore
 	 * make copy of it to restore it back. */
 	memcpy(cb, skb->cb, sizeof(cb));
-
-	skb->encapsulation = 0;
 
 	/* We are handling offloads by segmenting l3 packet, so
 	 * no need to call OVS compat segmentation function. */
@@ -237,6 +236,9 @@ static int output_ip(struct sk_buff *skb)
 
 int rpl_ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
+	/* This bit set can confuse some drivers on old kernel. */
+	skb->encapsulation = 0;
+
 	if (!OVS_GSO_CB(skb)->fix_segment)
 		return output_ip(skb);
 
@@ -280,6 +282,8 @@ static int output_ipv6(struct sk_buff *skb)
 
 int rpl_ip6_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
+	/* This bit set can confuse some drivers on old kernel. */
+	skb->encapsulation = 0;
 
 	if (!OVS_GSO_CB(skb)->fix_segment)
 		return output_ipv6(skb);
@@ -310,4 +314,4 @@ int rpl_ip6_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
 	return output_ipv6(skb);
 }
 EXPORT_SYMBOL_GPL(rpl_ip6_local_out);
-#endif /* 3.18 */
+#endif /* USE_UPSTREAM_TUNNEL_GSO */

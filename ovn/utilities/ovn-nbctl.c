@@ -57,6 +57,10 @@ enum nbctl_wait_type {
 };
 static enum nbctl_wait_type wait_type = NBCTL_WAIT_NONE;
 
+/* Should we wait (if specified by 'wait_type') even if the commands don't
+ * change the database at all? */
+static bool force_wait = false;
+
 /* --timeout: Time to wait for a connection to 'db'. */
 static int timeout;
 
@@ -351,7 +355,7 @@ Logical switch port commands:\n\
   lsp-get-tag PORT          get the PORT's tag if set\n\
   lsp-set-addresses PORT [ADDRESS]...\n\
                             set MAC or MAC+IP addresses for PORT.\n\
-  lsp-get-addresses PORT    get a list of MAC addresses on PORT\n\
+  lsp-get-addresses PORT    get a list of MAC or MAC+IP addresses on PORT\n\
   lsp-set-port-security PORT [ADDRS]...\n\
                             set port security addresses for PORT.\n\
   lsp-get-port-security PORT    get PORT's port security addresses\n\
@@ -407,6 +411,9 @@ DHCP Options commands:\n\
                            displays the DHCP options for DHCP_OPTIONS_UUID\n\
 \n\
 %s\
+\n\
+Synchronization command (use with --wait=sb|hv):\n\
+  sync                     wait even for earlier changes to take effect\n\
 \n\
 Options:\n\
   --db=DATABASE               connect to DATABASE\n\
@@ -555,6 +562,21 @@ print_ls(const struct nbrec_logical_switch *ls, struct ds *s)
 
 static void
 nbctl_init(struct ctl_context *ctx OVS_UNUSED)
+{
+}
+
+static void
+nbctl_pre_sync(struct ctl_context *ctx OVS_UNUSED)
+{
+    if (wait_type != NBCTL_WAIT_NONE) {
+        force_wait = true;
+    } else {
+        VLOG_INFO("\"sync\" command has no effect without --wait");
+    }
+}
+
+static void
+nbctl_sync(struct ctl_context *ctx OVS_UNUSED)
 {
 }
 
@@ -2209,8 +2231,8 @@ do_nbctl(const char *args, struct ctl_command *commands, size_t n_commands,
     }
 
     if (wait_type != NBCTL_WAIT_NONE) {
-        ovsdb_idl_txn_increment(txn, &nb->header_,
-                                &nbrec_nb_global_col_nb_cfg);
+        ovsdb_idl_txn_increment(txn, &nb->header_, &nbrec_nb_global_col_nb_cfg,
+                                force_wait);
     }
 
     symtab = ovsdb_symbol_table_create();
@@ -2394,6 +2416,7 @@ nbctl_exit(int status)
 
 static const struct ctl_command_syntax nbctl_commands[] = {
     { "init", 0, 0, "", NULL, nbctl_init, NULL, "", RW },
+    { "sync", 0, 0, "", nbctl_pre_sync, nbctl_sync, NULL, "", RO },
     { "show", 0, 1, "[SWITCH]", NULL, nbctl_show, NULL, "", RO },
 
     /* logical switch commands. */
