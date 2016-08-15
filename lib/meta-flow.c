@@ -365,133 +365,47 @@ mf_is_mask_valid(const struct mf_field *mf, const union mf_value *mask)
     OVS_NOT_REACHED();
 }
 
-/* Returns true if 'flow' meets the prerequisites for 'mf', false otherwise. */
+/* Returns true if 'flow' meets the prerequisites for 'mf', false otherwise.
+ * Sets inspected bits in 'wc', if non-NULL. */
 bool
-mf_are_prereqs_ok(const struct mf_field *mf, const struct flow *flow)
+mf_are_prereqs_ok(const struct mf_field *mf, const struct flow *flow,
+                  struct flow_wildcards *wc)
 {
     switch (mf->prereqs) {
     case MFP_NONE:
         return true;
-
     case MFP_ARP:
-      return (flow->dl_type == htons(ETH_TYPE_ARP) ||
-              flow->dl_type == htons(ETH_TYPE_RARP));
+        return (flow->dl_type == htons(ETH_TYPE_ARP) ||
+                flow->dl_type == htons(ETH_TYPE_RARP));
     case MFP_IPV4:
         return flow->dl_type == htons(ETH_TYPE_IP);
     case MFP_IPV6:
         return flow->dl_type == htons(ETH_TYPE_IPV6);
     case MFP_VLAN_VID:
-        return (flow->vlan_tci & htons(VLAN_CFI)) != 0;
+        return is_vlan(flow, wc);
     case MFP_MPLS:
         return eth_type_mpls(flow->dl_type);
     case MFP_IP_ANY:
         return is_ip_any(flow);
-
     case MFP_TCP:
-        return is_ip_any(flow) && flow->nw_proto == IPPROTO_TCP
-            && !(flow->nw_frag & FLOW_NW_FRAG_LATER);
+        return is_tcp(flow, wc) && !(flow->nw_frag & FLOW_NW_FRAG_LATER);
     case MFP_UDP:
-        return is_ip_any(flow) && flow->nw_proto == IPPROTO_UDP
-            && !(flow->nw_frag & FLOW_NW_FRAG_LATER);
+        return is_udp(flow, wc) && !(flow->nw_frag & FLOW_NW_FRAG_LATER);
     case MFP_SCTP:
-        return is_ip_any(flow) && flow->nw_proto == IPPROTO_SCTP
-            && !(flow->nw_frag & FLOW_NW_FRAG_LATER);
+        return is_sctp(flow, wc) && !(flow->nw_frag & FLOW_NW_FRAG_LATER);
     case MFP_ICMPV4:
-        return is_icmpv4(flow, NULL);
+        return is_icmpv4(flow, wc);
     case MFP_ICMPV6:
-        return is_icmpv6(flow, NULL);
-
+        return is_icmpv6(flow, wc);
     case MFP_ND:
-        return is_nd(flow, NULL);
+        return is_nd(flow, wc);
     case MFP_ND_SOLICIT:
-        return is_nd(flow, NULL) && flow->tp_src == htons(ND_NEIGHBOR_SOLICIT);
+        return is_nd(flow, wc) && flow->tp_src == htons(ND_NEIGHBOR_SOLICIT);
     case MFP_ND_ADVERT:
-        return is_nd(flow, NULL) && flow->tp_src == htons(ND_NEIGHBOR_ADVERT);
+        return is_nd(flow, wc) && flow->tp_src == htons(ND_NEIGHBOR_ADVERT);
     }
 
     OVS_NOT_REACHED();
-}
-
-/* Set field and it's prerequisities in the mask.
- * This is only ever called for writeable 'mf's, but we do not make the
- * distinction here. */
-void
-mf_mask_field_and_prereqs(const struct mf_field *mf, struct flow_wildcards *wc)
-{
-    mf_mask_field_and_prereqs__(mf, &exact_match_mask, wc);
-}
-
-void
-mf_mask_field_and_prereqs__(const struct mf_field *mf,
-                            const union mf_value *mask,
-                            struct flow_wildcards *wc)
-{
-    mf_set_flow_value_masked(mf, &exact_match_mask, mask, &wc->masks);
-
-    switch (mf->prereqs) {
-    case MFP_ND:
-    case MFP_ND_SOLICIT:
-    case MFP_ND_ADVERT:
-        WC_MASK_FIELD(wc, tp_src);
-        WC_MASK_FIELD(wc, tp_dst);
-        /* Fall through. */
-    case MFP_TCP:
-    case MFP_UDP:
-    case MFP_SCTP:
-    case MFP_ICMPV4:
-    case MFP_ICMPV6:
-        /* nw_frag always unwildcarded. */
-        WC_MASK_FIELD(wc, nw_proto);
-        /* Fall through. */
-    case MFP_ARP:
-    case MFP_IPV4:
-    case MFP_IPV6:
-    case MFP_MPLS:
-    case MFP_IP_ANY:
-        /* dl_type always unwildcarded. */
-        break;
-    case MFP_VLAN_VID:
-        WC_MASK_FIELD_MASK(wc, vlan_tci, htons(VLAN_CFI));
-        break;
-    case MFP_NONE:
-        break;
-    }
-}
-
-/* Set bits of 'bm' corresponding to the field 'mf' and it's prerequisities. */
-void
-mf_bitmap_set_field_and_prereqs(const struct mf_field *mf, struct mf_bitmap *bm)
-{
-    bitmap_set1(bm->bm, mf->id);
-
-    switch (mf->prereqs) {
-    case MFP_ND:
-    case MFP_ND_SOLICIT:
-    case MFP_ND_ADVERT:
-        bitmap_set1(bm->bm, MFF_TCP_SRC);
-        bitmap_set1(bm->bm, MFF_TCP_DST);
-        /* Fall through. */
-    case MFP_TCP:
-    case MFP_UDP:
-    case MFP_SCTP:
-    case MFP_ICMPV4:
-    case MFP_ICMPV6:
-        /* nw_frag always unwildcarded. */
-        bitmap_set1(bm->bm, MFF_IP_PROTO);
-        /* Fall through. */
-    case MFP_ARP:
-    case MFP_IPV4:
-    case MFP_IPV6:
-    case MFP_MPLS:
-    case MFP_IP_ANY:
-        bitmap_set1(bm->bm, MFF_ETH_TYPE);
-        break;
-    case MFP_VLAN_VID:
-        bitmap_set1(bm->bm, MFF_VLAN_TCI);
-        break;
-    case MFP_NONE:
-        break;
-    }
 }
 
 /* Returns true if 'value' may be a valid value *as part of a masked match*,
@@ -1122,20 +1036,37 @@ mf_set_value(const struct mf_field *mf,
     }
 }
 
-/* Unwildcard 'mask' member field described by 'mf'.  The caller is
+/* Unwildcard the bits in 'mask' of the 'wc' member field described by 'mf'.
+ * The caller is responsible for ensuring that 'wc' meets 'mf''s
+ * prerequisites. */
+void
+mf_mask_field_masked(const struct mf_field *mf, const union mf_value *mask,
+                     struct flow_wildcards *wc)
+{
+    union mf_value temp_mask;
+    /* For MFF_DL_VLAN, we cannot send a all 1's to flow_set_dl_vlan() as that
+     * will be considered as OFP10_VLAN_NONE. So make sure the mask only has
+     * valid bits in this case. */
+    if (mf->id == MFF_DL_VLAN) {
+        temp_mask.be16 = htons(VLAN_VID_MASK) & mask->be16;
+        mask = &temp_mask;
+    }
+
+    union mf_value mask_value;
+
+    mf_get_value(mf, &wc->masks, &mask_value);
+    for (size_t i = 0; i < mf->n_bytes; i++) {
+        mask_value.b[i] |= mask->b[i];
+    }
+    mf_set_flow_value(mf, &mask_value, &wc->masks);
+}
+
+/* Unwildcard 'wc' member field described by 'mf'.  The caller is
  * responsible for ensuring that 'mask' meets 'mf''s prerequisites. */
 void
-mf_mask_field(const struct mf_field *mf, struct flow *mask)
+mf_mask_field(const struct mf_field *mf, struct flow_wildcards *wc)
 {
-    /* For MFF_DL_VLAN, we cannot send a all 1's to flow_set_dl_vlan()
-     * as that will be considered as OFP10_VLAN_NONE. So consider it as a
-     * special case. For the rest, calling mf_set_flow_value() is good
-     * enough. */
-    if (mf->id == MFF_DL_VLAN) {
-        flow_set_dl_vlan(mask, htons(VLAN_VID_MASK));
-    } else {
-        mf_set_flow_value(mf, &exact_match_mask, mask);
-    }
+    mf_mask_field_masked(mf, &exact_match_mask, wc);
 }
 
 static int
@@ -2022,7 +1953,7 @@ mf_check__(const struct mf_subfield *sf, const struct flow *flow,
                      "of %s field %s", sf->ofs, sf->n_bits,
                      sf->field->n_bits, type, sf->field->name);
         return OFPERR_OFPBAC_BAD_SET_LEN;
-    } else if (flow && !mf_are_prereqs_ok(sf->field, flow)) {
+    } else if (flow && !mf_are_prereqs_ok(sf->field, flow, NULL)) {
         VLOG_WARN_RL(&rl, "%s field %s lacks correct prerequisites",
                      type, sf->field->name);
         return OFPERR_OFPBAC_MATCH_INCONSISTENT;
@@ -2584,7 +2515,28 @@ void
 field_array_set(enum mf_field_id id, const union mf_value *value,
                 struct field_array *fa)
 {
+    size_t i, offset = 0;
+
     ovs_assert(id < MFF_N_IDS);
+
+    /* Find the spot for 'id'. */
+    BITMAP_FOR_EACH_1 (i, id, fa->used.bm) {
+        offset += mf_from_id(i)->n_bytes;
+    }
+
+    size_t value_size = mf_from_id(id)->n_bytes;
+
+    /* make room if necessary. */
+    if (!bitmap_is_set(fa->used.bm, id)) {
+        fa->values = xrealloc(fa->values, fa->values_size + value_size);
+        /* Move remainder forward, if any. */
+        if (offset < fa->values_size) {
+            memmove(fa->values + offset + value_size, fa->values + offset,
+                    fa->values_size - offset);
+        }
+        fa->values_size += value_size;
+    }
     bitmap_set1(fa->used.bm, id);
-    fa->value[id] = *value;
+
+    memcpy(fa->values + offset, value, value_size);
 }

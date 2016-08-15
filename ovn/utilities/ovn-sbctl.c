@@ -172,7 +172,6 @@ parse_options(int argc, char *argv[], struct shash *local_options)
         OPT_ONELINE,
         OPT_NO_SYSLOG,
         OPT_DRY_RUN,
-        OPT_PEER_CA_CERT,
         OPT_LOCAL,
         OPT_COMMANDS,
         OPT_OPTIONS,
@@ -558,6 +557,7 @@ cmd_chassis_add(struct ctl_context *ctx)
 
     size_t n_encaps = sset_count(&encap_set);
     struct sbrec_encap **encaps = xmalloc(n_encaps * sizeof *encaps);
+    const struct smap options = SMAP_CONST1(&options, "csum", "true");
     const char *encap_type;
     int i = 0;
     SSET_FOR_EACH (encap_type, &encap_set){
@@ -565,6 +565,7 @@ cmd_chassis_add(struct ctl_context *ctx)
 
         sbrec_encap_set_type(encaps[i], encap_type);
         sbrec_encap_set_ip(encaps[i], encap_ip);
+        sbrec_encap_set_options(encaps[i], &options);
         i++;
     }
     sset_destroy(&encap_set);
@@ -737,10 +738,10 @@ cmd_lflow_list(struct ctl_context *ctx)
             cur_pipeline = lflow->pipeline;
         }
 
-        const char *table_name = smap_get(&lflow->external_ids, "stage-name");
         printf("  table=%-2" PRId64 "(%-19s), priority=%-5" PRId64
                ", match=(%s), action=(%s)\n",
-               lflow->table_id, table_name ? table_name : "",
+               lflow->table_id,
+               smap_get_def(&lflow->external_ids, "stage-name", ""),
                lflow->priority, lflow->match, lflow->actions);
     }
 

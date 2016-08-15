@@ -18,6 +18,7 @@
 #include "byte-order.h"
 #include "openvswitch/json.h"
 #include "logical-fields.h"
+#include "nx-match.h"
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/match.h"
 #include "openvswitch/ofp-actions.h"
@@ -592,7 +593,7 @@ make_cmp(struct expr_context *ctx,
     }
 
     if (f->symbol->level == EXPR_L_NOMINAL) {
-        if (f->symbol->expansion) {
+        if (f->symbol->predicate) {
             ovs_assert(f->symbol->width > 0);
             for (size_t i = 0; i < cs->n_values; i++) {
                 const union mf_subvalue *value = &cs->values[i].value;
@@ -735,7 +736,9 @@ parse_macros(struct expr_context *ctx, struct expr_constant_set *cs,
              size_t *allocated_values)
 {
     struct expr_constant_set *addr_set
-        = shash_find_data(ctx->macros, ctx->lexer->token.s);
+        = (ctx->macros
+           ? shash_find_data(ctx->macros, ctx->lexer->token.s)
+           : NULL);
     if (!addr_set) {
         expr_syntax_error(ctx, "expecting address set name.");
         return false;
@@ -931,9 +934,12 @@ expr_parse_primary(struct expr_context *ctx, bool *atomic)
         }
 
         if (!expr_relop_from_token(ctx->lexer->token.type, &r)) {
-            if (f.n_bits > 1 && !ctx->not) {
+            if (!f.n_bits || ctx->lexer->token.type == LEX_T_EQUALS) {
+                expr_syntax_error(ctx, "expecting relational operator.");
+                return NULL;
+            } else if (f.n_bits > 1 && !ctx->not) {
                 expr_error(ctx, "Explicit `!= 0' is required for inequality "
-                           "test of multibit field against 0.");
+                            "test of multibit field against 0.");
                 return NULL;
             }
 
@@ -1111,10 +1117,41 @@ expr_parse_string(const char *s, const struct shash *symtab,
     return expr;
 }
 
+/* Appends to 's' a re-parseable representation of 'field'. */
+void
+expr_field_format(const struct expr_field *field, struct ds *s)
+{
+    ds_put_cstr(s, field->symbol->name);
+    if (field->ofs || field->n_bits != field->symbol->width) {
+        if (field->n_bits != 1) {
+            ds_put_format(s, "[%d..%d]",
+                          field->ofs, field->ofs + field->n_bits - 1);
+        } else {
+            ds_put_format(s, "[%d]", field->ofs);
+        }
+    }
+}
+
+void
+expr_symbol_format(const struct expr_symbol *symbol, struct ds *s)
+{
+    ds_put_format(s, "%s = ", symbol->name);
+    if (symbol->parent) {
+        struct expr_field f = { symbol->parent,
+                                symbol->parent_ofs,
+                                symbol->width };
+        expr_field_format(&f, s);
+    } else if (symbol->predicate) {
+        ds_put_cstr(s, symbol->predicate);
+    } else {
+        nx_format_field_name(symbol->field->id, OFP13_VERSION, s);
+    }
+}
+
 static struct expr_symbol *
 add_symbol(struct shash *symtab, const char *name, int width,
            const char *prereqs, enum expr_level level,
-           bool must_crossproduct)
+           bool must_crossproduct, bool rw)
 {
     struct expr_symbol *symbol = xzalloc(sizeof *symbol);
     symbol->name = xstrdup(name);
@@ -1122,6 +1159,7 @@ add_symbol(struct shash *symtab, const char *name, int width,
     symbol->width = width;
     symbol->level = level;
     symbol->must_crossproduct = must_crossproduct;
+    symbol->rw = rw;
     shash_add_assert(symtab, symbol->name, symbol);
     return symbol;
 }
@@ -1148,7 +1186,7 @@ expr_symtab_add_field(struct shash *symtab, const char *name,
                         (field->maskable == MFM_FULLY
                          ? EXPR_L_ORDINAL
                          : EXPR_L_NOMINAL),
-                        must_crossproduct);
+                        must_crossproduct, field->writable);
     symbol->field = field;
     return symbol;
 }
@@ -1201,8 +1239,10 @@ expr_symtab_add_subfield(struct shash *symtab, const char *name,
                   name, expr_level_to_string(level), f.symbol->name);
     }
 
-    symbol = add_symbol(symtab, name, f.n_bits, prereqs, level, false);
-    symbol->expansion = xstrdup(subfield);
+    symbol = add_symbol(symtab, name, f.n_bits, prereqs, level, false,
+                        f.symbol->rw);
+    symbol->parent = f.symbol;
+    symbol->parent_ofs = f.ofs;
     return symbol;
 }
 
@@ -1215,7 +1255,8 @@ expr_symtab_add_string(struct shash *symtab, const char *name,
     const struct mf_field *field = mf_from_id(id);
     struct expr_symbol *symbol;
 
-    symbol = add_symbol(symtab, name, 0, prereqs, EXPR_L_NOMINAL, false);
+    symbol = add_symbol(symtab, name, 0, prereqs, EXPR_L_NOMINAL, false,
+                        field->writable);
     symbol->field = field;
     return symbol;
 }
@@ -1276,8 +1317,8 @@ expr_symtab_add_predicate(struct shash *symtab, const char *name,
         return NULL;
     }
 
-    symbol = add_symbol(symtab, name, 1, NULL, level, false);
-    symbol->expansion = xstrdup(expansion);
+    symbol = add_symbol(symtab, name, 1, NULL, level, false, false);
+    symbol->predicate = xstrdup(expansion);
     return symbol;
 }
 
@@ -1293,7 +1334,7 @@ expr_symtab_destroy(struct shash *symtab)
         shash_delete(symtab, node);
         free(symbol->name);
         free(symbol->prereqs);
-        free(symbol->expansion);
+        free(symbol->predicate);
         free(symbol);
     }
 }
@@ -1436,38 +1477,30 @@ expr_annotate_cmp(struct expr *expr, const struct shash *symtab,
         }
     }
 
-    if (symbol->expansion) {
-        if (symbol->level == EXPR_L_ORDINAL) {
-            struct expr_field field;
+    if (symbol->parent) {
+        expr->cmp.symbol = symbol->parent;
+        mf_subvalue_shift(&expr->cmp.value, symbol->parent_ofs);
+        mf_subvalue_shift(&expr->cmp.mask, symbol->parent_ofs);
+    } else if (symbol->predicate) {
+        struct expr *predicate;
 
-            if (!parse_field_from_string(symbol->expansion, symtab,
-                                         &field, errorp)) {
-                goto error;
-            }
-
-            expr->cmp.symbol = field.symbol;
-            mf_subvalue_shift(&expr->cmp.value, field.ofs);
-            mf_subvalue_shift(&expr->cmp.mask, field.ofs);
-        } else {
-            struct expr *expansion;
-
-            expansion = parse_and_annotate(symbol->expansion, symtab,
-                                           nesting, errorp);
-            if (!expansion) {
-                goto error;
-            }
-
-            bool positive = (expr->cmp.value.integer & htonll(1)) != 0;
-            positive ^= expr->cmp.relop == EXPR_R_NE;
-            if (!positive) {
-                expr_not(expansion);
-            }
-
-            expr_destroy(expr);
-            expr = expansion;
+        predicate = parse_and_annotate(symbol->predicate, symtab,
+                                       nesting, errorp);
+        if (!predicate) {
+            goto error;
         }
+
+        bool positive = (expr->cmp.value.integer & htonll(1)) != 0;
+        positive ^= expr->cmp.relop == EXPR_R_NE;
+        if (!positive) {
+            expr_not(predicate);
+        }
+
+        expr_destroy(expr);
+        expr = predicate;
     }
 
+    *errorp = NULL;
     ovs_list_remove(&an.node);
     return prereqs ? expr_combine(EXPR_T_AND, expr, prereqs) : expr;
 
@@ -1527,8 +1560,10 @@ expr_annotate__(struct expr *expr, const struct shash *symtab,
  *
  * In each case, annotation occurs recursively as necessary.
  *
- * On failure, returns NULL and sets '*errorp' to an explanatory error
- * message, which the caller must free. */
+ * If successful, returns the annotated expression and sets '*errorp' to NULL.
+ * On failure, returns NULL and sets '*errorp' to an explanatory error message,
+ * which the caller must free.  In either case, the caller transfers ownership
+ * of 'expr' and receives ownership of the returned expression, if any. */
 struct expr *
 expr_annotate(struct expr *expr, const struct shash *symtab, char **errorp)
 {
@@ -1794,6 +1829,7 @@ crush_and_string(struct expr *expr, const struct expr_symbol *symbol)
     SSET_FOR_EACH (string, &result) {
         sub = xmalloc(sizeof *sub);
         sub->type = EXPR_T_CMP;
+        sub->cmp.relop = EXPR_R_EQ;
         sub->cmp.symbol = symbol;
         sub->cmp.string = xstrdup(string);
         ovs_list_push_back(&expr->andor, &sub->node);
@@ -2695,7 +2731,7 @@ expand_symbol(struct expr_context *ctx, bool rw,
 {
     const struct expr_symbol *orig_symbol = f->symbol;
 
-    if (f->symbol->expansion && f->symbol->level != EXPR_L_ORDINAL) {
+    if (f->symbol->predicate) {
         expr_error(ctx, "Predicate symbol %s used where lvalue required.",
                    f->symbol->name);
         return false;
@@ -2718,21 +2754,13 @@ expand_symbol(struct expr_context *ctx, bool rw,
         }
 
         /* If there's no expansion, we're done. */
-        if (!f->symbol->expansion) {
+        if (!f->symbol->parent) {
             break;
         }
 
         /* Expand. */
-        struct expr_field expansion;
-        char *error;
-        if (!parse_field_from_string(f->symbol->expansion, ctx->symtab,
-                                     &expansion, &error)) {
-            expr_error(ctx, "%s", error);
-            free(error);
-            return false;
-        }
-        f->symbol = expansion.symbol;
-        f->ofs += expansion.ofs;
+        f->ofs += f->symbol->parent_ofs;
+        f->symbol = f->symbol->parent;
     }
 
     if (rw && !f->symbol->field->writable) {
@@ -2872,16 +2900,6 @@ parse_assignment(struct lexer *lexer, struct expr_field *dst,
             bitwise_put(port, &sf->value,
                         sf->field->n_bytes, 0, sf->field->n_bits);
             bitwise_one(&sf->mask, sf->field->n_bytes, 0, sf->field->n_bits);
-
-            /* If the logical input port is being zeroed, clear the OpenFlow
-             * ingress port also, to allow a packet to be sent back to its
-             * origin. */
-            if (!port && sf->field->id == MFF_LOG_INPORT) {
-                sf = ofpact_put_SET_FIELD(ofpacts);
-                sf->field = mf_from_id(MFF_IN_PORT);
-                bitwise_one(&sf->mask,
-                            sf->field->n_bytes, 0, sf->field->n_bits);
-            }
         }
 
     exit_destroy_cs:

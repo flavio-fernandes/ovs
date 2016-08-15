@@ -209,7 +209,40 @@ AC_DEFUN([OVS_CHECK_DPDK], [
       [AC_DEFINE([VHOST_CUSE], [1], [DPDK vhost-cuse support enabled, vhost-user disabled.])
        DPDK_EXTRA_LIB="-lfuse"])
 
-    AC_SEARCH_LIBS([get_mempolicy],[numa],[],[AC_MSG_ERROR([unable to find libnuma, install the dependency package])])
+    AC_COMPILE_IFELSE([
+      AC_LANG_PROGRAM(
+        [
+          #include <rte_config.h>
+#if RTE_LIBRTE_VHOST_NUMA
+#error
+#endif
+        ], [])
+      ], [],
+      [AC_SEARCH_LIBS([get_mempolicy],[numa],[],[AC_MSG_ERROR([unable to find libnuma, install the dependency package])])
+       DPDK_EXTRA_LIB="-lnuma"])
+
+    AC_COMPILE_IFELSE([
+      AC_LANG_PROGRAM(
+        [
+          #include <rte_config.h>
+#if RTE_LIBRTE_PMD_PCAP
+#error
+#endif
+        ], [])
+      ], [],
+      [AC_SEARCH_LIBS([pcap_dump],[pcap],[],[AC_MSG_ERROR([unable to find libpcap, install the dependency package])])
+       DPDK_EXTRA_LIB="-lpcap"
+       AC_COMPILE_IFELSE([
+         AC_LANG_PROGRAM(
+           [
+             #include <rte_config.h>
+#if RTE_LIBRTE_PDUMP
+#error
+#endif
+         ], [])
+       ], [],
+       [AC_DEFINE([DPDK_PDUMP], [1], [DPDK pdump enabled in OVS.])])
+     ])
 
     # On some systems we have to add -ldl to link with dpdk
     #
@@ -221,7 +254,7 @@ AC_DEFUN([OVS_CHECK_DPDK], [
     DPDKLIB_FOUND=false
     save_LIBS=$LIBS
     for extras in "" "-ldl"; do
-        LIBS="$DPDK_LIB $extras $save_LIBS $DPDK_EXTRA_LIB -lnuma"
+        LIBS="$DPDK_LIB $extras $save_LIBS $DPDK_EXTRA_LIB"
         AC_LINK_IFELSE(
            [AC_LANG_PROGRAM([#include <rte_config.h>
                              #include <rte_eal.h>],
@@ -428,12 +461,14 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/include/net/inet_frag.h], [last_in],
                   [OVS_DEFINE([HAVE_INET_FRAGS_LAST_IN])])
   OVS_GREP_IFELSE([$KSRC/include/net/inet_frag.h], [inet_frag_evicting])
+  OVS_GREP_IFELSE([$KSRC/include/net/inet_frag.h], [inet_frag_evictor])
   OVS_FIND_FIELD_IFELSE([$KSRC/include/net/inet_frag.h], [inet_frags],
                         [frags_work])
   OVS_FIND_FIELD_IFELSE([$KSRC/include/net/inet_frag.h], [inet_frags],
                         [rwlock])
   OVS_FIND_FIELD_IFELSE([$KSRC/include/net/inet_frag.h], [inet_frag_queue],
                         [list_evictor])
+  OVS_GREP_IFELSE([$KSRC/include/net/inet_frag.h], [inet_frag_lru_move])
   OVS_GREP_IFELSE([$KSRC/include/net/inetpeer.h], [vif],
                   [OVS_DEFINE([HAVE_INETPEER_VIF_SUPPORT])])
 
@@ -460,6 +495,8 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [__skb_gso_segment])
   OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [can_checksum_protocol])
   OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [ndo_get_iflink])
+  OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [ndo_features_check],
+                  [OVS_DEFINE([USE_UPSTREAM_TUNNEL_GSO])])
   OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [ndo_add_vxlan_port])
   OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [ndo_add_geneve_port])
   OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [netdev_features_t])
@@ -537,8 +574,6 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [inner_protocol_type])
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [skb_inner_transport_offset])
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [kfree_skb_list])
-  OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [skb_scrub_packet.*xnet],
-		  [OVS_DEFINE([HAVE_SKB_SCRUB_PACKET_XNET])])
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [rxhash])
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [u16.*rxhash],
                   [OVS_DEFINE([HAVE_U16_RXHASH])])
@@ -653,6 +688,10 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/include/linux/udp.h], [no_check6_tx])
   OVS_GREP_IFELSE([$KSRC/include/linux/utsrelease.h], [el6],
                   [OVS_DEFINE([HAVE_RHEL6_PER_CPU])])
+  OVS_FIND_PARAM_IFELSE([$KSRC/include/net/protocol.h],
+                        [udp_add_offload], [net],
+                        [OVS_DEFINE([HAVE_UDP_ADD_OFFLOAD_TAKES_NET])])
+
 
   if cmp -s datapath/linux/kcompat.h.new \
             datapath/linux/kcompat.h >/dev/null 2>&1; then

@@ -920,6 +920,7 @@ static inline bool ipv6_addr_equals(const struct in6_addr *a,
 #endif
 }
 
+/* Checks the IPv6 address in 'mask' for all zeroes. */
 static inline bool ipv6_mask_is_any(const struct in6_addr *mask) {
     return ipv6_addr_equals(mask, &in6addr_any);
 }
@@ -1099,12 +1100,14 @@ void compose_arp(struct dp_packet *, uint16_t arp_op,
                  const struct eth_addr arp_sha,
                  const struct eth_addr arp_tha, bool broadcast,
                  ovs_be32 arp_spa, ovs_be32 arp_tpa);
-void compose_nd(struct dp_packet *, const struct eth_addr eth_src,
-                struct in6_addr *, struct in6_addr *);
-void compose_na(struct dp_packet *,
-                const struct eth_addr eth_src, const struct eth_addr eth_dst,
-                const ovs_be32 ipv6_src[4], const ovs_be32 ipv6_dst[4],
-                ovs_be32 rso_flags);
+void compose_nd_ns(struct dp_packet *, const struct eth_addr eth_src,
+                   const struct in6_addr *ipv6_src,
+                   const struct in6_addr *ipv6_dst);
+void compose_nd_na(struct dp_packet *, const struct eth_addr eth_src,
+                   const struct eth_addr eth_dst,
+                   const struct in6_addr *ipv6_src,
+                   const struct in6_addr *ipv6_dst,
+                   ovs_be32 rso_flags);
 uint32_t packet_csum_pseudoheader(const struct ip_header *);
 void IP_ECN_set_ce(struct dp_packet *pkt, bool is_ipv6);
 

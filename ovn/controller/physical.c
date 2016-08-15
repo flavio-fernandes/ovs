@@ -375,23 +375,47 @@ consider_port_binding(enum mf_field_id mff_ovn_geneve,
         }
 
         /* Resubmit to table 34. */
-        put_resubmit(OFTABLE_DROP_LOOPBACK, ofpacts_p);
+        put_resubmit(OFTABLE_CHECK_LOOPBACK, ofpacts_p);
         ofctrl_add_flow(OFTABLE_LOCAL_OUTPUT, 100,
                         &match, ofpacts_p, &binding->header_.uuid);
 
         /* Table 34, Priority 100.
          * =======================
          *
-         * Drop packets whose logical inport and outport are the same. */
+         * Drop packets whose logical inport and outport are the same
+         * and the MLF_ALLOW_LOOPBACK flag is not set. */
         match_init_catchall(&match);
         ofpbuf_clear(ofpacts_p);
         match_set_metadata(&match, htonll(dp_key));
+        match_set_reg_masked(&match, MFF_LOG_FLAGS - MFF_REG0,
+                             0, MLF_ALLOW_LOOPBACK);
         match_set_reg(&match, MFF_LOG_INPORT - MFF_REG0, port_key);
         match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0, port_key);
-        ofctrl_add_flow(OFTABLE_DROP_LOOPBACK, 100,
+        ofctrl_add_flow(OFTABLE_CHECK_LOOPBACK, 100,
                         &match, ofpacts_p, &binding->header_.uuid);
 
         /* Table 64, Priority 100.
+         * =======================
+         *
+         * If the packet is supposed to hair-pin because the "loopback"
+         * flag is set, temporarily set the in_port to zero, resubmit to
+         * table 65 for logical-to-physical translation, then restore
+         * the port number. */
+        match_init_catchall(&match);
+        ofpbuf_clear(ofpacts_p);
+        match_set_metadata(&match, htonll(dp_key));
+        match_set_reg_masked(&match, MFF_LOG_FLAGS - MFF_REG0,
+                             MLF_ALLOW_LOOPBACK, MLF_ALLOW_LOOPBACK);
+        match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0, port_key);
+
+        put_stack(MFF_IN_PORT, ofpact_put_STACK_PUSH(ofpacts_p));
+        put_load(0, MFF_IN_PORT, 0, 16, ofpacts_p);
+        put_resubmit(OFTABLE_LOG_TO_PHY, ofpacts_p);
+        put_stack(MFF_IN_PORT, ofpact_put_STACK_POP(ofpacts_p));
+        ofctrl_add_flow(OFTABLE_SAVE_INPORT, 100,
+                        &match, ofpacts_p, &binding->header_.uuid);
+
+        /* Table 65, Priority 100.
          * =======================
          *
          * Deliver the packet to the local vif. */
@@ -450,13 +474,31 @@ consider_port_binding(enum mf_field_id mff_ovn_geneve,
                         &match, ofpacts_p, &binding->header_.uuid);
     } else {
         /* Remote port connected by tunnel */
-        /* Table 32, priority 100.
-         * =======================
+
+        /* Table 32, priority 150 and 100.
+         * ===============================
          *
-         * Implements output to remote hypervisors.  Each flow matches an
-         * output port that includes a logical port on a remote hypervisor,
-         * and tunnels the packet to that hypervisor.
+         * Priority 150 is for packets received from a VXLAN tunnel
+         * which get resubmitted to OFTABLE_LOG_INGRESS_PIPELINE due to
+         * lack of needed metadata in VXLAN, explicitly skip sending
+         * back out any tunnels and resubmit to table 33 for local
+         * delivery.
+         *
+         * Priority 100 is for all other traffic which need to be sent
+         * to a remote hypervisor.  Each flow matches an output port
+         * that includes a logical port on a remote hypervisor, and
+         * tunnels the packet to that hypervisor.
          */
+        match_init_catchall(&match);
+        ofpbuf_clear(ofpacts_p);
+        match_set_reg_masked(&match, MFF_LOG_FLAGS - MFF_REG0,
+                             MLF_RCV_FROM_VXLAN, MLF_RCV_FROM_VXLAN);
+
+        /* Resubmit to table 33. */
+        put_resubmit(OFTABLE_LOCAL_OUTPUT, ofpacts_p);
+        ofctrl_add_flow(OFTABLE_REMOTE_OUTPUT, 150, &match, ofpacts_p,
+                        &binding->header_.uuid);
+
 
         match_init_catchall(&match);
         ofpbuf_clear(ofpacts_p);
@@ -523,12 +565,12 @@ consider_mc_group(enum mf_field_id mff_ovn_geneve,
         if (!strcmp(port->type, "patch")) {
             put_load(port->tunnel_key, MFF_LOG_OUTPORT, 0, 32,
                      remote_ofpacts_p);
-            put_resubmit(OFTABLE_DROP_LOOPBACK, remote_ofpacts_p);
+            put_resubmit(OFTABLE_CHECK_LOOPBACK, remote_ofpacts_p);
         } else if (simap_contains(&localvif_to_ofport,
                            (port->parent_port && *port->parent_port)
                            ? port->parent_port : port->logical_port)) {
             put_load(port->tunnel_key, MFF_LOG_OUTPORT, 0, 32, ofpacts_p);
-            put_resubmit(OFTABLE_DROP_LOOPBACK, ofpacts_p);
+            put_resubmit(OFTABLE_CHECK_LOOPBACK, ofpacts_p);
         } else if (port->chassis && !get_localnet_port(local_datapaths,
                                          mc->datapath->tunnel_key)) {
             /* Add remote chassis only when localnet port not exist,
@@ -835,11 +877,7 @@ physical_run(struct controller_ctx *ctx, enum mf_field_id mff_ovn_geneve,
      * metadata, we only support VXLAN for connections to gateways.  The
      * VNI is used to populate MFF_LOG_DATAPATH.  The gateway's logical
      * port is set to MFF_LOG_INPORT.  Then the packet is resubmitted to
-     * table 16 to determine the logical egress port.
-     *
-     * xxx Due to resubmitting to table 16, broadcasts will be re-sent to
-     * xxx all logical ports, including non-local ones which could cause
-     * xxx duplicate packets to be received by multiply-connected gateways. */
+     * table 16 to determine the logical egress port. */
     HMAP_FOR_EACH (tun, hmap_node, &tunnels) {
         if (tun->type != VXLAN) {
             continue;
@@ -859,6 +897,9 @@ physical_run(struct controller_ctx *ctx, enum mf_field_id mff_ovn_geneve,
             ofpbuf_clear(&ofpacts);
             put_move(MFF_TUN_ID, 0,  MFF_LOG_DATAPATH, 0, 24, &ofpacts);
             put_load(binding->tunnel_key, MFF_LOG_INPORT, 0, 15, &ofpacts);
+            /* For packets received from a vxlan tunnel, set a flag to that
+             * effect. */
+            put_load(1, MFF_LOG_FLAGS, MLF_RCV_FROM_VXLAN_BIT, 1, &ofpacts);
             put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, &ofpacts);
 
             ofctrl_add_flow(OFTABLE_PHY_TO_LOG, 100, &match, &ofpacts, hc_uuid);
@@ -884,11 +925,21 @@ physical_run(struct controller_ctx *ctx, enum mf_field_id mff_ovn_geneve,
      * registers (for consistent behavior with packets that get tunneled). */
     match_init_catchall(&match);
     ofpbuf_clear(&ofpacts);
-#define MFF_LOG_REG(ID) put_load(0, ID, 0, 32, &ofpacts);
-    MFF_LOG_REGS;
-#undef MFF_LOG_REGS
+    for (int i = 0; i < MFF_N_LOG_REGS; i++) {
+        put_load(0, MFF_REG0 + i, 0, 32, &ofpacts);
+    }
     put_resubmit(OFTABLE_LOG_EGRESS_PIPELINE, &ofpacts);
-    ofctrl_add_flow(OFTABLE_DROP_LOOPBACK, 0, &match, &ofpacts, hc_uuid);
+    ofctrl_add_flow(OFTABLE_CHECK_LOOPBACK, 0, &match, &ofpacts, hc_uuid);
+
+    /* Table 64, Priority 0.
+     * =======================
+     *
+     * Resubmit packets that do not have the MLF_ALLOW_LOOPBACK flag set
+     * to table 65 for logical-to-physical translation. */
+    match_init_catchall(&match);
+    ofpbuf_clear(&ofpacts);
+    put_resubmit(OFTABLE_LOG_TO_PHY, &ofpacts);
+    ofctrl_add_flow(OFTABLE_SAVE_INPORT, 0, &match, &ofpacts, hc_uuid);
 
     ofpbuf_uninit(&ofpacts);
 
