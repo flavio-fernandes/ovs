@@ -56,9 +56,6 @@ struct northd_context {
 static const char *ovnnb_db;
 static const char *ovnsb_db;
 
-static const char *default_nb_db(void);
-static const char *default_sb_db(void);
-
 #define MAC_ADDR_PREFIX 0x0A0000000000ULL
 #define MAC_ADDR_SPACE 0xffffff
 
@@ -521,11 +518,23 @@ build_datapaths(struct northd_context *ctx, struct hmap *datapaths)
 
             od->sb = sbrec_datapath_binding_insert(ctx->ovnsb_txn);
 
+            /* Get the logical-switch or logical-router UUID to set in
+             * external-ids. */
             char uuid_s[UUID_LEN + 1];
             sprintf(uuid_s, UUID_FMT, UUID_ARGS(&od->key));
             const char *key = od->nbs ? "logical-switch" : "logical-router";
-            const struct smap id = SMAP_CONST1(&id, key, uuid_s);
-            sbrec_datapath_binding_set_external_ids(od->sb, &id);
+
+            /* Get name to set in external-ids. */
+            const char *name = od->nbs ? od->nbs->name : od->nbr->name;
+
+            /* Set external-ids. */
+            struct smap ids = SMAP_INITIALIZER(&ids);
+            smap_add(&ids, key, uuid_s);
+            if (*name) {
+                smap_add(&ids, "name", name);
+            }
+            sbrec_datapath_binding_set_external_ids(od->sb, &ids);
+            smap_destroy(&ids);
 
             sbrec_datapath_binding_set_tunnel_key(od->sb, tunnel_key);
         }
@@ -1185,6 +1194,20 @@ ovn_port_update_sbrec(const struct ovn_port *op)
             smap_add(&new, "peer", router_port);
             if (chassis) {
                 smap_add(&new, "l3gateway-chassis", chassis);
+            }
+
+            const char *nat_addresses = smap_get(&op->nbsp->options,
+                                           "nat-addresses");
+            if (nat_addresses) {
+                struct lport_addresses laddrs;
+                if (!extract_lsp_addresses(nat_addresses, &laddrs)) {
+                    static struct vlog_rate_limit rl =
+                        VLOG_RATE_LIMIT_INIT(1, 1);
+                    VLOG_WARN_RL(&rl, "Error extracting nat-addresses.");
+                } else {
+                    smap_add(&new, "nat-addresses", nat_addresses);
+                    destroy_lport_addresses(&laddrs);
+                }
             }
             sbrec_port_binding_set_options(op->sb, &new);
             smap_destroy(&new);
@@ -2004,11 +2027,11 @@ build_pre_lb(struct ovn_datapath *od, struct hmap *lflows)
     ovn_lflow_add(lflows, od, S_SWITCH_OUT_PRE_LB, 0, "1", "next;");
 
     struct sset all_ips = SSET_INITIALIZER(&all_ips);
-    if (od->nbs->load_balancer) {
-        struct nbrec_load_balancer *lb = od->nbs->load_balancer;
+    bool vip_configured = false;
+    for (int i = 0; i < od->nbs->n_load_balancer; i++) {
+        struct nbrec_load_balancer *lb = od->nbs->load_balancer[i];
         struct smap *vips = &lb->vips;
         struct smap_node *node;
-        bool vip_configured = false;
 
         SMAP_FOR_EACH (node, vips) {
             vip_configured = true;
@@ -2032,23 +2055,23 @@ build_pre_lb(struct ovn_datapath *od, struct hmap *lflows)
              * the packet through ct() action to de-fragment. In stateful
              * table, we will eventually look at L4 information. */
         }
+    }
 
-        /* 'REGBIT_CONNTRACK_DEFRAG' is set to let the pre-stateful table send
-         * packet to conntrack for defragmentation. */
-        const char *ip_address;
-        SSET_FOR_EACH(ip_address, &all_ips) {
-            char *match = xasprintf("ip && ip4.dst == %s", ip_address);
-            ovn_lflow_add(lflows, od, S_SWITCH_IN_PRE_LB,
-                          100, match, REGBIT_CONNTRACK_DEFRAG" = 1; next;");
-            free(match);
-        }
+    /* 'REGBIT_CONNTRACK_DEFRAG' is set to let the pre-stateful table send
+     * packet to conntrack for defragmentation. */
+    const char *ip_address;
+    SSET_FOR_EACH(ip_address, &all_ips) {
+        char *match = xasprintf("ip && ip4.dst == %s", ip_address);
+        ovn_lflow_add(lflows, od, S_SWITCH_IN_PRE_LB,
+                      100, match, REGBIT_CONNTRACK_DEFRAG" = 1; next;");
+        free(match);
+    }
 
-        sset_destroy(&all_ips);
+    sset_destroy(&all_ips);
 
-        if (vip_configured) {
-            ovn_lflow_add(lflows, od, S_SWITCH_OUT_PRE_LB,
-                          100, "ip", REGBIT_CONNTRACK_DEFRAG" = 1; next;");
-        }
+    if (vip_configured) {
+        ovn_lflow_add(lflows, od, S_SWITCH_OUT_PRE_LB,
+                      100, "ip", REGBIT_CONNTRACK_DEFRAG" = 1; next;");
     }
 }
 
@@ -2389,8 +2412,8 @@ build_stateful(struct ovn_datapath *od, struct hmap *lflows)
      * a higher priority rule for load balancing below also commits the
      * connection, so it is okay if we do not hit the above match on
      * REGBIT_CONNTRACK_COMMIT. */
-    if (od->nbs->load_balancer) {
-        struct nbrec_load_balancer *lb = od->nbs->load_balancer;
+    for (int i = 0; i < od->nbs->n_load_balancer; i++) {
+        struct nbrec_load_balancer *lb = od->nbs->load_balancer[i];
         struct smap *vips = &lb->vips;
         struct smap_node *node;
 
@@ -3781,6 +3804,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                       "arp { "
                       "eth.dst = ff:ff:ff:ff:ff:ff; "
                       "arp.spa = reg1; "
+                      "arp.tpa = reg0; "
                       "arp.op = 1; " /* ARP request */
                       "output; "
                       "};");
@@ -4173,28 +4197,6 @@ ovnsb_db_run(struct northd_context *ctx, struct ovsdb_idl_loop *sb_loop)
     update_northbound_cfg(ctx, sb_loop);
 }
 
-static char *default_nb_db_;
-
-static const char *
-default_nb_db(void)
-{
-    if (!default_nb_db_) {
-        default_nb_db_ = xasprintf("unix:%s/ovnnb_db.sock", ovs_rundir());
-    }
-    return default_nb_db_;
-}
-
-static char *default_sb_db_;
-
-static const char *
-default_sb_db(void)
-{
-    if (!default_sb_db_) {
-        default_sb_db_ = xasprintf("unix:%s/ovnsb_db.sock", ovs_rundir());
-    }
-    return default_sb_db_;
-}
-
 static void
 parse_options(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 {
@@ -4398,8 +4400,6 @@ main(int argc, char *argv[])
     ovsdb_idl_loop_destroy(&ovnsb_idl_loop);
     service_stop();
 
-    free(default_nb_db_);
-    free(default_sb_db_);
     exit(res);
 }
 
