@@ -1524,6 +1524,13 @@ tcp.flags = RST;
         corresponding <ref table="Logical_Router" db="OVN_Northbound"/> row in
         the <ref db="OVN_Northbound"/> database.
       </column>
+
+      <column name="external_ids" key="name">
+        <code>ovn-northd</code> copies this from the <ref
+        table="Logical_Router" db="OVN_Northbound"/> or <ref
+        table="Logical_Switch" db="OVN_Northbound"/> table in the <ref
+        db="OVN_Northbound"/> database, when that column is nonempty.
+      </column>
     </group>
 
     <group title="Common Columns">
@@ -1749,6 +1756,16 @@ tcp.flags = RST;
       <column name="options" key="l3gateway-chassis">
         The <code>chassis</code> in which the port resides.
       </column>
+
+        <column name="options" key="nat-addresses">
+          MAC address of the <code>l3gateway</code> port followed by a list of
+          SNAT and DNAT IP addresses. This is used to send gratuitous ARPs for
+          SNAT and DNAT IP addresses via <code>localnet</code> and is valid for
+          only L3 gateway ports.  Example: <code>80:fa:5b:06:72:b7 158.36.44.22
+          158.36.44.24</code>. This would result in generation of gratuitous
+          ARPs for IP addresses 158.36.44.22 and 158.36.44.24 with a MAC
+          address of 80:fa:5b:06:72:b7.
+        </column>
     </group>
 
     <group title="Localnet Options">

@@ -334,110 +334,28 @@ test_dump_symtab(struct ovs_cmdl_context *ctx OVS_UNUSED)
 
 /* Evaluate an expression. */
 
-static bool evaluate_expr(const struct expr *, unsigned int subst, int n_bits);
-
 static bool
-evaluate_andor_expr(const struct expr *expr, unsigned int subst, int n_bits,
-                    bool short_circuit)
+lookup_atoi_cb(const void *aux OVS_UNUSED, const char *port_name,
+               unsigned int *portp)
 {
-    const struct expr *sub;
-
-    LIST_FOR_EACH (sub, node, &expr->andor) {
-        if (evaluate_expr(sub, subst, n_bits) == short_circuit) {
-            return short_circuit;
-        }
-    }
-    return !short_circuit;
-}
-
-static bool
-evaluate_cmp_expr(const struct expr *expr, unsigned int subst, int n_bits)
-{
-    int var_idx = atoi(expr->cmp.symbol->name + 1);
-    if (expr->cmp.symbol->name[0] == 'n') {
-        unsigned var_mask = (1u << n_bits) - 1;
-        unsigned int arg1 = (subst >> (var_idx * n_bits)) & var_mask;
-        unsigned int arg2 = ntohll(expr->cmp.value.integer);
-        unsigned int mask = ntohll(expr->cmp.mask.integer);
-
-        ovs_assert(!(mask & ~var_mask));
-        ovs_assert(!(arg2 & ~var_mask));
-        ovs_assert(!(arg2 & ~mask));
-
-        arg1 &= mask;
-        switch (expr->cmp.relop) {
-        case EXPR_R_EQ:
-            return arg1 == arg2;
-
-        case EXPR_R_NE:
-            return arg1 != arg2;
-
-        case EXPR_R_LT:
-            return arg1 < arg2;
-
-        case EXPR_R_LE:
-            return arg1 <= arg2;
-
-        case EXPR_R_GT:
-            return arg1 > arg2;
-
-        case EXPR_R_GE:
-            return arg1 >= arg2;
-
-        default:
-            OVS_NOT_REACHED();
-        }
-    } else if (expr->cmp.symbol->name[0] == 's') {
-        unsigned int arg1 = (subst >> (test_nvars * n_bits + var_idx)) & 1;
-        unsigned int arg2 = atoi(expr->cmp.string);
-        return arg1 == arg2;
-    } else {
-        OVS_NOT_REACHED();
-    }
-}
-
-/* Evaluates 'expr' and returns its Boolean result.  'subst' provides the value
- * for the variables, which must be 'n_bits' bits each and be named "a", "b",
- * "c", etc.  The value of variable "a" is the least-significant 'n_bits' bits
- * of 'subst', the value of "b" is the next 'n_bits' bits, and so on. */
-static bool
-evaluate_expr(const struct expr *expr, unsigned int subst, int n_bits)
-{
-    switch (expr->type) {
-    case EXPR_T_CMP:
-        return evaluate_cmp_expr(expr, subst, n_bits);
-
-    case EXPR_T_AND:
-        return evaluate_andor_expr(expr, subst, n_bits, false);
-
-    case EXPR_T_OR:
-        return evaluate_andor_expr(expr, subst, n_bits, true);
-
-    case EXPR_T_BOOLEAN:
-        return expr->boolean;
-
-    default:
-        OVS_NOT_REACHED();
-    }
+    *portp = atoi(port_name);
+    return true;
 }
 
 static void
 test_evaluate_expr(struct ovs_cmdl_context *ctx)
 {
-    int a = atoi(ctx->argv[1]);
-    int b = atoi(ctx->argv[2]);
-    int c = atoi(ctx->argv[3]);
-    unsigned int subst = a | (b << 3) || (c << 6);
     struct shash symtab;
     struct ds input;
 
-    shash_init(&symtab);
-    expr_symtab_add_field(&symtab, "xreg0", MFF_XREG0, NULL, false);
-    expr_symtab_add_field(&symtab, "xreg1", MFF_XREG1, NULL, false);
-    expr_symtab_add_field(&symtab, "xreg2", MFF_XREG1, NULL, false);
-    expr_symtab_add_subfield(&symtab, "a", NULL, "xreg0[0..2]");
-    expr_symtab_add_subfield(&symtab, "b", NULL, "xreg1[0..2]");
-    expr_symtab_add_subfield(&symtab, "c", NULL, "xreg2[0..2]");
+    ovn_init_symtab(&symtab);
+
+    struct flow uflow;
+    char *error = expr_parse_microflow(ctx->argv[1], &symtab, NULL,
+                                       lookup_atoi_cb, NULL, &uflow);
+    if (error) {
+        ovs_fatal(0, "%s", error);
+    }
 
     ds_init(&input);
     while (!ds_get_test_line(&input, stdin)) {
@@ -449,7 +367,7 @@ test_evaluate_expr(struct ovs_cmdl_context *ctx)
             expr = expr_annotate(expr, &symtab, &error);
         }
         if (!error) {
-            printf("%d\n", evaluate_expr(expr, subst, 3));
+            printf("%d\n", expr_evaluate(expr, &uflow, lookup_atoi_cb, NULL));
         } else {
             puts(error);
             free(error);
@@ -881,10 +799,6 @@ test_tree_shape_exhaustively(struct expr *expr, struct shash *symtab,
                              int n_bits,
                              const struct expr_symbol *svars[], int n_svars)
 {
-    struct simap string_map = SIMAP_INITIALIZER(&string_map);
-    simap_put(&string_map, "0", 0);
-    simap_put(&string_map, "1", 1);
-
     int n_tested = 0;
 
     const unsigned int var_mask = (1u << n_bits) - 1;
@@ -899,7 +813,6 @@ test_tree_shape_exhaustively(struct expr *expr, struct shash *symtab,
         for (int i = n_terminals - 1; ; i--) {
             if (!i) {
                 ds_destroy(&s);
-                simap_destroy(&string_map);
                 return n_tested;
             }
             if (next_terminal(terminals[i], nvars, n_nvars, n_bits,
@@ -940,7 +853,7 @@ test_tree_shape_exhaustively(struct expr *expr, struct shash *symtab,
             struct expr_match *m;
             struct test_rule *test_rule;
 
-            expr_to_matches(modified, lookup_port_cb, &string_map, &matches);
+            expr_to_matches(modified, lookup_atoi_cb, NULL, &matches);
 
             classifier_init(&cls, NULL);
             HMAP_FOR_EACH (m, hmap_node, &matches) {
@@ -952,8 +865,16 @@ test_tree_shape_exhaustively(struct expr *expr, struct shash *symtab,
         }
         for (int subst = 0; subst < 1 << (n_bits * n_nvars + n_svars);
              subst++) {
-            bool expected = evaluate_expr(expr, subst, n_bits);
-            bool actual = evaluate_expr(modified, subst, n_bits);
+            for (int i = 0; i < n_nvars; i++) {
+                f.regs[i] = (subst >> (i * n_bits)) & var_mask;
+            }
+            for (int i = 0; i < n_svars; i++) {
+                f.regs[n_nvars + i] = ((subst >> (n_nvars * n_bits + i))
+                                       & 1);
+            }
+
+            bool expected = expr_evaluate(expr, &f, lookup_atoi_cb, NULL);
+            bool actual = expr_evaluate(modified, &f, lookup_atoi_cb, NULL);
             if (actual != expected) {
                 struct ds expr_s, modified_s;
 
@@ -983,13 +904,6 @@ test_tree_shape_exhaustively(struct expr *expr, struct shash *symtab,
             }
 
             if (operation >= OP_FLOW) {
-                for (int i = 0; i < n_nvars; i++) {
-                    f.regs[i] = (subst >> (i * n_bits)) & var_mask;
-                }
-                for (int i = 0; i < n_svars; i++) {
-                    f.regs[n_nvars + i] = ((subst >> (n_nvars * n_bits + i))
-                                           & 1);
-                }
                 bool found = classifier_lookup(&cls, OVS_VERSION_MIN,
                                                &f, NULL) != NULL;
                 if (expected != found) {
@@ -1378,10 +1292,16 @@ expr-to-flows\n\
   differing degrees of analysis.  Available fields are based on packet\n\
   headers.\n\
 \n\
-evaluate-expr A B C\n\
-  Parses OVN expressions from stdin, evaluate them with assigned values,\n\
-  and print the results on stdout.  Available fields are 'a', 'b', and 'c'\n\
-  of 3 bits each.  A, B, and C should be in the range 0 to 7.\n\
+evaluate-expr MICROFLOW\n\
+  Parses OVN expressions from stdin and evaluates them against the flow\n\
+  specified in MICROFLOW, which must be an expression that constrains\n\
+  the packet, e.g. \"ip4 && tcp.src == 80\" for a TCP packet with source\n\
+  port 80, and prints the results on stdout, either 1 for true or 0 for\n\
+  false.  Use quoted integers, e.g. \"123\", for string fields.\n\
+\n\
+  Example: for MICROFLOW of \"ip4 && tcp.src == 80\", \"eth.type == 0x800\"\n\
+  evaluates to true, \"udp\" evaluates to false, and \"udp || tcp\"\n\
+  evaluates to true.\n\
 \n\
 composition N\n\
   Prints all the compositions of N on stdout.\n\
@@ -1513,26 +1433,26 @@ test_ovn_main(int argc, char *argv[])
 
     static const struct ovs_cmdl_command commands[] = {
         /* Lexer. */
-        {"lex", NULL, 0, 0, test_lex},
+        {"lex", NULL, 0, 0, test_lex, OVS_RO},
 
         /* Symbol table. */
-        {"dump-symtab", NULL, 0, 0, test_dump_symtab},
+        {"dump-symtab", NULL, 0, 0, test_dump_symtab, OVS_RO},
 
         /* Expressions. */
-        {"parse-expr", NULL, 0, 0, test_parse_expr},
-        {"annotate-expr", NULL, 0, 0, test_annotate_expr},
-        {"simplify-expr", NULL, 0, 0, test_simplify_expr},
-        {"normalize-expr", NULL, 0, 0, test_normalize_expr},
-        {"expr-to-flows", NULL, 0, 0, test_expr_to_flows},
-        {"evaluate-expr", NULL, 1, 1, test_evaluate_expr},
-        {"composition", NULL, 1, 1, test_composition},
-        {"tree-shape", NULL, 1, 1, test_tree_shape},
-        {"exhaustive", NULL, 1, 1, test_exhaustive},
+        {"parse-expr", NULL, 0, 0, test_parse_expr, OVS_RO},
+        {"annotate-expr", NULL, 0, 0, test_annotate_expr, OVS_RO},
+        {"simplify-expr", NULL, 0, 0, test_simplify_expr, OVS_RO},
+        {"normalize-expr", NULL, 0, 0, test_normalize_expr, OVS_RO},
+        {"expr-to-flows", NULL, 0, 0, test_expr_to_flows, OVS_RO},
+        {"evaluate-expr", NULL, 1, 1, test_evaluate_expr, OVS_RO},
+        {"composition", NULL, 1, 1, test_composition, OVS_RO},
+        {"tree-shape", NULL, 1, 1, test_tree_shape, OVS_RO},
+        {"exhaustive", NULL, 1, 1, test_exhaustive, OVS_RO},
 
         /* Actions. */
-        {"parse-actions", NULL, 0, 0, test_parse_actions},
+        {"parse-actions", NULL, 0, 0, test_parse_actions, OVS_RO},
 
-        {NULL, NULL, 0, 0, NULL},
+        {NULL, NULL, 0, 0, NULL, OVS_RO},
     };
     struct ovs_cmdl_context ctx;
     ctx.argc = argc - optind;

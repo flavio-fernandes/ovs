@@ -140,9 +140,6 @@ BUILD_ASSERT_DECL((MAX_NB_MBUF / ROUND_DOWN_POW2(MAX_NB_MBUF/MIN_NB_MBUF))
 #define OVS_VHOST_QUEUE_DISABLED    (-2) /* Queue was disabled by guest and not
                                           * yet mapped to another queue. */
 
-#ifdef VHOST_CUSE
-static char *cuse_dev_name = NULL;    /* Character device cuse_dev_name. */
-#endif
 static char *vhost_sock_dir = NULL;   /* Location of vhost-user sockets */
 
 #define VHOST_ENQ_RETRY_NUM 8
@@ -359,10 +356,9 @@ struct netdev_dpdk {
     /* True if vHost device is 'up' and has been reconfigured at least once */
     bool vhost_reconfigured;
 
-    /* Identifier used to distinguish vhost devices from each other.  It does
-     * not change during the lifetime of a struct netdev_dpdk.  It can be read
-     * without holding any mutex. */
-    const char vhost_id[PATH_MAX];
+    /* Identifiers used to distinguish vhost devices from each other. */
+    char vhost_server_id[PATH_MAX];
+    char vhost_client_id[PATH_MAX];
 
     /* In dpdk_list. */
     struct ovs_list list_node OVS_GUARDED_BY(dpdk_mutex);
@@ -380,6 +376,9 @@ struct netdev_dpdk {
 
     /* Socket ID detected when vHost device is brought up */
     int requested_socket_id;
+
+    /* Denotes whether vHost port is client/server mode */
+    uint64_t vhost_driver_flags;
 
     /* Ingress Policer */
     OVSRCU_TYPE(struct ingress_policer *) ingress_policer;
@@ -815,6 +814,8 @@ netdev_dpdk_init(struct netdev *netdev, unsigned int port_no,
     dev->max_packet_len = MTU_TO_FRAME_LEN(dev->mtu);
     ovsrcu_index_init(&dev->vid, -1);
     dev->vhost_reconfigured = false;
+    /* initialise vHost port in server mode */
+    dev->vhost_driver_flags &= ~RTE_VHOST_USER_CLIENT;
 
     err = netdev_dpdk_mempool_configure(dev);
     if (err) {
@@ -877,41 +878,22 @@ dpdk_dev_parse_name(const char dev_name[], const char prefix[],
     }
 }
 
-static int
-vhost_construct_helper(struct netdev *netdev) OVS_REQUIRES(dpdk_mutex)
+/* Returns a pointer to the relevant vHost socket ID depending on the mode in
+ * use */
+static char *
+get_vhost_id(struct netdev_dpdk *dev)
+    OVS_REQUIRES(dev->mutex)
 {
-    if (rte_eal_init_ret) {
-        return rte_eal_init_ret;
-    }
-
-    return netdev_dpdk_init(netdev, -1, DPDK_DEV_VHOST);
+    return dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT ?
+           dev->vhost_client_id : dev->vhost_server_id;
 }
 
 static int
-netdev_dpdk_vhost_cuse_construct(struct netdev *netdev)
-{
-    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
-    int err;
-
-    if (rte_eal_init_ret) {
-        return rte_eal_init_ret;
-    }
-
-    ovs_mutex_lock(&dpdk_mutex);
-    strncpy(CONST_CAST(char *, dev->vhost_id), netdev->name,
-            sizeof dev->vhost_id);
-    err = vhost_construct_helper(netdev);
-    ovs_mutex_unlock(&dpdk_mutex);
-    return err;
-}
-
-static int
-netdev_dpdk_vhost_user_construct(struct netdev *netdev)
+netdev_dpdk_vhost_construct(struct netdev *netdev)
 {
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
     const char *name = netdev->name;
     int err;
-    uint64_t flags = 0;
 
     /* 'name' is appended to 'vhost_sock_dir' and used to create a socket in
      * the file system. '/' or '\' would traverse directories, so they're not
@@ -929,20 +911,25 @@ netdev_dpdk_vhost_user_construct(struct netdev *netdev)
 
     ovs_mutex_lock(&dpdk_mutex);
     /* Take the name of the vhost-user port and append it to the location where
-     * the socket is to be created, then register the socket.
+     * the socket is to be created, then register the socket. Sockets are
+     * registered initially in 'server' mode.
      */
-    snprintf(CONST_CAST(char *, dev->vhost_id), sizeof dev->vhost_id, "%s/%s",
+    snprintf(dev->vhost_server_id, sizeof dev->vhost_server_id, "%s/%s",
              vhost_sock_dir, name);
 
-    err = rte_vhost_driver_register(dev->vhost_id, flags);
+    err = rte_vhost_driver_register(dev->vhost_server_id,
+                                    dev->vhost_driver_flags);
     if (err) {
         VLOG_ERR("vhost-user socket device setup failure for socket %s\n",
-                 dev->vhost_id);
+                 dev->vhost_server_id);
     } else {
-        fatal_signal_add_file_to_unlink(dev->vhost_id);
-        VLOG_INFO("Socket %s created for vhost-user port %s\n",
-                  dev->vhost_id, name);
-        err = vhost_construct_helper(netdev);
+        if (!(dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT)) {
+            /* OVS server mode - add this socket to list for deletion */
+            fatal_signal_add_file_to_unlink(dev->vhost_server_id);
+            VLOG_INFO("Socket %s created for vhost-user port %s\n",
+                      dev->vhost_server_id, name);
+        }
+        err = netdev_dpdk_init(netdev, -1, DPDK_DEV_VHOST);
     }
 
     ovs_mutex_unlock(&dpdk_mutex);
@@ -995,28 +982,31 @@ netdev_dpdk_destruct(struct netdev *netdev)
  * try to acquire 'dpdk_mutex' and possibly 'dev->mutex'.  To avoid a
  * deadlock, none of the mutexes must be held while calling this function. */
 static int
-dpdk_vhost_driver_unregister(struct netdev_dpdk *dev)
+dpdk_vhost_driver_unregister(struct netdev_dpdk *dev OVS_UNUSED,
+                             char *vhost_id)
     OVS_EXCLUDED(dpdk_mutex)
     OVS_EXCLUDED(dev->mutex)
 {
-    return rte_vhost_driver_unregister(dev->vhost_id);
+    return rte_vhost_driver_unregister(vhost_id);
 }
 
 static void
 netdev_dpdk_vhost_destruct(struct netdev *netdev)
 {
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+    char *vhost_id;
 
     ovs_mutex_lock(&dpdk_mutex);
     ovs_mutex_lock(&dev->mutex);
 
     /* Guest becomes an orphan if still attached. */
-    if (netdev_dpdk_get_vid(dev) >= 0) {
+    if (netdev_dpdk_get_vid(dev) >= 0
+        && !(dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT)) {
         VLOG_ERR("Removing port '%s' while vhost device still attached.",
                  netdev->name);
         VLOG_ERR("To restore connectivity after re-adding of port, VM on socket"
                  " '%s' must be restarted.",
-                 dev->vhost_id);
+                 get_vhost_id(dev));
     }
 
     free(ovsrcu_get_protected(struct ingress_policer *,
@@ -1026,14 +1016,18 @@ netdev_dpdk_vhost_destruct(struct netdev *netdev)
     ovs_list_remove(&dev->list_node);
     dpdk_mp_put(dev->dpdk_mp);
 
+    vhost_id = xstrdup(get_vhost_id(dev));
+
     ovs_mutex_unlock(&dev->mutex);
     ovs_mutex_unlock(&dpdk_mutex);
 
-    if (dpdk_vhost_driver_unregister(dev)) {
-        VLOG_ERR("Unable to remove vhost-user socket %s", dev->vhost_id);
-    } else {
-        fatal_signal_remove_file_to_unlink(dev->vhost_id);
+    if (dpdk_vhost_driver_unregister(dev, vhost_id)) {
+        VLOG_ERR("Unable to remove vhost-user socket %s", vhost_id);
+    } else if (!(dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT)) {
+        /* OVS server mode - remove this socket from list for deletion */
+        fatal_signal_remove_file_to_unlink(vhost_id);
     }
+    free(vhost_id);
 }
 
 static void
@@ -1109,6 +1103,23 @@ netdev_dpdk_ring_set_config(struct netdev *netdev, const struct smap *args)
     ovs_mutex_lock(&dev->mutex);
     dpdk_set_rxq_config(dev, args);
     ovs_mutex_unlock(&dev->mutex);
+
+    return 0;
+}
+
+static int
+netdev_dpdk_vhost_set_config(struct netdev *netdev, const struct smap *args)
+{
+    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+    const char *path;
+
+    if (!(dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT)) {
+        path = smap_get(args, "vhost-server-path");
+        if (path && strcmp(path, dev->vhost_client_id)) {
+            strcpy(dev->vhost_client_id, path);
+            netdev_request_reconfigure(netdev);
+        }
+    }
 
     return 0;
 }
@@ -2315,7 +2326,7 @@ netdev_dpdk_remap_txqs(struct netdev_dpdk *dev)
         }
     }
 
-    VLOG_DBG("TX queue mapping for %s\n", dev->vhost_id);
+    VLOG_DBG("TX queue mapping for %s\n", get_vhost_id(dev));
     for (i = 0; i < total_txqs; i++) {
         VLOG_DBG("%2d --> %2d", i, dev->tx_q[i].map);
     }
@@ -2339,10 +2350,10 @@ new_device(int vid)
     ovs_mutex_lock(&dpdk_mutex);
     /* Add device to the vhost port with the same name as that passed down. */
     LIST_FOR_EACH(dev, list_node, &dpdk_list) {
-        if (strncmp(ifname, dev->vhost_id, IF_NAME_SZ) == 0) {
+        ovs_mutex_lock(&dev->mutex);
+        if (strncmp(ifname, get_vhost_id(dev), IF_NAME_SZ) == 0) {
             uint32_t qp_num = rte_vhost_get_queue_num(vid);
 
-            ovs_mutex_lock(&dev->mutex);
             /* Get NUMA information */
             newnode = rte_vhost_get_numa_node(vid);
             if (newnode == -1) {
@@ -2372,6 +2383,7 @@ new_device(int vid)
             ovs_mutex_unlock(&dev->mutex);
             break;
         }
+        ovs_mutex_unlock(&dev->mutex);
     }
     ovs_mutex_unlock(&dpdk_mutex);
 
@@ -2465,8 +2477,8 @@ vring_state_changed(int vid, uint16_t queue_id, int enable)
 
     ovs_mutex_lock(&dpdk_mutex);
     LIST_FOR_EACH (dev, list_node, &dpdk_list) {
-        if (strncmp(ifname, dev->vhost_id, IF_NAME_SZ) == 0) {
-            ovs_mutex_lock(&dev->mutex);
+        ovs_mutex_lock(&dev->mutex);
+        if (strncmp(ifname, get_vhost_id(dev), IF_NAME_SZ) == 0) {
             if (enable) {
                 dev->tx_q[qid].map = qid;
             } else {
@@ -2477,6 +2489,7 @@ vring_state_changed(int vid, uint16_t queue_id, int enable)
             ovs_mutex_unlock(&dev->mutex);
             break;
         }
+        ovs_mutex_unlock(&dev->mutex);
     }
     ovs_mutex_unlock(&dpdk_mutex);
 
@@ -2519,7 +2532,7 @@ static void *
 start_vhost_loop(void *dummy OVS_UNUSED)
 {
      pthread_detach(pthread_self());
-     /* Put the cuse thread into quiescent state. */
+     /* Put the vhost thread into quiescent state. */
      ovsrcu_quiesce_start();
      rte_vhost_driver_session_start();
      return NULL;
@@ -2534,18 +2547,6 @@ dpdk_vhost_class_init(void)
                             | 1ULL << VIRTIO_NET_F_CSUM);
 
     ovs_thread_create("vhost_thread", start_vhost_loop, NULL);
-    return 0;
-}
-
-static int
-dpdk_vhost_cuse_class_init(void)
-{
-    return 0;
-}
-
-static int
-dpdk_vhost_user_class_init(void)
-{
     return 0;
 }
 
@@ -2971,9 +2972,10 @@ out:
 }
 
 static int
-netdev_dpdk_vhost_user_reconfigure(struct netdev *netdev)
+netdev_dpdk_vhost_reconfigure(struct netdev *netdev)
 {
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+    int err = 0;
 
     ovs_mutex_lock(&dpdk_mutex);
     ovs_mutex_lock(&dev->mutex);
@@ -2999,26 +3001,42 @@ netdev_dpdk_vhost_user_reconfigure(struct netdev *netdev)
         dev->vhost_reconfigured = true;
     }
 
-    ovs_mutex_unlock(&dev->mutex);
-    ovs_mutex_unlock(&dpdk_mutex);
+    /* Configure vHost client mode if requested and if the following criteria
+     * are met:
+     *  1. Device is currently in 'server' mode.
+     *  2. Device is currently not active.
+     *  3. A path has been specified.
+     */
+    if (!(dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT)
+            && !(netdev_dpdk_get_vid(dev) >= 0)
+            && strlen(dev->vhost_client_id)) {
+        /* Unregister server-mode device */
+        char *vhost_id = xstrdup(get_vhost_id(dev));
 
-    return 0;
-}
-
-static int
-netdev_dpdk_vhost_cuse_reconfigure(struct netdev *netdev)
-{
-    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
-
-    ovs_mutex_lock(&dpdk_mutex);
-    ovs_mutex_lock(&dev->mutex);
-
-    netdev->n_txq = dev->requested_n_txq;
-    netdev->n_rxq = 1;
-
-    if (dev->requested_mtu != dev->mtu) {
-        if (!netdev_dpdk_mempool_configure(dev)) {
-            netdev_change_seq_changed(netdev);
+        ovs_mutex_unlock(&dev->mutex);
+        ovs_mutex_unlock(&dpdk_mutex);
+        err = dpdk_vhost_driver_unregister(dev, vhost_id);
+        free(vhost_id);
+        ovs_mutex_lock(&dpdk_mutex);
+        ovs_mutex_lock(&dev->mutex);
+        if (err) {
+            VLOG_ERR("Unable to remove vhost-user socket %s",
+                     get_vhost_id(dev));
+        } else {
+            fatal_signal_remove_file_to_unlink(get_vhost_id(dev));
+            /* Register client-mode device */
+            err = rte_vhost_driver_register(dev->vhost_client_id,
+                                            RTE_VHOST_USER_CLIENT);
+            if (err) {
+                VLOG_ERR("vhost-user device setup failure for device %s\n",
+                        dev->vhost_client_id);
+            } else {
+                /* Configuration successful */
+                dev->vhost_driver_flags |= RTE_VHOST_USER_CLIENT;
+                VLOG_INFO("vHost User device '%s' changed to 'client' mode, "
+                          "using client socket '%s'",
+                           dev->up.name, get_vhost_id(dev));
+            }
         }
     }
 
@@ -3028,7 +3046,7 @@ netdev_dpdk_vhost_cuse_reconfigure(struct netdev *netdev)
     return 0;
 }
 
-#define NETDEV_DPDK_CLASS(NAME, INIT, CONSTRUCT, DESTRUCT,    \
+#define NETDEV_DPDK_CLASS(NAME, CONSTRUCT, DESTRUCT,          \
                           SET_CONFIG, SET_TX_MULTIQ, SEND,    \
                           GET_CARRIER, GET_STATS,             \
                           GET_FEATURES, GET_STATUS,           \
@@ -3036,7 +3054,7 @@ netdev_dpdk_vhost_cuse_reconfigure(struct netdev *netdev)
 {                                                             \
     NAME,                                                     \
     true,                       /* is_pmd */                  \
-    INIT,                       /* init */                    \
+    NULL,                       /* init */                    \
     NULL,                       /* netdev_dpdk_run */         \
     NULL,                       /* netdev_dpdk_wait */        \
                                                               \
@@ -3111,8 +3129,8 @@ process_vhost_flags(char *flag, char *default_val, int size,
 
     val = smap_get(ovs_other_config, flag);
 
-    /* Depending on which version of vhost is in use, process the vhost-specific
-     * flag if it is provided, otherwise resort to default value.
+    /* Process the vhost-sock-dir flag if it is provided, otherwise resort to
+     * default value.
      */
     if (val && (strlen(val) <= size)) {
         changed = 1;
@@ -3336,9 +3354,7 @@ dpdk_init__(const struct smap *ovs_other_config)
     bool auto_determine = true;
     int err = 0;
     cpu_set_t cpuset;
-#ifndef VHOST_CUSE
     char *sock_dir_subcomponent;
-#endif
 
     if (!smap_get_bool(ovs_other_config, "dpdk-init", false)) {
         VLOG_INFO("DPDK Disabled - to change this requires a restart.\n");
@@ -3346,11 +3362,6 @@ dpdk_init__(const struct smap *ovs_other_config)
     }
 
     VLOG_INFO("DPDK Enabled, initializing");
-
-#ifdef VHOST_CUSE
-    if (process_vhost_flags("cuse-dev-name", xstrdup("vhost-net"),
-                            PATH_MAX, ovs_other_config, &cuse_dev_name)) {
-#else
     if (process_vhost_flags("vhost-sock-dir", xstrdup(ovs_rundir()),
                             NAME_MAX, ovs_other_config,
                             &sock_dir_subcomponent)) {
@@ -3373,7 +3384,6 @@ dpdk_init__(const struct smap *ovs_other_config)
         free(sock_dir_subcomponent);
     } else {
         vhost_sock_dir = sock_dir_subcomponent;
-#endif
     }
 
     argv = grow_argv(&argv, 0, 1);
@@ -3465,18 +3475,6 @@ dpdk_init__(const struct smap *ovs_other_config)
 
     ovs_thread_create("dpdk_watchdog", dpdk_watchdog, NULL);
 
-#ifdef VHOST_CUSE
-    /* Register CUSE device to handle IOCTLs.
-     * Unless otherwise specified, cuse_dev_name is set to vhost-net.
-     */
-    err = rte_vhost_driver_register(cuse_dev_name, 0);
-
-    if (err != 0) {
-        VLOG_ERR("CUSE device setup failure.");
-        return;
-    }
-#endif
-
     dpdk_vhost_class_init();
 
 #ifdef DPDK_PDUMP
@@ -3513,7 +3511,6 @@ dpdk_init(const struct smap *ovs_other_config)
 static const struct netdev_class dpdk_class =
     NETDEV_DPDK_CLASS(
         "dpdk",
-        NULL,
         netdev_dpdk_construct,
         netdev_dpdk_destruct,
         netdev_dpdk_set_config,
@@ -3529,7 +3526,6 @@ static const struct netdev_class dpdk_class =
 static const struct netdev_class dpdk_ring_class =
     NETDEV_DPDK_CLASS(
         "dpdkr",
-        NULL,
         netdev_dpdk_ring_construct,
         netdev_dpdk_destruct,
         netdev_dpdk_ring_set_config,
@@ -3542,36 +3538,19 @@ static const struct netdev_class dpdk_ring_class =
         netdev_dpdk_reconfigure,
         netdev_dpdk_rxq_recv);
 
-static const struct netdev_class OVS_UNUSED dpdk_vhost_cuse_class =
-    NETDEV_DPDK_CLASS(
-        "dpdkvhostcuse",
-        dpdk_vhost_cuse_class_init,
-        netdev_dpdk_vhost_cuse_construct,
-        netdev_dpdk_vhost_destruct,
-        NULL,
-        NULL,
-        netdev_dpdk_vhost_send,
-        netdev_dpdk_vhost_get_carrier,
-        netdev_dpdk_vhost_get_stats,
-        NULL,
-        NULL,
-        netdev_dpdk_vhost_cuse_reconfigure,
-        netdev_dpdk_vhost_rxq_recv);
-
-static const struct netdev_class OVS_UNUSED dpdk_vhost_user_class =
+static const struct netdev_class dpdk_vhost_class =
     NETDEV_DPDK_CLASS(
         "dpdkvhostuser",
-        dpdk_vhost_user_class_init,
-        netdev_dpdk_vhost_user_construct,
+        netdev_dpdk_vhost_construct,
         netdev_dpdk_vhost_destruct,
-        NULL,
+        netdev_dpdk_vhost_set_config,
         NULL,
         netdev_dpdk_vhost_send,
         netdev_dpdk_vhost_get_carrier,
         netdev_dpdk_vhost_get_stats,
         NULL,
         NULL,
-        netdev_dpdk_vhost_user_reconfigure,
+        netdev_dpdk_vhost_reconfigure,
         netdev_dpdk_vhost_rxq_recv);
 
 void
@@ -3580,11 +3559,7 @@ netdev_dpdk_register(void)
     dpdk_common_init();
     netdev_register_provider(&dpdk_class);
     netdev_register_provider(&dpdk_ring_class);
-#ifdef VHOST_CUSE
-    netdev_register_provider(&dpdk_vhost_cuse_class);
-#else
-    netdev_register_provider(&dpdk_vhost_user_class);
-#endif
+    netdev_register_provider(&dpdk_vhost_class);
 }
 
 void

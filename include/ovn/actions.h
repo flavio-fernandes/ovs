@@ -27,6 +27,7 @@
 #include "util.h"
 
 struct lexer;
+struct ofpact_set_field;
 struct ofpbuf;
 struct shash;
 struct simap;
@@ -149,6 +150,13 @@ struct ovnact_load {
     struct expr_field dst;
     union expr_constant imm;
 };
+
+void ovnact_load_to_ofpact_set_field(const struct ovnact_load *,
+                                     bool (*lookup_port)(const void *aux,
+                                                         const char *port_name,
+                                                         unsigned int *portp),
+                                     const void *aux,
+                                     struct ofpact_set_field *);
 
 /* OVNACT_MOVE, OVNACT_EXCHANGE. */
 struct ovnact_move {
@@ -383,9 +391,8 @@ struct ovnact_parse_params {
     uint8_t cur_ltable;         /* 0 <= cur_ltable < n_tables. */
 };
 
-char *ovnacts_parse(struct lexer *, const struct ovnact_parse_params *,
-                    struct ofpbuf *ovnacts, struct expr **prereqsp)
-    OVS_WARN_UNUSED_RESULT;
+bool ovnacts_parse(struct lexer *, const struct ovnact_parse_params *,
+                    struct ofpbuf *ovnacts, struct expr **prereqsp);
 char *ovnacts_parse_string(const char *s, const struct ovnact_parse_params *,
                            struct ofpbuf *ovnacts, struct expr **prereqsp)
     OVS_WARN_UNUSED_RESULT;
