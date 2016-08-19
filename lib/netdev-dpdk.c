@@ -1435,6 +1435,32 @@ netdev_dpdk_qos_run__(struct netdev_dpdk *dev, struct rte_mbuf **pkts,
     return cnt;
 }
 
+static int
+netdev_dpdk_filter_packet_len(struct netdev_dpdk *dev, struct rte_mbuf **pkts,
+                              int pkt_cnt)
+{
+    int i = 0;
+    int cnt = 0;
+    struct rte_mbuf *pkt;
+
+    for (i = 0; i < pkt_cnt; i++) {
+        pkt = pkts[i];
+        if (OVS_UNLIKELY(pkt->pkt_len > dev->max_packet_len)) {
+            VLOG_WARN_RL(&rl, "%s: Too big size %" PRIu32 " max_packet_len %d",
+                         dev->up.name, pkt->pkt_len, dev->max_packet_len);
+            rte_pktmbuf_free(pkt);
+            continue;
+        }
+
+        if (OVS_UNLIKELY(i != cnt)) {
+            pkts[cnt] = pkt;
+        }
+        cnt++;
+    }
+
+    return cnt;
+}
+
 static inline void
 netdev_dpdk_vhost_update_tx_counters(struct netdev_stats *stats,
                                      struct dp_packet **packets,
@@ -1459,8 +1485,7 @@ __netdev_dpdk_vhost_send(struct netdev *netdev, int qid,
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
     struct rte_mbuf **cur_pkts = (struct rte_mbuf **) pkts;
     unsigned int total_pkts = cnt;
-    unsigned int qos_pkts = 0;
-    unsigned int mtu_dropped = 0;
+    unsigned int dropped = 0;
     int i, retries = 0;
 
     qid = dev->tx_q[qid % netdev->n_txq].map;
@@ -1475,52 +1500,37 @@ __netdev_dpdk_vhost_send(struct netdev *netdev, int qid,
 
     rte_spinlock_lock(&dev->tx_q[qid].tx_lock);
 
+    cnt = netdev_dpdk_filter_packet_len(dev, cur_pkts, cnt);
     /* Check has QoS has been configured for the netdev */
     cnt = netdev_dpdk_qos_run__(dev, cur_pkts, cnt);
-    qos_pkts = total_pkts - cnt;
+    dropped = total_pkts - cnt;
 
     do {
         int vhost_qid = qid * VIRTIO_QNUM + VIRTIO_RXQ;
         unsigned int tx_pkts;
-        unsigned int try_tx_pkts = cnt;
 
-        for (i = 0; i < cnt; i++) {
-            if (cur_pkts[i]->pkt_len > dev->max_packet_len) {
-                try_tx_pkts = i;
-                break;
-            }
-        }
-        if (!try_tx_pkts) {
-            cur_pkts++;
-            mtu_dropped++;
-            cnt--;
-            continue;
-        }
         tx_pkts = rte_vhost_enqueue_burst(netdev_dpdk_get_vid(dev),
-                                          vhost_qid, cur_pkts, try_tx_pkts);
+                                          vhost_qid, cur_pkts, cnt);
         if (OVS_LIKELY(tx_pkts)) {
             /* Packets have been sent.*/
             cnt -= tx_pkts;
             /* Prepare for possible retry.*/
             cur_pkts = &cur_pkts[tx_pkts];
-            if (tx_pkts != try_tx_pkts) {
-                retries++;
-            }
         } else {
             /* No packets sent - do not retry.*/
             break;
         }
-    } while (cnt && (retries <= VHOST_ENQ_RETRY_NUM));
+    } while (cnt && (retries++ <= VHOST_ENQ_RETRY_NUM));
 
     rte_spinlock_unlock(&dev->tx_q[qid].tx_lock);
 
     rte_spinlock_lock(&dev->stats_lock);
     netdev_dpdk_vhost_update_tx_counters(&dev->stats, pkts, total_pkts,
-                                         cnt + mtu_dropped + qos_pkts);
+                                         cnt + dropped);
     rte_spinlock_unlock(&dev->stats_lock);
 
 out:
-    for (i = 0; i < total_pkts - qos_pkts; i++) {
+    for (i = 0; i < total_pkts - dropped; i++) {
         dp_packet_delete(pkts[i]);
     }
 }
@@ -1636,51 +1646,17 @@ netdev_dpdk_send__(struct netdev_dpdk *dev, int qid,
         dpdk_do_tx_copy(netdev, qid, batch);
         dp_packet_delete_batch(batch, may_steal);
     } else {
-        int next_tx_idx = 0;
-        int dropped = 0;
-        unsigned int qos_pkts = 0;
-        unsigned int temp_cnt = 0;
+        int dropped;
         int cnt = batch->count;
+        struct rte_mbuf **cur_pkts = (struct rte_mbuf **) batch->packets;
 
         dp_packet_batch_apply_cutlen(batch);
 
-        for (int i = 0; i < cnt; i++) {
-            int size = dp_packet_size(batch->packets[i]);
+        cnt = netdev_dpdk_filter_packet_len(dev, cur_pkts, cnt);
+        cnt = netdev_dpdk_qos_run__(dev, cur_pkts, cnt);
+        dropped = batch->count - cnt;
 
-            if (OVS_UNLIKELY(size > dev->max_packet_len)) {
-                if (next_tx_idx != i) {
-                    temp_cnt = i - next_tx_idx;
-                    qos_pkts = temp_cnt;
-
-                    temp_cnt = netdev_dpdk_qos_run__(dev,
-                                        (struct rte_mbuf**)batch->packets,
-                                        temp_cnt);
-                    dropped += qos_pkts - temp_cnt;
-                    netdev_dpdk_eth_tx_burst(dev, qid,
-                            (struct rte_mbuf **)&batch->packets[next_tx_idx],
-                            temp_cnt);
-
-                }
-
-                VLOG_WARN_RL(&rl, "Too big size %d max_packet_len %d",
-                             (int)size , dev->max_packet_len);
-
-                dp_packet_delete(batch->packets[i]);
-                dropped++;
-                next_tx_idx = i + 1;
-            }
-        }
-        if (next_tx_idx != cnt) {
-            cnt -= next_tx_idx;
-            qos_pkts = cnt;
-
-            cnt = netdev_dpdk_qos_run__(dev,
-                    (struct rte_mbuf**)batch->packets, cnt);
-            dropped += qos_pkts - cnt;
-            netdev_dpdk_eth_tx_burst(dev, qid,
-                             (struct rte_mbuf **)&batch->packets[next_tx_idx],
-                             cnt);
-        }
+        netdev_dpdk_eth_tx_burst(dev, qid, cur_pkts, cnt);
 
         if (OVS_UNLIKELY(dropped)) {
             rte_spinlock_lock(&dev->stats_lock);
@@ -2357,8 +2333,10 @@ new_device(int vid)
             /* Get NUMA information */
             newnode = rte_vhost_get_numa_node(vid);
             if (newnode == -1) {
+#ifdef VHOST_NUMA
                 VLOG_INFO("Error getting NUMA info for vHost Device '%s'",
                           ifname);
+#endif
                 newnode = dev->socket_id;
             }
 
