@@ -115,14 +115,6 @@ struct ofproto {
     /* OpenFlow connections. */
     struct connmgr *connmgr;
 
-    /* Delayed rule executions.
-     *
-     * We delay calls to ->ofproto_class->rule_execute() past releasing
-     * ofproto_mutex during a flow_mod, because otherwise a "learn" action
-     * triggered by the executing the packet would try to recursively modify
-     * the flow table and reacquire the global lock. */
-    struct guarded_list rule_executes; /* Contains "struct rule_execute"s. */
-
     int min_mtu;                    /* Current MTU of non-internal ports. */
 
     /* Groups. */
@@ -1285,25 +1277,6 @@ struct ofproto_class {
                            uint64_t *byte_count, long long int *used)
         /* OVS_EXCLUDED(ofproto_mutex) */;
 
-    /* Applies the actions in 'rule' to 'packet'.  (This implements sending
-     * buffered packets for OpenFlow OFPT_FLOW_MOD commands.)
-     *
-     * Takes ownership of 'packet' (so it should eventually free it, with
-     * ofpbuf_delete()).
-     *
-     * 'flow' reflects the flow information for 'packet'.  All of the
-     * information in 'flow' is extracted from 'packet', except for
-     * flow->tunnel and flow->in_port, which are assigned the correct values
-     * for the incoming packet.  The register values are zeroed.  'packet''s
-     * header pointers and offsets (e.g. packet->l3) are appropriately
-     * initialized.  packet->l3 is aligned on a 32-bit boundary.
-     *
-     * The implementation should add the statistics for 'packet' into 'rule'.
-     *
-     * Returns 0 if successful, otherwise an OpenFlow error code. */
-    enum ofperr (*rule_execute)(struct rule *rule, const struct flow *flow,
-                                struct dp_packet *packet);
-
     /* Changes the OpenFlow IP fragment handling policy to 'frag_handling',
      * which takes one of the following values, with the corresponding
      * meanings:
@@ -1838,24 +1811,62 @@ extern const struct ofproto_class ofproto_dpif_class;
 int ofproto_class_register(const struct ofproto_class *);
 int ofproto_class_unregister(const struct ofproto_class *);
 
+/* Criteria that flow_mod and other operations use for selecting rules on
+ * which to operate. */
+struct rule_criteria {
+    /* An OpenFlow table or 255 for all tables. */
+    uint8_t table_id;
+
+    /* OpenFlow matching criteria.  Interpreted different in "loose" way by
+     * collect_rules_loose() and "strict" way by collect_rules_strict(), as
+     * defined in the OpenFlow spec. */
+    struct cls_rule cr;
+    ovs_version_t version;
+
+    /* Matching criteria for the OpenFlow cookie.  Consider a bit B in a rule's
+     * cookie and the corresponding bits C in 'cookie' and M in 'cookie_mask'.
+     * The rule will not be selected if M is 1 and B != C.  */
+    ovs_be64 cookie;
+    ovs_be64 cookie_mask;
+
+    /* Selection based on actions within a rule:
+     *
+     * If out_port != OFPP_ANY, selects only rules that output to out_port.
+     * If out_group != OFPG_ALL, select only rules that output to out_group. */
+    ofp_port_t out_port;
+    uint32_t out_group;
+
+    /* If true, collects only rules that are modifiable. */
+    bool include_hidden;
+    bool include_readonly;
+};
+
 /* flow_mod with execution context. */
 struct ofproto_flow_mod {
-    struct ofputil_flow_mod fm;
+    /* Allocated by 'init' phase, may be freed after 'start' phase, as these
+     * are not needed for 'revert' nor 'finish'. */
+    struct rule *temp_rule;
+    struct rule_criteria criteria;
+    struct cls_conjunction *conjs;
+    size_t n_conjs;
 
     /* Replicate needed fields from ofputil_flow_mod to not need it after the
      * flow has been created. */
     uint16_t command;
-    uint32_t buffer_id;
     bool modify_cookie;
-
+    /* Fields derived from ofputil_flow_mod. */
     bool modify_may_add_flow;
     enum nx_flow_update_event event;
 
+    /* These are only used during commit execution.
+     * ofproto_flow_mod_uninit() does NOT clean these up. */
     ovs_version_t version;              /* Version in which changes take
                                          * effect. */
     struct rule_collection old_rules;   /* Affected rules. */
     struct rule_collection new_rules;   /* Replacement rules. */
 };
+
+void ofproto_flow_mod_uninit(struct ofproto_flow_mod *);
 
 /* port_mod with execution context. */
 struct ofproto_port_mod {

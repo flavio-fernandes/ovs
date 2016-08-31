@@ -79,6 +79,9 @@ static bool bundle = false;
 /* --color: Use color markers. */
 static bool enable_color;
 
+/* --read-only: Do not execute read only commands. */
+static bool read_only;
+
 /* --strict: Use strict matching for flow mod commands?  Additionally governs
  * use of nx_pull_match() instead of nx_pull_match_loose() in parse-nx-match.
  */
@@ -142,7 +145,11 @@ main(int argc, char *argv[])
     ctx.argv = argv + optind;
 
     daemon_become_new_user(false);
-    ovs_cmdl_run_command(&ctx, get_all_commands());
+    if (read_only) {
+        ovs_cmdl_run_command_read_only(&ctx, get_all_commands());
+    } else {
+        ovs_cmdl_run_command(&ctx, get_all_commands());
+    }
     return 0;
 }
 
@@ -180,6 +187,7 @@ parse_options(int argc, char *argv[])
         OPT_BUNDLE,
         OPT_COLOR,
         OPT_MAY_CREATE,
+        OPT_READ_ONLY,
         DAEMON_OPTION_ENUMS,
         OFP_VERSION_OPTION_ENUMS,
         VLOG_OPTION_ENUMS
@@ -200,6 +208,7 @@ parse_options(int argc, char *argv[])
         {"bundle", no_argument, NULL, OPT_BUNDLE},
         {"color", optional_argument, NULL, OPT_COLOR},
         {"may-create", no_argument, NULL, OPT_MAY_CREATE},
+        {"read-only", no_argument, NULL, OPT_READ_ONLY},
         DAEMON_LONG_OPTIONS,
         OFP_VERSION_LONG_OPTIONS,
         VLOG_LONG_OPTIONS,
@@ -279,6 +288,10 @@ parse_options(int argc, char *argv[])
 
         case OPT_STRICT:
             strict = true;
+            break;
+
+        case OPT_READ_ONLY:
+            read_only = true;
             break;
 
         case OPT_READD:
@@ -452,6 +465,7 @@ usage(void)
     vlog_usage();
     printf("\nOther options:\n"
            "  --strict                    use strict match for flow commands\n"
+           "  --read-only                 do not execute read/write commands\n"
            "  --readd                     replace flows that haven't changed\n"
            "  -F, --flow-format=FORMAT    force particular flow format\n"
            "  -P, --packet-in-format=FRMT force particular packet in format\n"
@@ -1180,6 +1194,26 @@ ofctl_dump_flows__(int argc, char *argv[], bool aggregate)
     vconn_close(vconn);
 }
 
+static void
+get_match_field(const struct mf_field *field, const struct match *match,
+                union mf_value *value)
+{
+    if (!match->tun_md.valid || (field->id < MFF_TUN_METADATA0 ||
+                                 field->id >= MFF_TUN_METADATA0 +
+                                              TUN_METADATA_NUM_OPTS)) {
+        mf_get_value(field, &match->flow, value);
+    } else {
+        const struct tun_metadata_loc *loc = &match->tun_md.entry[field->id -
+                                                         MFF_TUN_METADATA0].loc;
+
+        /* Since we don't have a tunnel mapping table, extract the value
+         * from the locally allocated location in the match. */
+        memset(value, 0, field->n_bytes - loc->len);
+        memcpy(value->tun_metadata + field->n_bytes - loc->len,
+               match->flow.tunnel.metadata.opts.u8 + loc->c.offset, loc->len);
+    }
+}
+
 static int
 compare_flows(const void *afs_, const void *bfs_)
 {
@@ -1212,8 +1246,8 @@ compare_flows(const void *afs_, const void *bfs_)
             } else {
                 union mf_value aval, bval;
 
-                mf_get_value(f, &a->flow, &aval);
-                mf_get_value(f, &b->flow, &bval);
+                get_match_field(f, a, &aval);
+                get_match_field(f, b, &bval);
                 ret = memcmp(&aval, &bval, f->n_bytes);
             }
         }
@@ -2995,12 +3029,181 @@ fte_insert(struct flow_tables *tables, const struct match *match,
     }
 }
 
+/* A FTE entry that has been queued for later insertion after all
+ * flows have been scanned to correctly allocation tunnel metadata. */
+struct fte_pending {
+    struct match *match;
+    int priority;
+    struct fte_version *version;
+    int index;
+
+    struct ovs_list list_node;
+};
+
+/* Processing state during two stage processing of flow table entries.
+ * Tracks the maximum size seen for each tunnel metadata entry as well
+ * as a list of the pending FTE entries. */
+struct fte_state {
+    int tun_metadata_size[TUN_METADATA_NUM_OPTS];
+    struct ovs_list fte_pending_list;
+};
+
+/* Given a list of the field sizes for each tunnel metadata entry, install
+ * a mapping table for later operations. */
+static void
+generate_tun_metadata(struct fte_state *state)
+{
+    struct ofputil_tlv_table_mod ttm;
+    int i;
+
+    ttm.command = NXTTMC_ADD;
+    ovs_list_init(&ttm.mappings);
+
+    for (i = 0; i < TUN_METADATA_NUM_OPTS; i++) {
+        if (state->tun_metadata_size[i] != -1) {
+            struct ofputil_tlv_map *map = xmalloc(sizeof *map);
+
+            ovs_list_push_back(&ttm.mappings, &map->list_node);
+
+            /* We don't care about the actual option class and type since there
+             * won't be any lookup. We just need to make them unique. */
+            map->option_class = i / UINT8_MAX;
+            map->option_type = i;
+            map->option_len = ROUND_UP(state->tun_metadata_size[i], 4);
+            map->index = i;
+        }
+    }
+
+    tun_metadata_table_mod(&ttm);
+    ofputil_uninit_tlv_table(&ttm.mappings);
+}
+
+/* Once we have created a tunnel mapping table with a consistent overall
+ * allocation, we need to remap each flow to use this table from its own
+ * allocation. Since the mapping table has already been installed, we
+ * can just read the data from the match and rewrite it. On rewrite, it
+ * will use the new table. */
+static void
+remap_match(struct match *match)
+{
+    int i;
+
+    if (!match->tun_md.valid) {
+        return;
+    }
+
+    struct tun_metadata flow = match->flow.tunnel.metadata;
+    struct tun_metadata flow_mask = match->wc.masks.tunnel.metadata;
+    memset(&match->flow.tunnel.metadata, 0, sizeof match->flow.tunnel.metadata);
+    memset(&match->wc.masks.tunnel.metadata, 0,
+           sizeof match->wc.masks.tunnel.metadata);
+    match->tun_md.valid = false;
+
+    ULLONG_FOR_EACH_1 (i, flow_mask.present.map) {
+        const struct mf_field *field = mf_from_id(MFF_TUN_METADATA0 + i);
+        int offset = match->tun_md.entry[i].loc.c.offset;
+        int len = match->tun_md.entry[i].loc.len;
+        union mf_value value, mask;
+
+        memset(&value, 0, field->n_bytes - len);
+        memset(&mask, match->tun_md.entry[i].masked ? 0 : 0xff,
+               field->n_bytes - len);
+
+        memcpy(value.tun_metadata + field->n_bytes - len,
+               flow.opts.u8 + offset, len);
+        memcpy(mask.tun_metadata + field->n_bytes - len,
+               flow_mask.opts.u8 + offset, len);
+        mf_set(field, &value, &mask, match, NULL);
+    }
+}
+
+/* In order to correctly handle tunnel metadata, we need to have
+ * two passes over the flows. This happens because tunnel metadata
+ * doesn't have fixed locations in a flow entry but is instead dynamically
+ * allocated space. In the case of flows coming from a file, we don't
+ * even know the size of each field when we need to do the allocation.
+ * When the flows come in, each flow has an individual allocation based
+ * on its own fields. However, this allocation is not the same across
+ * different flows and therefore fields are not directly comparable.
+ *
+ * In the first pass, we record the maximum size of each tunnel metadata
+ * field as well as queue FTE entries for later processing.
+ *
+ * In the second pass, we use the metadata size information to create a
+ * tunnel mapping table and set that through the tunnel metadata processing
+ * code. We then remap all individual flows to use this common allocation
+ * scheme. Finally, we load the queued entries into the classifier for
+ * comparison.
+ *
+ * fte_state_init() should be called before processing any flows. */
+static void
+fte_state_init(struct fte_state *state)
+{
+    int i;
+
+    for (i = 0; i < TUN_METADATA_NUM_OPTS; i++) {
+        state->tun_metadata_size[i] = -1;
+    }
+
+    ovs_list_init(&state->fte_pending_list);
+}
+
+/* The first pass of the processing described in the comment about
+ * fte_state_init(). fte_queue() is the first pass to be called as each
+ * flow is read from its source. */
+static void
+fte_queue(struct fte_state *state, const struct match *match,
+          int priority, struct fte_version *version, int index)
+{
+    struct fte_pending *pending = xmalloc(sizeof *pending);
+    int i;
+
+    pending->match = xmemdup(match, sizeof *match);
+    pending->priority = priority;
+    pending->version = version;
+    pending->index = index;
+    ovs_list_push_back(&state->fte_pending_list, &pending->list_node);
+
+    if (!match->tun_md.valid) {
+        return;
+    }
+
+    ULLONG_FOR_EACH_1 (i, match->wc.masks.tunnel.metadata.present.map) {
+        if (match->tun_md.entry[i].loc.len > state->tun_metadata_size[i]) {
+            state->tun_metadata_size[i] = match->tun_md.entry[i].loc.len;
+        }
+    }
+}
+
+/* The second pass of the processing described in the comment about
+ * fte_state_init(). This should be called once all flows (from both
+ * sides of the comparison) have been added through fte_queue(). */
+static void
+fte_fill(struct fte_state *state, struct flow_tables *tables)
+{
+    struct fte_pending *pending;
+
+    generate_tun_metadata(state);
+
+    flow_tables_init(tables);
+    flow_tables_defer(tables);
+
+    LIST_FOR_EACH_POP(pending, list_node, &state->fte_pending_list) {
+        remap_match(pending->match);
+        fte_insert(tables, pending->match, pending->priority, pending->version,
+                   pending->index);
+        free(pending->match);
+        free(pending);
+    }
+
+    flow_tables_publish(tables);
+}
+
 /* Reads the flows in 'filename' as flow table entries in 'tables' for the
  * version with the specified 'index'.  Returns the flow formats able to
  * represent the flows that were read. */
 static enum ofputil_protocol
-read_flows_from_file(const char *filename, struct flow_tables *tables,
-                     int index)
+read_flows_from_file(const char *filename, struct fte_state *state, int index)
 {
     enum ofputil_protocol usable_protocols;
     int line_number;
@@ -3015,7 +3218,6 @@ read_flows_from_file(const char *filename, struct flow_tables *tables,
     ds_init(&s);
     usable_protocols = OFPUTIL_P_ANY;
     line_number = 0;
-    flow_tables_defer(tables);
     while (!ds_get_preprocessed_line(&s, file, &line_number)) {
         struct fte_version *version;
         struct ofputil_flow_mod fm;
@@ -3039,9 +3241,8 @@ read_flows_from_file(const char *filename, struct flow_tables *tables,
         version->ofpacts_len = fm.ofpacts_len;
         version->table_id = fm.table_id != OFPTT_ALL ? fm.table_id : 0;
 
-        fte_insert(tables, &fm.match, fm.priority, version, index);
+        fte_queue(state, &fm.match, fm.priority, version, index);
     }
-    flow_tables_publish(tables);
     ds_destroy(&s);
 
     if (file != stdin) {
@@ -3110,7 +3311,7 @@ recv_flow_stats_reply(struct vconn *vconn, ovs_be32 send_xid,
 static void
 read_flows_from_switch(struct vconn *vconn,
                        enum ofputil_protocol protocol,
-                       struct flow_tables *tables, int index)
+                       struct fte_state *state, int index)
 {
     struct ofputil_flow_stats_request fsr;
     struct ofputil_flow_stats fs;
@@ -3131,7 +3332,6 @@ read_flows_from_switch(struct vconn *vconn,
 
     reply = NULL;
     ofpbuf_init(&ofpacts, 0);
-    flow_tables_defer(tables);
     while (recv_flow_stats_reply(vconn, send_xid, &reply, &fs, &ofpacts)) {
         struct fte_version *version;
 
@@ -3145,9 +3345,8 @@ read_flows_from_switch(struct vconn *vconn,
         version->ofpacts = xmemdup(fs.ofpacts, fs.ofpacts_len);
         version->table_id = fs.table_id;
 
-        fte_insert(tables, &fs.match, fs.priority, version, index);
+        fte_queue(state, &fs.match, fs.priority, version, index);
     }
-    flow_tables_publish(tables);
     ofpbuf_uninit(&ofpacts);
 }
 
@@ -3191,19 +3390,22 @@ ofctl_replace_flows(struct ovs_cmdl_context *ctx)
 {
     enum { FILE_IDX = 0, SWITCH_IDX = 1 };
     enum ofputil_protocol usable_protocols, protocol;
+    struct fte_state fte_state;
     struct flow_tables tables;
     struct classifier *cls;
     struct ovs_list requests;
     struct vconn *vconn;
     struct fte *fte;
 
-    flow_tables_init(&tables);
-    usable_protocols = read_flows_from_file(ctx->argv[2], &tables, FILE_IDX);
+    fte_state_init(&fte_state);
+    usable_protocols = read_flows_from_file(ctx->argv[2], &fte_state, FILE_IDX);
 
     protocol = open_vconn(ctx->argv[1], &vconn);
     protocol = set_protocol_for_flow_dump(vconn, protocol, usable_protocols);
 
-    read_flows_from_switch(vconn, protocol, &tables, SWITCH_IDX);
+    read_flows_from_switch(vconn, protocol, &fte_state, SWITCH_IDX);
+
+    fte_fill(&fte_state, &tables);
 
     ovs_list_init(&requests);
 
@@ -3245,21 +3447,20 @@ ofctl_replace_flows(struct ovs_cmdl_context *ctx)
 }
 
 static void
-read_flows_from_source(const char *source, struct flow_tables *tables,
-                       int index)
+read_flows_from_source(const char *source, struct fte_state *state, int index)
 {
     struct stat s;
 
     if (source[0] == '/' || source[0] == '.'
         || (!strchr(source, ':') && !stat(source, &s))) {
-        read_flows_from_file(source, tables, index);
+        read_flows_from_file(source, state, index);
     } else {
         enum ofputil_protocol protocol;
         struct vconn *vconn;
 
         protocol = open_vconn(source, &vconn);
         protocol = set_protocol_for_flow_dump(vconn, protocol, OFPUTIL_P_ANY);
-        read_flows_from_switch(vconn, protocol, tables, index);
+        read_flows_from_switch(vconn, protocol, state, index);
         vconn_close(vconn);
     }
 }
@@ -3268,14 +3469,16 @@ static void
 ofctl_diff_flows(struct ovs_cmdl_context *ctx)
 {
     bool differences = false;
+    struct fte_state fte_state;
     struct flow_tables tables;
     struct classifier *cls;
     struct ds a_s, b_s;
     struct fte *fte;
 
-    flow_tables_init(&tables);
-    read_flows_from_source(ctx->argv[1], &tables, 0);
-    read_flows_from_source(ctx->argv[2], &tables, 1);
+    fte_state_init(&fte_state);
+    read_flows_from_source(ctx->argv[1], &fte_state, 0);
+    read_flows_from_source(ctx->argv[2], &fte_state, 1);
+    fte_fill(&fte_state, &tables);
 
     ds_init(&a_s);
     ds_init(&b_s);
@@ -4120,136 +4323,136 @@ ofctl_parse_key_value(struct ovs_cmdl_context *ctx)
 
 static const struct ovs_cmdl_command all_commands[] = {
     { "show", "switch",
-      1, 1, ofctl_show },
+      1, 1, ofctl_show, OVS_RO },
     { "monitor", "switch [misslen] [invalid_ttl] [watch:[...]]",
-      1, 3, ofctl_monitor },
+      1, 3, ofctl_monitor, OVS_RO },
     { "snoop", "switch",
-      1, 1, ofctl_snoop },
+      1, 1, ofctl_snoop, OVS_RO },
     { "dump-desc", "switch",
-      1, 1, ofctl_dump_desc },
+      1, 1, ofctl_dump_desc, OVS_RO },
     { "dump-tables", "switch",
-      1, 1, ofctl_dump_tables },
+      1, 1, ofctl_dump_tables, OVS_RO },
     { "dump-table-features", "switch",
-      1, 1, ofctl_dump_table_features },
+      1, 1, ofctl_dump_table_features, OVS_RO },
     { "dump-table-desc", "switch",
-      1, 1, ofctl_dump_table_desc },
+      1, 1, ofctl_dump_table_desc, OVS_RO },
     { "dump-flows", "switch",
-      1, 2, ofctl_dump_flows },
+      1, 2, ofctl_dump_flows, OVS_RO },
     { "dump-aggregate", "switch",
-      1, 2, ofctl_dump_aggregate },
+      1, 2, ofctl_dump_aggregate, OVS_RO },
     { "queue-stats", "switch [port [queue]]",
-      1, 3, ofctl_queue_stats },
+      1, 3, ofctl_queue_stats, OVS_RO },
     { "queue-get-config", "switch [port [queue]]",
-      1, 3, ofctl_queue_get_config },
+      1, 3, ofctl_queue_get_config, OVS_RO },
     { "add-flow", "switch flow",
-      2, 2, ofctl_add_flow },
+      2, 2, ofctl_add_flow, OVS_RW },
     { "add-flows", "switch file",
-      2, 2, ofctl_add_flows },
+      2, 2, ofctl_add_flows, OVS_RW },
     { "mod-flows", "switch flow",
-      2, 2, ofctl_mod_flows },
+      2, 2, ofctl_mod_flows, OVS_RW },
     { "del-flows", "switch [flow]",
-      1, 2, ofctl_del_flows },
+      1, 2, ofctl_del_flows, OVS_RW },
     { "replace-flows", "switch file",
-      2, 2, ofctl_replace_flows },
+      2, 2, ofctl_replace_flows, OVS_RW },
     { "diff-flows", "source1 source2",
-      2, 2, ofctl_diff_flows },
+      2, 2, ofctl_diff_flows, OVS_RW },
     { "add-meter", "switch meter",
-      2, 2, ofctl_add_meter },
+      2, 2, ofctl_add_meter, OVS_RW },
     { "mod-meter", "switch meter",
-      2, 2, ofctl_mod_meter },
+      2, 2, ofctl_mod_meter, OVS_RW },
     { "del-meter", "switch meter",
-      2, 2, ofctl_del_meters },
+      2, 2, ofctl_del_meters, OVS_RW },
     { "del-meters", "switch",
-      1, 1, ofctl_del_meters },
+      1, 1, ofctl_del_meters, OVS_RW },
     { "dump-meter", "switch meter",
-      2, 2, ofctl_dump_meters },
+      2, 2, ofctl_dump_meters, OVS_RO },
     { "dump-meters", "switch",
-      1, 1, ofctl_dump_meters },
+      1, 1, ofctl_dump_meters, OVS_RO },
     { "meter-stats", "switch [meter]",
-      1, 2, ofctl_meter_stats },
+      1, 2, ofctl_meter_stats, OVS_RO },
     { "meter-features", "switch",
-      1, 1, ofctl_meter_features },
+      1, 1, ofctl_meter_features, OVS_RO },
     { "packet-out", "switch in_port actions packet...",
-      4, INT_MAX, ofctl_packet_out },
+      4, INT_MAX, ofctl_packet_out, OVS_RW },
     { "dump-ports", "switch [port]",
-      1, 2, ofctl_dump_ports },
+      1, 2, ofctl_dump_ports, OVS_RO },
     { "dump-ports-desc", "switch [port]",
-      1, 2, ofctl_dump_ports_desc },
+      1, 2, ofctl_dump_ports_desc, OVS_RO },
     { "mod-port", "switch iface act",
-      3, 3, ofctl_mod_port },
+      3, 3, ofctl_mod_port, OVS_RW },
     { "mod-table", "switch mod",
-      3, 3, ofctl_mod_table },
+      3, 3, ofctl_mod_table, OVS_RW },
     { "get-frags", "switch",
-      1, 1, ofctl_get_frags },
+      1, 1, ofctl_get_frags, OVS_RO },
     { "set-frags", "switch frag_mode",
-      2, 2, ofctl_set_frags },
+      2, 2, ofctl_set_frags, OVS_RW },
     { "probe", "target",
-      1, 1, ofctl_probe },
+      1, 1, ofctl_probe, OVS_RO },
     { "ping", "target [n]",
-      1, 2, ofctl_ping },
+      1, 2, ofctl_ping, OVS_RO },
     { "benchmark", "target n count",
-      3, 3, ofctl_benchmark },
+      3, 3, ofctl_benchmark, OVS_RO },
 
     { "dump-ipfix-bridge", "switch",
-      1, 1, ofctl_dump_ipfix_bridge},
+      1, 1, ofctl_dump_ipfix_bridge, OVS_RO },
     { "dump-ipfix-flow", "switch",
-      1, 1, ofctl_dump_ipfix_flow},
+      1, 1, ofctl_dump_ipfix_flow, OVS_RO },
 
     { "ofp-parse", "file",
-      1, 1, ofctl_ofp_parse },
+      1, 1, ofctl_ofp_parse, OVS_RW },
     { "ofp-parse-pcap", "pcap",
-      1, INT_MAX, ofctl_ofp_parse_pcap },
+      1, INT_MAX, ofctl_ofp_parse_pcap, OVS_RW },
 
     { "add-group", "switch group",
-      1, 2, ofctl_add_group },
+      1, 2, ofctl_add_group, OVS_RW },
     { "add-groups", "switch file",
-      1, 2, ofctl_add_groups },
+      1, 2, ofctl_add_groups, OVS_RW },
     { "mod-group", "switch group",
-      1, 2, ofctl_mod_group },
+      1, 2, ofctl_mod_group, OVS_RW },
     { "del-groups", "switch [group]",
-      1, 2, ofctl_del_groups },
+      1, 2, ofctl_del_groups, OVS_RW },
     { "insert-buckets", "switch [group]",
-      1, 2, ofctl_insert_bucket },
+      1, 2, ofctl_insert_bucket, OVS_RW },
     { "remove-buckets", "switch [group]",
-      1, 2, ofctl_remove_bucket },
+      1, 2, ofctl_remove_bucket, OVS_RW },
     { "dump-groups", "switch [group]",
-      1, 2, ofctl_dump_group_desc },
+      1, 2, ofctl_dump_group_desc, OVS_RO },
     { "dump-group-stats", "switch [group]",
-      1, 2, ofctl_dump_group_stats },
+      1, 2, ofctl_dump_group_stats, OVS_RO },
     { "dump-group-features", "switch",
-      1, 1, ofctl_dump_group_features },
+      1, 1, ofctl_dump_group_features, OVS_RO },
 
     { "bundle", "switch file",
-      2, 2, ofctl_bundle },
+      2, 2, ofctl_bundle, OVS_RW },
 
     { "add-tlv-map", "switch map",
-      2, 2, ofctl_add_tlv_map },
+      2, 2, ofctl_add_tlv_map, OVS_RO },
     { "del-tlv-map", "switch [map]",
-      1, 2, ofctl_del_tlv_map },
+      1, 2, ofctl_del_tlv_map, OVS_RO },
     { "dump-tlv-map", "switch",
-      1, 1, ofctl_dump_tlv_map },
-    { "help", NULL, 0, INT_MAX, ofctl_help },
-    { "list-commands", NULL, 0, INT_MAX, ofctl_list_commands },
+      1, 1, ofctl_dump_tlv_map, OVS_RO },
+    { "help", NULL, 0, INT_MAX, ofctl_help, OVS_RO },
+    { "list-commands", NULL, 0, INT_MAX, ofctl_list_commands, OVS_RO },
 
     /* Undocumented commands for testing. */
-    { "parse-flow", NULL, 1, 1, ofctl_parse_flow },
-    { "parse-flows", NULL, 1, 1, ofctl_parse_flows },
-    { "parse-nx-match", NULL, 0, 0, ofctl_parse_nxm },
-    { "parse-nxm", NULL, 0, 0, ofctl_parse_nxm },
-    { "parse-oxm", NULL, 1, 1, ofctl_parse_oxm },
-    { "parse-actions", NULL, 1, 1, ofctl_parse_actions },
-    { "parse-instructions", NULL, 1, 1, ofctl_parse_instructions },
-    { "parse-ofp10-match", NULL, 0, 0, ofctl_parse_ofp10_match },
-    { "parse-ofp11-match", NULL, 0, 0, ofctl_parse_ofp11_match },
-    { "parse-pcap", NULL, 1, INT_MAX, ofctl_parse_pcap },
-    { "check-vlan", NULL, 2, 2, ofctl_check_vlan },
-    { "print-error", NULL, 1, 1, ofctl_print_error },
-    { "encode-error-reply", NULL, 2, 2, ofctl_encode_error_reply },
-    { "ofp-print", NULL, 1, 2, ofctl_ofp_print },
-    { "encode-hello", NULL, 1, 1, ofctl_encode_hello },
-    { "parse-key-value", NULL, 1, INT_MAX, ofctl_parse_key_value },
+    { "parse-flow", NULL, 1, 1, ofctl_parse_flow, OVS_RW },
+    { "parse-flows", NULL, 1, 1, ofctl_parse_flows, OVS_RW },
+    { "parse-nx-match", NULL, 0, 0, ofctl_parse_nxm, OVS_RW },
+    { "parse-nxm", NULL, 0, 0, ofctl_parse_nxm, OVS_RW },
+    { "parse-oxm", NULL, 1, 1, ofctl_parse_oxm, OVS_RW },
+    { "parse-actions", NULL, 1, 1, ofctl_parse_actions, OVS_RW },
+    { "parse-instructions", NULL, 1, 1, ofctl_parse_instructions, OVS_RW },
+    { "parse-ofp10-match", NULL, 0, 0, ofctl_parse_ofp10_match, OVS_RW },
+    { "parse-ofp11-match", NULL, 0, 0, ofctl_parse_ofp11_match, OVS_RW },
+    { "parse-pcap", NULL, 1, INT_MAX, ofctl_parse_pcap, OVS_RW },
+    { "check-vlan", NULL, 2, 2, ofctl_check_vlan, OVS_RW },
+    { "print-error", NULL, 1, 1, ofctl_print_error, OVS_RW },
+    { "encode-error-reply", NULL, 2, 2, ofctl_encode_error_reply, OVS_RW },
+    { "ofp-print", NULL, 1, 2, ofctl_ofp_print, OVS_RW },
+    { "encode-hello", NULL, 1, 1, ofctl_encode_hello, OVS_RW },
+    { "parse-key-value", NULL, 1, INT_MAX, ofctl_parse_key_value, OVS_RW },
 
-    { NULL, NULL, 0, 0, NULL },
+    { NULL, NULL, 0, 0, NULL, OVS_RO },
 };
 
 static const struct ovs_cmdl_command *get_all_commands(void)

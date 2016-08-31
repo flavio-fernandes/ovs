@@ -32,7 +32,6 @@
 #include "openvswitch/vlog.h"
 #include "pinsched.h"
 #include "poll-loop.h"
-#include "pktbuf.h"
 #include "rconn.h"
 #include "openvswitch/shash.h"
 #include "simap.h"
@@ -66,7 +65,7 @@ ofp_bundle_remove__(struct ofconn *ofconn, struct ofp_bundle *bundle,
     LIST_FOR_EACH_POP (msg, node, &bundle->msg_list) {
         if (success && msg->type == OFPTYPE_FLOW_MOD) {
             /* Tell connmgr about successful flow mods. */
-            ofconn_report_flow_mod(ofconn, msg->ofm.fm.command);
+            ofconn_report_flow_mod(ofconn, msg->ofm.command);
         }
         ofp_bundle_entry_free(msg);
     }

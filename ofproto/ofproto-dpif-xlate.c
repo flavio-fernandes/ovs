@@ -636,7 +636,7 @@ static struct vlog_rate_limit error_report_rl = VLOG_RATE_LIMIT_INIT(1, 5);
                                                                 \
             ds_put_format(&ds, __VA_ARGS__);                    \
             ds_put_cstr(&ds, ": ");                             \
-            flow_format(&ds, &ctx->base_flow);                  \
+            flow_format(&ds, &(CTX)->base_flow);                \
             VLOG_ERR_RL(&error_report_rl, "%s", ds_cstr(&ds));  \
             ds_destroy(&ds);                                    \
         }                                                       \
@@ -4914,7 +4914,8 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
             break;
 
         case OFPACT_REG_MOVE:
-            nxm_execute_reg_move(ofpact_get_REG_MOVE(a), flow, wc);
+            mf_subfield_copy(&ofpact_get_REG_MOVE(a)->src,
+                             &ofpact_get_REG_MOVE(a)->dst, flow, wc);
             break;
 
         case OFPACT_SET_FIELD:

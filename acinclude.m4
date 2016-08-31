@@ -134,10 +134,10 @@ AC_DEFUN([OVS_CHECK_LINUX], [
     AC_MSG_RESULT([$kversion])
 
     if test "$version" -ge 4; then
-       if test "$version" = 4 && test "$patchlevel" -le 6; then
+       if test "$version" = 4 && test "$patchlevel" -le 7; then
           : # Linux 4.x
        else
-          AC_ERROR([Linux kernel in $KBUILD is version $kversion, but version newer than 4.6.x is not supported (please refer to the FAQ for advice)])
+          AC_ERROR([Linux kernel in $KBUILD is version $kversion, but version newer than 4.7.x is not supported (please refer to the FAQ for advice)])
        fi
     elif test "$version" = 3 && test "$patchlevel" -ge 10; then
        : # Linux 3.x
@@ -201,25 +201,14 @@ AC_DEFUN([OVS_CHECK_DPDK], [
       AC_LANG_PROGRAM(
         [
           #include <rte_config.h>
-#if !RTE_LIBRTE_VHOST_USER
-#error
-#endif
-        ], [])
-      ], [],
-      [AC_DEFINE([VHOST_CUSE], [1], [DPDK vhost-cuse support enabled, vhost-user disabled.])
-       DPDK_EXTRA_LIB="-lfuse"])
-
-    AC_COMPILE_IFELSE([
-      AC_LANG_PROGRAM(
-        [
-          #include <rte_config.h>
 #if RTE_LIBRTE_VHOST_NUMA
 #error
 #endif
         ], [])
       ], [],
       [AC_SEARCH_LIBS([get_mempolicy],[numa],[],[AC_MSG_ERROR([unable to find libnuma, install the dependency package])])
-       DPDK_EXTRA_LIB="-lnuma"])
+       DPDK_EXTRA_LIB="-lnuma"
+       AC_DEFINE([VHOST_NUMA], [1], [NUMA Aware vHost support detected in DPDK.])])
 
     AC_COMPILE_IFELSE([
       AC_LANG_PROGRAM(
@@ -605,6 +594,7 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [skb_vlan_push])
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [skb_clear_hash_if_not_l4])
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [skb_postpush_rcsum])
+  OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [lco_csum])
 
   OVS_GREP_IFELSE([$KSRC/include/linux/types.h], [bool],
                   [OVS_DEFINE([HAVE_BOOL_TYPE])])
