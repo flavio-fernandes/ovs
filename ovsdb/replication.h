@@ -18,28 +18,23 @@
 #ifndef REPLICATION_H
 #define REPLICATION_H 1
 
-#include "openvswitch/shash.h"
-
-struct db {
-    /* Initialized in main(). */
-    char *filename;
-    struct ovsdb_file *file;
-    struct ovsdb *db;
-
-    /* Only used by update_remote_status(). */
-    struct ovsdb_txn *txn;
-};
+#include <stdbool.h>
+struct ovsdb;
 
 void replication_init(void);
-void replication_run(struct shash *dbs);
+void replication_run(void);
 void replication_wait(void);
+void replication_destroy(void);
+void replication_usage(void);
+void replication_add_local_db(const char *databse, struct ovsdb *db);
+bool replication_is_alive(void);
+int replication_get_last_error(void);
+
 void set_active_ovsdb_server(const char *remote_server);
 const char *get_active_ovsdb_server(void);
-void set_tables_blacklist(const char *blacklist);
-struct sset get_tables_blacklist(void);
+char *set_blacklist_tables(const char *blacklist, bool dryrun)
+    OVS_WARN_UNUSED_RESULT;
+char *get_blacklist_tables(void) OVS_WARN_UNUSED_RESULT;
 void disconnect_active_server(void);
-void destroy_active_server(void);
-const struct db *find_db(const struct shash *all_dbs, const char *db_name);
-void replication_usage(void);
 
 #endif /* ovsdb/replication.h */

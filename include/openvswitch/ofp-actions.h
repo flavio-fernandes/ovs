@@ -479,12 +479,23 @@ struct ofpact_stack {
  *
  * Used for NXAST_REG_LOAD and OFPAT12_SET_FIELD. */
 struct ofpact_set_field {
-    struct ofpact ofpact;
-    const struct mf_field *field;
-    bool flow_has_vlan;   /* VLAN present at action validation time. */
-    union mf_value value;
-    union mf_value mask;
+    OFPACT_PADDED_MEMBERS(
+        struct ofpact ofpact;
+        bool flow_has_vlan;   /* VLAN present at action validation time. */
+        const struct mf_field *field;
+    );
+    union mf_value value[];  /* Significant value bytes followed by
+                              * significant mask bytes. */
 };
+BUILD_ASSERT_DECL(offsetof(struct ofpact_set_field, value)
+                  % OFPACT_ALIGNTO == 0);
+BUILD_ASSERT_DECL(offsetof(struct ofpact_set_field, value)
+                  == sizeof(struct ofpact_set_field));
+
+/* Use macro to not have to deal with constness. */
+#define ofpact_set_field_mask(SF)                               \
+    ALIGNED_CAST(union mf_value *,                              \
+                 (uint8_t *)(SF)->value + (SF)->field->n_bytes)
 
 /* OFPACT_PUSH_VLAN/MPLS/PBB
  *
@@ -651,19 +662,6 @@ struct ofpact_resubmit {
     uint8_t table_id;
 };
 
-/* Part of struct ofpact_learn, below. */
-struct ofpact_learn_spec {
-    int n_bits;                 /* Number of bits in source and dest. */
-
-    int src_type;               /* One of NX_LEARN_SRC_*. */
-    struct mf_subfield src;     /* NX_LEARN_SRC_FIELD only. */
-    union mf_subvalue src_imm;  /* NX_LEARN_SRC_IMMEDIATE only. */
-
-    int dst_type;             /* One of NX_LEARN_DST_*. */
-    struct mf_subfield dst;   /* NX_LEARN_DST_MATCH, NX_LEARN_DST_LOAD only. */
-};
-
-
 /* Bits for 'flags' in struct nx_action_learn.
  *
  * If NX_LEARN_F_SEND_FLOW_REM is set, then the learned flows will have their
@@ -708,6 +706,33 @@ enum nx_learn_flags {
 #define NX_LEARN_DST_RESERVED  (3 << 11) /* Not yet defined. */
 #define NX_LEARN_DST_MASK      (3 << 11)
 
+/* Part of struct ofpact_learn, below. */
+struct ofpact_learn_spec {
+    struct mf_subfield src;    /* NX_LEARN_SRC_FIELD only. */
+    struct mf_subfield dst;    /* NX_LEARN_DST_MATCH, NX_LEARN_DST_LOAD only. */
+    uint16_t src_type;         /* One of NX_LEARN_SRC_*. */
+    uint16_t dst_type;         /* One of NX_LEARN_DST_*. */
+    uint8_t n_bits;            /* Number of bits in source and dest. */
+    uint64_t src_imm[];        /* OFPACT_ALIGNTO (uint64_t) aligned. */
+};
+BUILD_ASSERT_DECL(offsetof(struct ofpact_learn_spec, src_imm)
+                  % OFPACT_ALIGNTO == 0);
+BUILD_ASSERT_DECL(offsetof(struct ofpact_learn_spec, src_imm)
+                  == sizeof(struct ofpact_learn_spec));
+
+static inline const struct ofpact_learn_spec *
+ofpact_learn_spec_next(const struct ofpact_learn_spec *spec)
+{
+    if (spec->src_type == NX_LEARN_SRC_IMMEDIATE) {
+        unsigned int n_uint64s
+            = OFPACT_ALIGN(DIV_ROUND_UP(spec->n_bits, 8)) / sizeof (uint64_t);
+        return (const struct ofpact_learn_spec *)
+            ((const uint64_t *)(spec + 1) + n_uint64s);
+    } else {
+        return spec + 1;
+    }
+}
+
 /* OFPACT_LEARN.
  *
  * Used for NXAST_LEARN. */
@@ -718,8 +743,8 @@ struct ofpact_learn {
     uint16_t hard_timeout;      /* Max time before discarding (seconds). */
     uint16_t priority;          /* Priority level of flow entry. */
     uint8_t table_id;           /* Table to insert flow entry. */
-    ovs_be64 cookie;            /* Cookie for new flow. */
     enum nx_learn_flags flags;  /* NX_LEARN_F_*. */
+    ovs_be64 cookie;            /* Cookie for new flow. */
     uint16_t fin_idle_timeout;  /* Idle timeout after FIN, if nonzero. */
     uint16_t fin_hard_timeout;  /* Hard timeout after FIN, if nonzero. */
 
@@ -1044,7 +1069,18 @@ OFPACTS
 #undef OFPACT
 
 /* Additional functions for composing ofpacts. */
-struct ofpact_set_field *ofpact_put_reg_load(struct ofpbuf *ofpacts);
+struct ofpact_set_field *ofpact_put_set_field(struct ofpbuf *ofpacts,
+                                              const struct mf_field *,
+                                              const void *value,
+                                              const void *mask);
+struct ofpact_set_field *ofpact_put_reg_load(struct ofpbuf *ofpacts,
+                                             const struct mf_field *,
+                                             const void *value,
+                                             const void *mask);
+struct ofpact_set_field *ofpact_put_reg_load2(struct ofpbuf *ofpacts,
+                                              const struct mf_field *,
+                                              const void *value,
+                                              const void *mask);
 
 /* OpenFlow 1.1 instructions.
  * The order is sorted in execution order. Not in the value of OFPIT11_xxx.
