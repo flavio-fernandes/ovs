@@ -708,49 +708,69 @@ enum nx_learn_flags {
 
 /* Part of struct ofpact_learn, below. */
 struct ofpact_learn_spec {
-    struct mf_subfield src;    /* NX_LEARN_SRC_FIELD only. */
-    struct mf_subfield dst;    /* NX_LEARN_DST_MATCH, NX_LEARN_DST_LOAD only. */
-    uint16_t src_type;         /* One of NX_LEARN_SRC_*. */
-    uint16_t dst_type;         /* One of NX_LEARN_DST_*. */
-    uint8_t n_bits;            /* Number of bits in source and dest. */
-    uint64_t src_imm[];        /* OFPACT_ALIGNTO (uint64_t) aligned. */
+    OFPACT_PADDED_MEMBERS(
+        struct mf_subfield src;    /* NX_LEARN_SRC_FIELD only. */
+        struct mf_subfield dst;    /* NX_LEARN_DST_MATCH,
+                                    * NX_LEARN_DST_LOAD only. */
+        uint16_t src_type;         /* One of NX_LEARN_SRC_*. */
+        uint16_t dst_type;         /* One of NX_LEARN_DST_*. */
+        uint8_t n_bits;            /* Number of bits in source and dest. */
+    );
+    /* Followed by 'DIV_ROUND_UP(n_bits, 8)' bytes of immediate data for
+     * match 'dst_type's NX_LEARN_DST_MATCH and NX_LEARN_DST_LOAD when
+     * NX_LEARN_SRC_IMMEDIATE is set in 'src_type', followed by zeroes to align
+     * to OFPACT_ALIGNTO. */
 };
-BUILD_ASSERT_DECL(offsetof(struct ofpact_learn_spec, src_imm)
-                  % OFPACT_ALIGNTO == 0);
-BUILD_ASSERT_DECL(offsetof(struct ofpact_learn_spec, src_imm)
-                  == sizeof(struct ofpact_learn_spec));
+BUILD_ASSERT_DECL(sizeof(struct ofpact_learn_spec) % OFPACT_ALIGNTO == 0);
+
+static inline const void *
+ofpact_learn_spec_imm(const struct ofpact_learn_spec *spec)
+{
+    return spec + 1;
+}
 
 static inline const struct ofpact_learn_spec *
 ofpact_learn_spec_next(const struct ofpact_learn_spec *spec)
 {
     if (spec->src_type == NX_LEARN_SRC_IMMEDIATE) {
-        unsigned int n_uint64s
-            = OFPACT_ALIGN(DIV_ROUND_UP(spec->n_bits, 8)) / sizeof (uint64_t);
-        return (const struct ofpact_learn_spec *)
-            ((const uint64_t *)(spec + 1) + n_uint64s);
-    } else {
-        return spec + 1;
+        unsigned int n_bytes = OFPACT_ALIGN(DIV_ROUND_UP(spec->n_bits, 8));
+        return ALIGNED_CAST(const struct ofpact_learn_spec *,
+                            (const uint8_t *)(spec + 1) + n_bytes);
     }
+    return spec + 1;
 }
 
 /* OFPACT_LEARN.
  *
  * Used for NXAST_LEARN. */
 struct ofpact_learn {
-    struct ofpact ofpact;
+    OFPACT_PADDED_MEMBERS(
+        struct ofpact ofpact;
 
-    uint16_t idle_timeout;      /* Idle time before discarding (seconds). */
-    uint16_t hard_timeout;      /* Max time before discarding (seconds). */
-    uint16_t priority;          /* Priority level of flow entry. */
-    uint8_t table_id;           /* Table to insert flow entry. */
-    enum nx_learn_flags flags;  /* NX_LEARN_F_*. */
-    ovs_be64 cookie;            /* Cookie for new flow. */
-    uint16_t fin_idle_timeout;  /* Idle timeout after FIN, if nonzero. */
-    uint16_t fin_hard_timeout;  /* Hard timeout after FIN, if nonzero. */
+        uint16_t idle_timeout;     /* Idle time before discarding (seconds). */
+        uint16_t hard_timeout;     /* Max time before discarding (seconds). */
+        uint16_t priority;         /* Priority level of flow entry. */
+        uint8_t table_id;          /* Table to insert flow entry. */
+        enum nx_learn_flags flags; /* NX_LEARN_F_*. */
+        ovs_be64 cookie;           /* Cookie for new flow. */
+        uint16_t fin_idle_timeout; /* Idle timeout after FIN, if nonzero. */
+        uint16_t fin_hard_timeout; /* Hard timeout after FIN, if nonzero. */
+    );
 
-    unsigned int n_specs;
     struct ofpact_learn_spec specs[];
 };
+
+static inline const struct ofpact_learn_spec *
+ofpact_learn_spec_end(const struct ofpact_learn *learn)
+{
+    return ALIGNED_CAST(const struct ofpact_learn_spec *,
+                        ofpact_next(&learn->ofpact));
+}
+
+#define OFPACT_LEARN_SPEC_FOR_EACH(SPEC, LEARN) \
+    for ((SPEC) = (LEARN)->specs;               \
+         (SPEC) < ofpact_learn_spec_end(LEARN); \
+         (SPEC) = ofpact_learn_spec_next(SPEC))
 
 /* Multipath link choice algorithm to apply.
  *

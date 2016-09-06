@@ -4321,7 +4321,6 @@ decode_NXAST_RAW_LEARN(const struct nx_action_learn *nal,
 
         spec = ofpbuf_put_zeros(ofpacts, sizeof *spec);
         learn = ofpacts->header;
-        learn->n_specs++;
 
         spec->src_type = header & NX_LEARN_SRC_MASK;
         spec->dst_type = header & NX_LEARN_DST_MASK;
@@ -4421,8 +4420,7 @@ encode_LEARN(const struct ofpact_learn *learn,
     nal->flags = htons(learn->flags);
     nal->table_id = learn->table_id;
 
-    for (spec = learn->specs; spec < &learn->specs[learn->n_specs];
-         spec = ofpact_learn_spec_next(spec)) {
+    OFPACT_LEARN_SPEC_FOR_EACH (spec, learn) {
         put_u16(out, spec->n_bits | spec->dst_type | spec->src_type);
 
         if (spec->src_type == NX_LEARN_SRC_FIELD) {
@@ -4431,9 +4429,10 @@ encode_LEARN(const struct ofpact_learn *learn,
         } else {
             size_t n_dst_bytes = 2 * DIV_ROUND_UP(spec->n_bits, 16);
             uint8_t *bits = ofpbuf_put_zeros(out, n_dst_bytes);
-            unsigned int n_bytes = DIV_ROUND_UP(spec->dst.n_bits, 8);
+            unsigned int n_bytes = DIV_ROUND_UP(spec->n_bits, 8);
 
-            memcpy(bits + n_dst_bytes - n_bytes, spec->src_imm, n_bytes);
+            memcpy(bits + n_dst_bytes - n_bytes, ofpact_learn_spec_imm(spec),
+                   n_bytes);
         }
 
         if (spec->dst_type == NX_LEARN_DST_MATCH ||
