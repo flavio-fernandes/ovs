@@ -175,8 +175,8 @@ static void learned_cookies_flush(struct ofproto *, struct ovs_list *dead_cookie
 /* ofport. */
 static void ofport_destroy__(struct ofport *) OVS_EXCLUDED(ofproto_mutex);
 static void ofport_destroy(struct ofport *, bool del);
-static inline bool ofport_is_internal(const struct ofproto *,
-                                      const struct ofport *);
+static bool ofport_is_mtu_overridden(const struct ofproto *,
+                                     const struct ofport *);
 
 static int update_port(struct ofproto *, const char *devname);
 static int init_ports(struct ofproto *);
@@ -280,8 +280,6 @@ static void meter_insert_rule(struct rule *);
 
 /* unixctl. */
 static void ofproto_unixctl_init(void);
-
-static int find_min_mtu(struct ofproto *p);
 
 /* All registered ofproto classes, in probe order. */
 static const struct ofproto_class **ofproto_classes;
@@ -516,7 +514,7 @@ ofproto_create(const char *datapath_name, const char *datapath_type,
     hmap_init(&ofproto->learned_cookies);
     ovs_list_init(&ofproto->expirable);
     ofproto->connmgr = connmgr_create(ofproto, datapath_name, datapath_name);
-    ofproto->min_mtu = find_min_mtu(ofproto);
+    ofproto->min_mtu = INT_MAX;
     cmap_init(&ofproto->groups);
     ovs_mutex_unlock(&ofproto_mutex);
     ofproto->ogf.types = 0xf;
@@ -2418,12 +2416,12 @@ static void
 ofport_remove(struct ofport *ofport)
 {
     struct ofproto *p = ofport->ofproto;
-    bool is_internal = ofport_is_internal(p, ofport);
+    bool is_mtu_overridden = ofport_is_mtu_overridden(p, ofport);
 
     connmgr_send_port_status(ofport->ofproto->connmgr, NULL, &ofport->pp,
                              OFPPR_DELETE);
     ofport_destroy(ofport, true);
-    if (!is_internal) {
+    if (!is_mtu_overridden) {
         update_mtu_ofproto(p);
     }
 }
@@ -2703,14 +2701,23 @@ init_ports(struct ofproto *p)
     return 0;
 }
 
-static inline bool
+static bool
 ofport_is_internal(const struct ofproto *p, const struct ofport *port)
 {
     return !strcmp(netdev_get_type(port->netdev),
                    ofproto_port_open_type(p->type, "internal"));
 }
 
-/* Find the minimum MTU of all non-datapath devices attached to 'p'.
+/* If 'port' is internal and if the user didn't explicitly specify an mtu
+ * through the database, we have to override it. */
+static bool
+ofport_is_mtu_overridden(const struct ofproto *p, const struct ofport *port)
+{
+    return ofport_is_internal(p, port)
+           && !netdev_mtu_is_user_config(port->netdev);
+}
+
+/* Find the minimum MTU of all non-overridden devices attached to 'p'.
  * Returns ETH_PAYLOAD_MAX or the minimum of the ports. */
 static int
 find_min_mtu(struct ofproto *p)
@@ -2722,9 +2729,8 @@ find_min_mtu(struct ofproto *p)
         struct netdev *netdev = ofport->netdev;
         int dev_mtu;
 
-        /* Skip any internal ports, since that's what we're trying to
-         * set. */
-        if (ofport_is_internal(p, ofport)) {
+        /* Skip any overridden port, since that's what we're trying to set. */
+        if (ofport_is_mtu_overridden(p, ofport)) {
             continue;
         }
 
@@ -2739,8 +2745,8 @@ find_min_mtu(struct ofproto *p)
     return mtu ? mtu: ETH_PAYLOAD_MAX;
 }
 
-/* Update MTU of all datapath devices on 'p' to the minimum of the
- * non-datapath ports in event of 'port' added or changed. */
+/* Update MTU of all overridden devices on 'p' to the minimum of the
+ * non-overridden ports in event of 'port' added or changed. */
 static void
 update_mtu(struct ofproto *p, struct ofport *port)
 {
@@ -2751,23 +2757,25 @@ update_mtu(struct ofproto *p, struct ofport *port)
         port->mtu = 0;
         return;
     }
-    if (ofport_is_internal(p, port)) {
-        if (!netdev_set_mtu(port->netdev, p->min_mtu)) {
-            dev_mtu = p->min_mtu;
+    if (ofport_is_mtu_overridden(p, port)) {
+        if (dev_mtu > p->min_mtu) {
+            if (!netdev_set_mtu(port->netdev, p->min_mtu)) {
+                dev_mtu = p->min_mtu;
+            }
         }
         port->mtu = dev_mtu;
         return;
     }
 
     port->mtu = dev_mtu;
-    /* For non-internal port find new min mtu. */
+    /* For non-overridden port find new min mtu. */
+
     update_mtu_ofproto(p);
 }
 
 static void
 update_mtu_ofproto(struct ofproto *p)
 {
-    /* For non-internal port find new min mtu. */
     struct ofport *ofport;
     int old_min = p->min_mtu;
 
@@ -2779,7 +2787,7 @@ update_mtu_ofproto(struct ofproto *p)
     HMAP_FOR_EACH (ofport, hmap_node, &p->ports) {
         struct netdev *netdev = ofport->netdev;
 
-        if (ofport_is_internal(p, ofport)) {
+        if (ofport_is_mtu_overridden(p, ofport)) {
             if (!netdev_set_mtu(netdev, p->min_mtu)) {
                 ofport->mtu = p->min_mtu;
             }
