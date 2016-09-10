@@ -912,7 +912,8 @@ encode_CT_LB(const struct ovnact_ct_lb *cl,
         struct ofpact_conntrack *ct = ofpact_put_CT(ofpacts);
         struct ofpact_nat *nat;
         size_t nat_offset;
-        ct->zone_src.field = mf_from_id(MFF_LOG_CT_ZONE);
+        ct->zone_src.field = ep->is_switch ? mf_from_id(MFF_LOG_CT_ZONE)
+                                : mf_from_id(MFF_LOG_DNAT_ZONE);
         ct->zone_src.ofs = 0;
         ct->zone_src.n_bits = 16;
         ct->flags = 0;
@@ -936,12 +937,16 @@ encode_CT_LB(const struct ovnact_ct_lb *cl,
     uint32_t group_id = 0, hash;
     struct group_info *group_info;
     struct ofpact_group *og;
+    uint32_t zone_reg = ep->is_switch ? MFF_LOG_CT_ZONE - MFF_REG0
+                            : MFF_LOG_DNAT_ZONE - MFF_REG0;
 
     struct ds ds = DS_EMPTY_INITIALIZER;
     ds_put_format(&ds, "type=select");
 
     BUILD_ASSERT(MFF_LOG_CT_ZONE >= MFF_REG0);
     BUILD_ASSERT(MFF_LOG_CT_ZONE < MFF_REG0 + FLOW_N_REGS);
+    BUILD_ASSERT(MFF_LOG_DNAT_ZONE >= MFF_REG0);
+    BUILD_ASSERT(MFF_LOG_DNAT_ZONE < MFF_REG0 + FLOW_N_REGS);
     for (size_t bucket_id = 0; bucket_id < cl->n_dsts; bucket_id++) {
         const struct ovnact_ct_lb_dst *dst = &cl->dsts[bucket_id];
         ds_put_format(&ds, ",bucket=bucket_id=%"PRIuSIZE",weight:100,actions="
@@ -950,7 +955,7 @@ encode_CT_LB(const struct ovnact_ct_lb *cl,
             ds_put_format(&ds, ":%"PRIu16, dst->port);
         }
         ds_put_format(&ds, "),commit,table=%d,zone=NXM_NX_REG%d[0..15])",
-                      recirc_table, MFF_LOG_CT_ZONE - MFF_REG0);
+                      recirc_table, zone_reg);
     }
 
     hash = hash_string(ds_cstr(&ds), 0);
@@ -974,10 +979,12 @@ encode_CT_LB(const struct ovnact_ct_lb *cl,
             }
         }
 
+        bool new_group_id = false;
         if (!group_id) {
             /* Reserve a new group_id. */
             group_id = bitmap_scan(ep->group_table->group_ids, 0, 1,
                                    MAX_OVN_GROUPS + 1);
+            new_group_id = true;
         }
 
         if (group_id == MAX_OVN_GROUPS + 1) {
@@ -993,6 +1000,7 @@ encode_CT_LB(const struct ovnact_ct_lb *cl,
         group_info->group = ds;
         group_info->group_id = group_id;
         group_info->hmap_node.hash = hash;
+        group_info->new_group_id = new_group_id;
 
         hmap_insert(&ep->group_table->desired_groups,
                     &group_info->hmap_node, group_info->hmap_node.hash);
