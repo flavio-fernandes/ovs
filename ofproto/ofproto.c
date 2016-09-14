@@ -461,6 +461,7 @@ ofproto_bump_tables_version(struct ofproto *ofproto)
 int
 ofproto_create(const char *datapath_name, const char *datapath_type,
                struct ofproto **ofprotop)
+    OVS_EXCLUDED(ofproto_mutex)
 {
     const struct ofproto_class *class;
     struct ofproto *ofproto;
@@ -530,7 +531,10 @@ ofproto_create(const char *datapath_name, const char *datapath_type,
     if (error) {
         VLOG_ERR("failed to open datapath %s: %s",
                  datapath_name, ovs_strerror(error));
+        ovs_mutex_lock(&ofproto_mutex);
         connmgr_destroy(ofproto->connmgr);
+        ofproto->connmgr = NULL;
+        ovs_mutex_unlock(&ofproto_mutex);
         ofproto_destroy__(ofproto);
         return error;
     }
@@ -1474,7 +1478,7 @@ ofproto_rule_delete(struct ofproto *ofproto, struct rule *rule)
      * be killed. */
     ovs_mutex_lock(&ofproto_mutex);
 
-    if (!rule->removed) {
+    if (rule->state == RULE_INSERTED) {
         /* Make sure there is no postponed removal of the rule. */
         ovs_assert(cls_rule_visible_in_version(&rule->cr, OVS_VERSION_MAX));
 
@@ -1486,6 +1490,8 @@ ofproto_rule_delete(struct ofproto *ofproto, struct rule *rule)
         if (ofproto->ofproto_class->rule_delete) {
             ofproto->ofproto_class->rule_delete(rule);
         }
+
+        /* This may not be the last reference to the rule. */
         ofproto_rule_unref(rule);
     }
     ovs_mutex_unlock(&ofproto_mutex);
@@ -1605,9 +1611,13 @@ ofproto_destroy(struct ofproto *p, bool del)
     p->ofproto_class->destruct(p);
 
     /* We should not postpone this because it involves deleting a listening
-     * socket which we may want to reopen soon. 'connmgr' should not be used
-     * by other threads */
+     * socket which we may want to reopen soon. 'connmgr' may be used by other
+     * threads only if they take the ofproto_mutex and read a non-NULL
+     * 'ofproto->connmgr'. */
+    ovs_mutex_lock(&ofproto_mutex);
     connmgr_destroy(p->connmgr);
+    p->connmgr = NULL;
+    ovs_mutex_unlock(&ofproto_mutex);
 
     /* Destroying rules is deferred, must have 'ofproto' around for them. */
     ovsrcu_postpone(ofproto_destroy_defer__, p);
@@ -2183,7 +2193,7 @@ ofproto_flow_mod(struct ofproto *ofproto, const struct ofputil_flow_mod *fm)
 void
 ofproto_delete_flow(struct ofproto *ofproto,
                     const struct match *target, int priority)
-    OVS_EXCLUDED(ofproto_mutex)
+    OVS_REQUIRES(ofproto_mutex)
 {
     struct classifier *cls = &ofproto->tables[0].cls;
     struct rule *rule;
@@ -2196,10 +2206,12 @@ ofproto_delete_flow(struct ofproto *ofproto,
         return;
     }
 
-    /* Execute a flow mod.  We can't optimize this at all because we didn't
-     * take enough locks above to ensure that the flow table didn't already
-     * change beneath us. */
-    simple_flow_mod(ofproto, target, priority, NULL, 0, OFPFC_DELETE_STRICT);
+    struct rule_collection rules;
+
+    rule_collection_init(&rules);
+    rule_collection_add(&rules, rule);
+    delete_flows__(&rules, OFPRR_DELETE, NULL);
+    rule_collection_destroy(&rules);
 }
 
 /* Delete all of the flows from all of ofproto's flow tables, then reintroduce
@@ -4804,7 +4816,7 @@ ofproto_rule_create(struct ofproto *ofproto, struct cls_rule *cr,
         return error;
     }
 
-    rule->removed = true;   /* Not yet in ofproto data structures. */
+    rule->state = RULE_INITIALIZED;
 
     *new_rule = rule;
     return 0;
@@ -5325,7 +5337,15 @@ ofproto_rule_send_removed(struct rule *rule)
     minimatch_expand(&rule->cr.match, &fr.match);
     fr.priority = rule->cr.priority;
 
+    /* Synchronize with connmgr_destroy() calls to prevent connmgr disappearing
+     * while we use it. */
     ovs_mutex_lock(&ofproto_mutex);
+    struct connmgr *connmgr = rule->ofproto->connmgr;
+    if (!connmgr) {
+        ovs_mutex_unlock(&ofproto_mutex);
+        return;
+    }
+
     fr.cookie = rule->flow_cookie;
     fr.reason = rule->removed_reason;
     fr.table_id = rule->table_id;
@@ -5337,7 +5357,7 @@ ofproto_rule_send_removed(struct rule *rule)
     ovs_mutex_unlock(&rule->mutex);
     rule->ofproto->ofproto_class->rule_get_stats(rule, &fr.packet_count,
                                                  &fr.byte_count, &used);
-    connmgr_send_flow_removed(rule->ofproto->connmgr, &fr);
+    connmgr_send_flow_removed(connmgr, &fr);
     ovs_mutex_unlock(&ofproto_mutex);
 }
 
@@ -7257,7 +7277,7 @@ do_bundle_commit(struct ofconn *ofconn, uint32_t id, uint16_t flags)
         if (error) {
             /* Send error referring to the original message. */
             if (error) {
-                ofconn_send_error(ofconn, be->ofp_msg, error);
+                ofconn_send_error(ofconn, &be->ofp_msg, error);
                 error = OFPERR_OFPBFC_MSG_FAILED;
             }
 
@@ -7284,7 +7304,7 @@ do_bundle_commit(struct ofconn *ofconn, uint32_t id, uint16_t flags)
                     port_mod_finish(ofconn, &be->opm.pm, be->opm.port);
                 } else {
                     struct openflow_mod_requester req = { ofconn,
-                                                          be->ofp_msg };
+                                                          &be->ofp_msg };
                     if (be->type == OFPTYPE_FLOW_MOD) {
                         /* Bump the lookup version to the one of the current
                          * message.  This makes all the changes in the bundle
@@ -7342,8 +7362,8 @@ handle_bundle_control(struct ofconn *ofconn, const struct ofp_header *oh)
     reply.bundle_id = bctrl.bundle_id;
 
     switch (bctrl.type) {
-        case OFPBCT_OPEN_REQUEST:
-        error = ofp_bundle_open(ofconn, bctrl.bundle_id, bctrl.flags);
+    case OFPBCT_OPEN_REQUEST:
+        error = ofp_bundle_open(ofconn, bctrl.bundle_id, bctrl.flags, oh);
         reply.type = OFPBCT_OPEN_REPLY;
         break;
     case OFPBCT_CLOSE_REQUEST:
@@ -7421,7 +7441,7 @@ handle_bundle_add(struct ofconn *ofconn, const struct ofp_header *oh)
 
     if (!error) {
         error = ofp_bundle_add_message(ofconn, badd.bundle_id, badd.flags,
-                                       bmsg);
+                                       bmsg, oh);
     }
 
     if (error) {
@@ -8080,7 +8100,8 @@ ofproto_rule_insert__(struct ofproto *ofproto, struct rule *rule)
 {
     const struct rule_actions *actions = rule_get_actions(rule);
 
-    ovs_assert(rule->removed);
+    /* A rule may not be reinserted. */
+    ovs_assert(rule->state == RULE_INITIALIZED);
 
     if (rule->hard_timeout || rule->idle_timeout) {
         ovs_list_insert(&ofproto->expirable, &rule->expirable);
@@ -8103,7 +8124,7 @@ ofproto_rule_insert__(struct ofproto *ofproto, struct rule *rule)
         }
     }
 
-    rule->removed = false;
+    rule->state = RULE_INSERTED;
 }
 
 /* Removes 'rule' from the ofproto data structures.  Caller may have deferred
@@ -8112,7 +8133,7 @@ static void
 ofproto_rule_remove__(struct ofproto *ofproto, struct rule *rule)
     OVS_REQUIRES(ofproto_mutex)
 {
-    ovs_assert(!rule->removed);
+    ovs_assert(rule->state == RULE_INSERTED);
 
     cookies_remove(ofproto, rule);
 
@@ -8148,7 +8169,7 @@ ofproto_rule_remove__(struct ofproto *ofproto, struct rule *rule)
         }
     }
 
-    rule->removed = true;
+    rule->state = RULE_REMOVED;
 }
 
 /* unixctl commands. */
