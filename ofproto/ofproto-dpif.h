@@ -102,6 +102,11 @@ struct dpif_backer_support *ofproto_dpif_get_support(const struct ofproto_dpif *
 
 ovs_version_t ofproto_dpif_get_tables_version(struct ofproto_dpif *);
 
+void ofproto_dpif_credit_table_stats(struct ofproto_dpif *, uint8_t table_id,
+                                     uint64_t n_matches, uint64_t n_misses);
+
+struct xlate_cache;
+
 struct rule_dpif *rule_dpif_lookup_from_table(struct ofproto_dpif *,
                                               ovs_version_t, struct flow *,
                                               struct flow_wildcards *,
@@ -109,7 +114,8 @@ struct rule_dpif *rule_dpif_lookup_from_table(struct ofproto_dpif *,
                                               uint8_t *table_id,
                                               ofp_port_t in_port,
                                               bool may_packet_in,
-                                              bool honor_table_miss);
+                                              bool honor_table_miss,
+                                              struct xlate_cache *xcache);
 
 static inline void rule_dpif_ref(struct rule_dpif *);
 static inline void rule_dpif_unref(struct rule_dpif *);
@@ -146,20 +152,22 @@ const char *group_dpif_get_selection_method(const struct group_dpif *group);
 uint64_t group_dpif_get_selection_method_param(const struct group_dpif *group);
 const struct field_array *group_dpif_get_fields(const struct group_dpif *group);
 
-int ofproto_dpif_execute_actions(struct ofproto_dpif *, const struct flow *,
-                                 struct rule_dpif *, const struct ofpact *,
-                                 size_t ofpacts_len, struct dp_packet *);
-int ofproto_dpif_execute_actions__(struct ofproto_dpif *, const struct flow *,
-                                   struct rule_dpif *, const struct ofpact *,
-                                   size_t ofpacts_len, int indentation,
-                                   int depth, int resubmits,
+int ofproto_dpif_execute_actions(struct ofproto_dpif *, ovs_version_t,
+                                 const struct flow *, struct rule_dpif *,
+                                 const struct ofpact *, size_t ofpacts_len,
+                                 struct dp_packet *);
+int ofproto_dpif_execute_actions__(struct ofproto_dpif *, ovs_version_t,
+                                   const struct flow *, struct rule_dpif *,
+                                   const struct ofpact *, size_t ofpacts_len,
+                                   int indentation, int depth, int resubmits,
                                    struct dp_packet *);
 void ofproto_dpif_send_async_msg(struct ofproto_dpif *,
                                  struct ofproto_async_msg *);
 int ofproto_dpif_send_packet(const struct ofport_dpif *, bool oam,
                              struct dp_packet *);
-void ofproto_dpif_flow_mod(struct ofproto_dpif *,
-                           const struct ofputil_flow_mod *);
+enum ofperr ofproto_dpif_flow_mod_init_for_learn(struct ofproto_dpif *,
+                                                 const struct ofputil_flow_mod *,
+                                                 struct ofproto_flow_mod *);
 
 struct ofport_dpif *odp_port_to_ofport(const struct dpif_backer *, odp_port_t);
 struct ofport_dpif *ofp_port_to_ofport(const struct ofproto_dpif *,
