@@ -255,7 +255,7 @@ This command has limited usefulness, because ports often have no
 configured queues and because the OpenFlow protocol provides only very
 limited information about the configuration of a queue.
 .
-.IP "\fBdump\-ipfix\-bridge \fIswitch
+.IP "\fBdump\-ipfix\-bridge \fIswitch\fR"
 Prints to the console the statistics of bridge IPFIX for \fIswitch\fR.
 If bridge IPFIX is configured on the \fIswitch\fR, IPFIX statistics
 can be retrieved.  Otherwise, error message will be printed.
@@ -263,13 +263,13 @@ can be retrieved.  Otherwise, error message will be printed.
 This command uses an Open vSwitch extension that is only in Open
 vSwitch 2.6 and later.
 .
-.IP "\fBdump\-ipfix\-flow \fIswitch
+.IP "\fBdump\-ipfix\-flow \fIswitch\fR"
 Prints to the console the statistics of flow-based IPFIX for
 \fIswitch\fR.  If flow-based IPFIX is configured on the \fIswitch\fR,
 statistics of all the collector set ids on the \fIswitch\fR will be
 printed.  Otherwise, print error message.
 .IP
-Refer to \fBovs-vswitchd.conf.db\fR(5) for more details on configuring
+Refer to \fBovs\-vswitchd.conf.db\fR(5) for more details on configuring
 flow based IPFIX and collector set ids.
 .IP
 This command uses an Open vSwitch extension that is only in Open
@@ -508,10 +508,6 @@ ovs-ofctl add-flow br0 tun_metadata0=1234,actions=controller
 
 A mapping should not be changed while it is in active
 use by a flow. The result of doing so is undefined.
-
-Currently, the TLV mapping table is shared between all OpenFlow
-switches in a given instance of Open vSwitch. This restriction will
-be lifted in the future to allow for easier management.
 
 These commands are Nicira extensions to OpenFlow and require Open vSwitch
 2.5 or later.
@@ -2867,9 +2863,41 @@ This is a string of 1 to 15 bytes in length known to lower layers.
 This field is optional for \fBadd\-group\fR, \fBadd\-groups\fR and
 \fBmod\-group\fR commands on groups of type \fBselect\fR. Prohibited
 otherwise. The default value is the empty string.
+.RS
+.IP \fBhash\fR
+Use a hash computed over the fields specified with the \fBfields\fR
+option, see below.  \fBhash\fR uses the \fBselection_method_param\fR
+as the hash basis.
 .IP
-Other than the empty string, \fBhash\fR is currently the only defined
-selection method.
+Note that the hashed fields become exact matched by the datapath
+flows.  For example, if the TCP source port is hashed, the created
+datapath flows will match the specific TCP source port value present
+in the packet received.  Since each TCP connection generally has a
+different source port value, a separate datapath flow will be need to
+be inserted for each TCP connection thus hashed to a select group
+bucket.
+.IP \fBdp_hash\fR
+Use a datapath computed hash value.  The hash algorithm varies accross
+different datapath implementations.  \fBdp_hash\fR uses the upper 32
+bits of the \fBselection_method_param\fR as the datapath hash
+algorithm selector, which currently must always be 0, corresponding to
+hash computation over the IP 5-tuple (selecting specific fields with
+the \fBfields\fR option is not allowed with \fBdp_hash\fR).  The lower
+32 bits are used as the hash basis.
+.IP
+Using \fBdp_hash\fR has the advantage that it does not require the
+generated datapath flows to exact match any additional packet header
+fields.  For example, even if multiple TCP connections thus hashed to
+different select group buckets have different source port numbers,
+generally all of them would be handled with a small set of already
+established datapath flows, resulting in less latency for TCP SYN
+packets.  The downside is that the shared datapath flows must match
+each packet twice, as the datapath hash value calculation happens only
+when needed, and a second match is required to match some bits of its
+value.  This double-matching incurs a small additional latency cost
+for each packet, but this latency is orders of magnitude less than the
+latency of creating new datapath flows for new TCP connections.
+.RE
 .IP
 This option will use a Netronome OpenFlow extension which is only supported
 when using Open vSwitch 2.4 and later with OpenFlow 1.5 and later.
@@ -2887,14 +2915,14 @@ when using Open vSwitch 2.4 and later with OpenFlow 1.5 and later.
 .IP \fBfields\fR=\fIfield\fR
 .IQ \fBfields(\fIfield\fR[\fB=\fImask\fR]\fR...\fB)\fR
 The field parameters to selection method selected by the
-\fBselection_method\fR field.  The syntax is described in \fBFlow Syntax\fR
-with the additional restrictions that if a value is provided it is
-treated as a wildcard mask and wildcard masks following a slash are
-prohibited. The pre-requisites of fields must be provided by any flows that
-output to the group. The use of the fields is defined by the lower-layer
-that implements the \fBselection_method\fR.  They are optional if the
-\fBselection_method\fR field is specified as a non-empty string.
-Prohibited otherwise. The default is no fields.
+\fBselection_method\fR field.  The syntax is described in \fBFlow
+Syntax\fR with the additional restrictions that if a value is provided
+it is treated as a wildcard mask and wildcard masks following a slash
+are prohibited. The pre-requisites of fields must be provided by any
+flows that output to the group.  The use of the fields is defined by
+the lower-layer that implements the \fBselection_method\fR.  They are
+optional if the \fBselection_method\fR field is specified as ``hash',
+prohibited otherwise.  The default is no fields.
 .IP
 This option will use a Netronome OpenFlow extension which is only supported
 when using Open vSwitch 2.4 and later with OpenFlow 1.5 and later.

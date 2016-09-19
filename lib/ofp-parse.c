@@ -585,7 +585,8 @@ parse_ofp_packet_out_str__(struct ofputil_packet_out *po, char *string,
                 error = xasprintf("%s is not a valid OpenFlow port", value);
                 goto out;
             }
-            if (po->in_port > OFPP_MAX && po->in_port != OFPP_LOCAL
+            if (ofp_to_u16(po->in_port) > ofp_to_u16(OFPP_MAX)
+                && po->in_port != OFPP_LOCAL
                 && po->in_port != OFPP_NONE
                 && po->in_port != OFPP_CONTROLLER) {
                 error = xasprintf(
@@ -1224,7 +1225,8 @@ parse_ofp_flow_stats_request_str(struct ofputil_flow_stats_request *fsr,
  * problem. */
 char *
 parse_ofp_exact_flow(struct flow *flow, struct flow_wildcards *wc,
-                     const char *s, const struct simap *portno_names)
+                     const struct tun_table *tun_table, const char *s,
+                     const struct simap *portno_names)
 {
     char *pos, *key, *value_s;
     char *error = NULL;
@@ -1234,6 +1236,7 @@ parse_ofp_exact_flow(struct flow *flow, struct flow_wildcards *wc,
     if (wc) {
         memset(wc, 0, sizeof *wc);
     }
+    flow->tunnel.metadata.tab = tun_table;
 
     pos = copy = xstrdup(s);
     while (ofputil_parse_key_value(&pos, &key, &value_s)) {
@@ -1668,6 +1671,18 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, int command,
         goto out;
     }
 
+    /* Exclude fields for non "hash" selection method. */
+    if (strcmp(gm->props.selection_method, "hash") &&
+        gm->props.fields.values_size) {
+        error = xstrdup("fields may only be specified with \"selection_method=hash\"");
+        goto out;
+    }
+    /* Exclude selection_method_param if no selection_method is given. */
+    if (gm->props.selection_method[0] == 0
+        && gm->props.selection_method_param != 0) {
+        error = xstrdup("selection_method_param is only allowed with \"selection_method\"");
+        goto out;
+    }
     if (fields & F_COMMAND_BUCKET_ID) {
         if (!(fields & F_COMMAND_BUCKET_ID_ALL || had_command_bucket_id)) {
             error = xstrdup("must specify a command bucket id");
@@ -1733,10 +1748,6 @@ parse_ofp_group_mod_str(struct ofputil_group_mod *gm, int command,
     char *error = parse_ofp_group_mod_str__(gm, command, string,
                                             usable_protocols);
     free(string);
-
-    if (error) {
-        ofputil_uninit_group_mod(gm);
-    }
     return error;
 }
 

@@ -346,6 +346,11 @@ struct xlate_ctx {
     * case at that point.
     */
     bool freezing;
+    bool recirc_update_dp_hash;    /* Generated recirculation will be preceded
+                                    * by datapath HASH action to get an updated
+                                    * dp_hash after recirculation. */
+    uint32_t dp_hash_alg;
+    uint32_t dp_hash_basis;
     struct ofpbuf frozen_actions;
     const struct ofpact_controller *pause;
 
@@ -394,6 +399,8 @@ const char *xlate_strerror(enum xlate_error error)
         return "Recirculation conflict";
     case XLATE_TOO_MANY_MPLS_LABELS:
         return "Too many MPLS labels";
+    case XLATE_INVALID_TUNNEL_METADATA:
+        return "Invalid tunnel metadata";
     }
     return "Unknown error";
 }
@@ -408,6 +415,17 @@ ctx_trigger_freeze(struct xlate_ctx *ctx)
     ctx->freezing = true;
 }
 
+static void
+ctx_trigger_recirculate_with_hash(struct xlate_ctx *ctx, uint32_t type,
+                                  uint32_t basis)
+{
+    ctx->exit = true;
+    ctx->freezing = true;
+    ctx->recirc_update_dp_hash = true;
+    ctx->dp_hash_alg = type;
+    ctx->dp_hash_basis = basis;
+}
+
 static bool
 ctx_first_frozen_action(const struct xlate_ctx *ctx)
 {
@@ -419,6 +437,7 @@ ctx_cancel_freeze(struct xlate_ctx *ctx)
 {
     if (ctx->freezing) {
         ctx->freezing = false;
+        ctx->recirc_update_dp_hash = false;
         ofpbuf_clear(&ctx->frozen_actions);
         ctx->frozen_actions.header = NULL;
     }
@@ -1465,7 +1484,7 @@ group_first_live_bucket(const struct xlate_ctx *ctx,
     struct ofputil_bucket *bucket;
     const struct ovs_list *buckets;
 
-    buckets = group_dpif_get_buckets(group);
+    buckets = group_dpif_get_buckets(group, NULL);
     LIST_FOR_EACH (bucket, list_node, buckets) {
         if (bucket_is_alive(ctx, bucket, depth)) {
             return bucket;
@@ -1486,7 +1505,7 @@ group_best_live_bucket(const struct xlate_ctx *ctx,
     struct ofputil_bucket *bucket;
     const struct ovs_list *buckets;
 
-    buckets = group_dpif_get_buckets(group);
+    buckets = group_dpif_get_buckets(group, NULL);
     LIST_FOR_EACH (bucket, list_node, buckets) {
         if (bucket_is_alive(ctx, bucket, 0)) {
             uint32_t score =
@@ -2884,6 +2903,7 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
     if (xport->peer) {
         const struct xport *peer = xport->peer;
         struct flow old_flow = ctx->xin->flow;
+        struct flow_tnl old_flow_tnl_wc = ctx->wc->masks.tunnel;
         bool old_conntrack = ctx->conntracked;
         bool old_was_mpls = ctx->was_mpls;
         ovs_version_t old_version = ctx->xin->tables_version;
@@ -2894,14 +2914,35 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
 
         ofpbuf_use_stub(&ctx->stack, new_stack, sizeof new_stack);
         ofpbuf_use_stub(&ctx->action_set, actset_stub, sizeof actset_stub);
-        ctx->xbridge = peer->xbridge;
         flow->in_port.ofp_port = peer->ofp_port;
         flow->metadata = htonll(0);
         memset(&flow->tunnel, 0, sizeof flow->tunnel);
+        flow->tunnel.metadata.tab = ofproto_dpif_get_tun_tab(peer->xbridge->ofproto);
+        ctx->wc->masks.tunnel.metadata.tab = flow->tunnel.metadata.tab;
         memset(flow->regs, 0, sizeof flow->regs);
         flow->actset_output = OFPP_UNSET;
         ctx->conntracked = false;
         clear_conntrack(flow);
+
+        /* When the patch port points to a different bridge, then the mirrors
+         * for that bridge clearly apply independently to the packet, so we
+         * reset the mirror bitmap to zero and then restore it after the packet
+         * returns.
+         *
+         * When the patch port points to the same bridge, this is more of a
+         * design decision: can mirrors be re-applied to the packet after it
+         * re-enters the bridge, or should we treat that as doubly mirroring a
+         * single packet?  The former may be cleaner, since it respects the
+         * model in which a patch port is like a physical cable plugged from
+         * one switch port to another, but the latter may be less surprising to
+         * users.  We take the latter choice, for now at least.  (To use the
+         * former choice, hard-code 'independent_mirrors' to "true".) */
+        mirror_mask_t old_mirrors = ctx->mirrors;
+        bool independent_mirrors = peer->xbridge != ctx->xbridge;
+        if (independent_mirrors) {
+            ctx->mirrors = 0;
+        }
+        ctx->xbridge = peer->xbridge;
 
         /* The bridge is now known so obtain its table version. */
         ctx->xin->tables_version
@@ -2921,10 +2962,10 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
                  * the learning action look at the packet, then drop it. */
                 struct flow old_base_flow = ctx->base_flow;
                 size_t old_size = ctx->odp_actions->size;
-                mirror_mask_t old_mirrors = ctx->mirrors;
+                mirror_mask_t old_mirrors2 = ctx->mirrors;
 
                 xlate_table_action(ctx, flow->in_port.ofp_port, 0, true, true);
-                ctx->mirrors = old_mirrors;
+                ctx->mirrors = old_mirrors2;
                 ctx->base_flow = old_base_flow;
                 ctx->odp_actions->size = old_size;
 
@@ -2933,6 +2974,9 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
             }
         }
 
+        if (independent_mirrors) {
+            ctx->mirrors = old_mirrors;
+        }
         ctx->xin->flow = old_flow;
         ctx->xbridge = xport->xbridge;
         ofpbuf_uninit(&ctx->action_set);
@@ -2942,6 +2986,15 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
 
         /* Restore calling bridge's lookup version. */
         ctx->xin->tables_version = old_version;
+
+        /* Since this packet came in on a patch port (from the perspective of
+         * the peer bridge), it cannot have useful tunnel information. As a
+         * result, any wildcards generated on that tunnel also cannot be valid.
+         * The tunnel wildcards must be restored to their original version since
+         * the peer bridge uses a separate tunnel metadata table and therefore
+         * any generated wildcards will be garbage in the context of our
+         * metadata table. */
+        ctx->wc->masks.tunnel = old_flow_tnl_wc;
 
         /* The peer bridge popping MPLS should have no effect on the original
          * bridge. */
@@ -3286,7 +3339,7 @@ xlate_all_group(struct xlate_ctx *ctx, struct group_dpif *group)
     struct ofputil_bucket *bucket;
     const struct ovs_list *buckets;
 
-    buckets = group_dpif_get_buckets(group);
+    buckets = group_dpif_get_buckets(group, NULL);
     LIST_FOR_EACH (bucket, list_node, buckets) {
         xlate_group_bucket(ctx, bucket);
     }
@@ -3377,6 +3430,40 @@ xlate_hash_fields_select_group(struct xlate_ctx *ctx, struct group_dpif *group)
 }
 
 static void
+xlate_dp_hash_select_group(struct xlate_ctx *ctx, struct group_dpif *group)
+{
+    struct ofputil_bucket *bucket;
+
+    /* dp_hash value 0 is special since it means that the dp_hash has not been
+     * computed, as all computed dp_hash values are non-zero.  Therefore
+     * compare to zero can be used to decide if the dp_hash value is valid
+     * without masking the dp_hash field. */
+    if (!ctx->xin->flow.dp_hash) {
+        uint64_t param = group_dpif_get_selection_method_param(group);
+
+        ctx_trigger_recirculate_with_hash(ctx, param >> 32, (uint32_t)param);
+    } else {
+        uint32_t n_buckets;
+
+        group_dpif_get_buckets(group, &n_buckets);
+        if (n_buckets) {
+            /* Minimal mask to cover the number of buckets. */
+            uint32_t mask = (1 << log_2_ceil(n_buckets)) - 1;
+            /* Multiplier chosen to make the trivial 1 bit case to
+             * actually distribute amongst two equal weight buckets. */
+            uint32_t basis = 0xc2b73583 * (ctx->xin->flow.dp_hash & mask);
+
+            ctx->wc->masks.dp_hash |= mask;
+            bucket = group_best_live_bucket(ctx, group, basis);
+            if (bucket) {
+                xlate_group_bucket(ctx, bucket);
+                xlate_group_stats(ctx, group, bucket);
+            }
+        }
+    }
+}
+
+static void
 xlate_select_group(struct xlate_ctx *ctx, struct group_dpif *group)
 {
     const char *selection_method = group_dpif_get_selection_method(group);
@@ -3392,6 +3479,8 @@ xlate_select_group(struct xlate_ctx *ctx, struct group_dpif *group)
         xlate_default_select_group(ctx, group);
     } else if (!strcasecmp("hash", selection_method)) {
         xlate_hash_fields_select_group(ctx, group);
+    } else if (!strcasecmp("dp_hash", selection_method)) {
+        xlate_dp_hash_select_group(ctx, group);
     } else {
         /* Parsing of groups should ensure this never happens */
         OVS_NOT_REACHED();
@@ -3650,6 +3739,16 @@ finish_freezing__(struct xlate_ctx *ctx, uint8_t table)
         }
         recirc_refs_add(&ctx->xout->recircs, id);
 
+        if (ctx->recirc_update_dp_hash) {
+            struct ovs_action_hash *act_hash;
+
+            /* Hash action. */
+            act_hash = nl_msg_put_unspec_uninit(ctx->odp_actions,
+                                                OVS_ACTION_ATTR_HASH,
+                                                sizeof *act_hash);
+            act_hash->hash_alg = OVS_HASH_ALG_L4;  /* Make configurable. */
+            act_hash->hash_basis = 0;              /* Make configurable. */
+        }
         nl_msg_put_u32(ctx->odp_actions, OVS_ACTION_ATTR_RECIRC, id);
     }
 
@@ -4962,6 +5061,7 @@ xlate_in_init(struct xlate_in *xin, struct ofproto_dpif *ofproto,
     xin->ofproto = ofproto;
     xin->tables_version = version;
     xin->flow = *flow;
+    xin->upcall_flow = flow;
     xin->flow.in_port.ofp_port = in_port;
     xin->flow.actset_output = OFPP_UNSET;
     xin->packet = packet;
@@ -5257,6 +5357,7 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
         .mirrors = 0,
 
         .freezing = false,
+        .recirc_update_dp_hash = false,
         .frozen_actions = OFPBUF_STUB_INITIALIZER(frozen_actions_stub),
         .pause = NULL,
 
@@ -5366,6 +5467,27 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
         ctx.error = XLATE_NO_RECIRCULATION_CONTEXT;
         goto exit;
     }
+
+    /* Tunnel metadata in udpif format must be normalized before translation. */
+    if (flow->tunnel.flags & FLOW_TNL_F_UDPIF) {
+        const struct tun_table *tun_tab = ofproto_dpif_get_tun_tab(xin->ofproto);
+        int err;
+
+        err = tun_metadata_from_geneve_udpif(tun_tab, &xin->upcall_flow->tunnel,
+                                             &xin->upcall_flow->tunnel,
+                                             &flow->tunnel);
+        if (err) {
+            XLATE_REPORT_ERROR(&ctx, "Invalid Geneve tunnel metadata");
+            ctx.error = XLATE_INVALID_TUNNEL_METADATA;
+            goto exit;
+        }
+    } else if (!flow->tunnel.metadata.tab) {
+        /* If the original flow did not come in on a tunnel, then it won't have
+         * FLOW_TNL_F_UDPIF set. However, we still need to have a metadata
+         * table in case we generate tunnel actions. */
+        flow->tunnel.metadata.tab = ofproto_dpif_get_tun_tab(xin->ofproto);
+    }
+    ctx.wc->masks.tunnel.metadata.tab = flow->tunnel.metadata.tab;
 
     if (!xin->ofpacts && !ctx.rule) {
         ctx.rule = rule_dpif_lookup_from_table(
@@ -5520,9 +5642,48 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
         }
     }
 
+    /* Translate tunnel metadata masks to udpif format if necessary. */
+    if (xin->upcall_flow->tunnel.flags & FLOW_TNL_F_UDPIF) {
+        if (ctx.wc->masks.tunnel.metadata.present.map) {
+            const struct flow_tnl *upcall_tnl = &xin->upcall_flow->tunnel;
+            struct geneve_opt opts[TLV_TOT_OPT_SIZE /
+                                   sizeof(struct geneve_opt)];
+
+            tun_metadata_to_geneve_udpif_mask(&flow->tunnel,
+                                              &ctx.wc->masks.tunnel,
+                                              upcall_tnl->metadata.opts.gnv,
+                                              upcall_tnl->metadata.present.len,
+                                              opts);
+             memset(&ctx.wc->masks.tunnel.metadata, 0,
+                    sizeof ctx.wc->masks.tunnel.metadata);
+             memcpy(&ctx.wc->masks.tunnel.metadata.opts.gnv, opts,
+                    upcall_tnl->metadata.present.len);
+        }
+        ctx.wc->masks.tunnel.metadata.present.len = 0xff;
+        ctx.wc->masks.tunnel.metadata.tab = NULL;
+        ctx.wc->masks.tunnel.flags |= FLOW_TNL_F_UDPIF;
+    } else if (!xin->upcall_flow->tunnel.metadata.tab) {
+        /* If we didn't have options in UDPIF format and didn't have an existing
+         * metadata table, then it means that there were no options at all when
+         * we started processing and any wildcards we picked up were from
+         * action generation. Without options on the incoming packet, wildcards
+         * aren't meaningful. To avoid them possibly getting misinterpreted,
+         * just clear everything. */
+        if (ctx.wc->masks.tunnel.metadata.present.map) {
+            memset(&ctx.wc->masks.tunnel.metadata, 0,
+                   sizeof ctx.wc->masks.tunnel.metadata);
+        } else {
+            ctx.wc->masks.tunnel.metadata.tab = NULL;
+        }
+    }
+
     xlate_wc_finish(&ctx);
 
 exit:
+    /* Reset the table to what it was when we came in. If we only fetched
+     * it locally, then it has no meaning outside of flow translation. */
+    flow->tunnel.metadata.tab = xin->upcall_flow->tunnel.metadata.tab;
+
     ofpbuf_uninit(&ctx.stack);
     ofpbuf_uninit(&ctx.action_set);
     ofpbuf_uninit(&ctx.frozen_actions);
