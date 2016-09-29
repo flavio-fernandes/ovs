@@ -25,6 +25,7 @@ Post-v2.6.0
      * TLV mappings for protocols such as Geneve are now segregated on
        a per-OpenFlow bridge basis rather than globally. (The interface
        has not changed.)
+     * Removed support for IPsec tunnels.
 
 v2.6.0 - xx xxx xxxx
 ---------------------
@@ -71,6 +72,7 @@ v2.6.0 - xx xxx xxxx
        already expected to work properly in cases where the switch can
        not buffer packets, so this change should not affect existing
        users.
+     * New OpenFlow extension NXT_CT_FLUSH_ZONE to flush conntrack zones.
    - Improved OpenFlow version compatibility for actions:
      * New OpenFlow extension to support the "group" action in OpenFlow 1.0.
      * OpenFlow 1.0 "enqueue" action now properly translated to OpenFlow 1.1+.
@@ -149,6 +151,7 @@ v2.6.0 - xx xxx xxxx
      * Flow based tunnel match and action can be used for IPv6 address using
        tun_ipv6_src, tun_ipv6_dst fields.
      * Added support for IPv6 tunnels, for details checkout FAQ.
+     * Deprecated support for IPsec tunnels ports.
    - A wrapper script, 'ovs-tcpdump', to easily port-mirror an OVS port and
      watch with tcpdump
    - Introduce --no-self-confinement flag that allows daemons to work with
@@ -158,6 +161,25 @@ v2.6.0 - xx xxx xxxx
      disable it in OpenSSL.
    - Add 'mtu_request' column to the Interface table. It can be used to
      configure the MTU of the ports.
+
+Known issues:
+   - Using openvswitch module in conjunction with upstream Linux tunnels:
+     * When using the openvswitch module distributed with OVS against kernel
+       versions 4.4 to 4.6, the openvswitch module cannot be loaded or used at
+       the same time as "ip_gre".
+   - Conntrack FTP ALGs: When using the openvswitch module distributed with
+     OVS, particular Linux distribution kernels versions may provide diminished
+     functionality. This typically affects active FTP data connections when
+     using "actions=ct(alg=ftp),..." in flow tables. Specifically:
+     * Centos 7.1 kernels (3.10.0-2xx) kernels are unable to correctly set
+       up expectations for FTP data connections in multiple zones,
+       eg "actions=ct(zone=1,alg=ftp),ct(zone=2,alg=ftp),...". Executing the
+       "ct" action for subsequent data connections may fail to determine that
+       the data connection is "related" to an existing connection.
+     * Centos 7.2 kernels (3.10.0-3xx) kernels may not establish FTP ALG state
+       correctly for NATed connections. As a result, flows that perform NAT,
+       eg "actions=ct(nat,ftp=alg,table=1),..." may fail to NAT the packet,
+       and will populate the "ct_state=inv" bit in the flow.
 
 
 v2.5.0 - 26 Feb 2016

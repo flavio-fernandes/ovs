@@ -879,6 +879,26 @@ handle_ipfix_flow_stats_request(struct ofconn *ofconn,
     return error;
 }
 
+static enum ofperr
+handle_nxt_ct_flush_zone(struct ofconn *ofconn, const struct ofp_header *oh)
+{
+    struct ofproto *ofproto = ofconn_get_ofproto(ofconn);
+    const struct nx_zone_id *nzi = ofpmsg_body(oh);
+
+    if (!is_all_zeros(nzi->zero, sizeof nzi->zero)) {
+        return OFPERR_NXBRC_MUST_BE_ZERO;
+    }
+
+    uint16_t zone = ntohs(nzi->zone_id);
+    if (ofproto->ofproto_class->ct_flush) {
+        ofproto->ofproto_class->ct_flush(ofproto, &zone);
+    } else {
+        return EOPNOTSUPP;
+    }
+
+    return 0;
+}
+
 void
 ofproto_set_flow_restore_wait(bool flow_restore_wait_db)
 {
@@ -7098,7 +7118,8 @@ ofproto_group_mod_finish(struct ofproto *ofproto,
     struct ofgroup *new_group = ogm->new_group;
     struct ofgroup *old_group;
 
-    if (new_group && group_collection_n(&ogm->old_groups)) {
+    if (new_group && group_collection_n(&ogm->old_groups) &&
+        ofproto->ofproto_class->group_modify) {
         /* Modify a group. */
         ovs_assert(group_collection_n(&ogm->old_groups) == 1);
 
@@ -7929,6 +7950,9 @@ handle_openflow__(struct ofconn *ofconn, const struct ofpbuf *msg)
     case OFPTYPE_IPFIX_FLOW_STATS_REQUEST:
         return handle_ipfix_flow_stats_request(ofconn, oh);
 
+    case OFPTYPE_CT_FLUSH_ZONE:
+        return handle_nxt_ct_flush_zone(ofconn, oh);
+
     case OFPTYPE_HELLO:
     case OFPTYPE_ERROR:
     case OFPTYPE_FEATURES_REPLY:
@@ -8436,7 +8460,7 @@ ofproto_rule_remove__(struct ofproto *ofproto, struct rule *rule)
     if (actions->has_groups) {
         const struct ofpact_group *a;
 
-        OFPACT_FOR_EACH_TYPE (a, GROUP, actions->ofpacts,
+        OFPACT_FOR_EACH_TYPE_FLATTENED(a, GROUP, actions->ofpacts,
                                         actions->ofpacts_len) {
             struct ofgroup *group;
 
