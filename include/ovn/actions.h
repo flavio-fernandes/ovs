@@ -291,6 +291,8 @@ struct group_info {
     struct hmap_node hmap_node;
     struct ds group;
     uint32_t group_id;
+    bool new_group_id;  /* 'True' if 'group_id' was reserved from
+                         * group_table's 'group_ids' bitmap. */
 };
 
 enum action_opcode {
@@ -396,6 +398,9 @@ struct ovnact_encode_params {
     bool (*lookup_port)(const void *aux, const char *port_name,
                         unsigned int *portp);
     const void *aux;
+
+    /* 'true' if the flow is for a switch. */
+    bool is_switch;
 
     /* A map from a port name to its connection tracking zone. */
     const struct simap *ct_zones;

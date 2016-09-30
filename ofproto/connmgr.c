@@ -32,6 +32,7 @@
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/vconn.h"
 #include "openvswitch/vlog.h"
+#include "ovs-atomic.h"
 #include "pinsched.h"
 #include "poll-loop.h"
 #include "rconn.h"
@@ -65,6 +66,7 @@ struct ofconn {
     enum ofconn_type type;      /* Type. */
     enum ofproto_band band;     /* In-band or out-of-band? */
     bool enable_async_msgs;     /* Initially enable async messages? */
+    bool want_packet_in_on_miss;
 
 /* State that should be cleared from one connection to the next. */
 
@@ -131,6 +133,14 @@ struct ofconn {
 
     /* Active bundles. Contains "struct ofp_bundle"s. */
     struct hmap bundles;
+    long long int next_bundle_expiry_check;
+};
+
+/* vswitchd/ovs-vswitchd.8.in documents the value of BUNDLE_IDLE_LIFETIME in
+ * seconds.  That documentation must be kept in sync with the value below. */
+enum {
+    BUNDLE_EXPIRY_INTERVAL = 1000,  /* Check bundle expiry every 1 sec. */
+    BUNDLE_IDLE_TIMEOUT = 10000,    /* Expire idle bundles after 10 seconds. */
 };
 
 static struct ofconn *ofconn_create(struct connmgr *, struct rconn *,
@@ -191,7 +201,10 @@ struct connmgr {
 
     /* OpenFlow connections. */
     struct hmap controllers;     /* All OFCONN_PRIMARY controllers. */
-    struct ovs_list all_conns;   /* All controllers. */
+    struct ovs_list all_conns;   /* All controllers.  All modifications are
+                                    protected by ofproto_mutex, so that any
+                                    traversals from other threads can be made
+                                    safe by holding the ofproto_mutex. */
     uint64_t master_election_id; /* monotonically increasing sequence number
                                   * for master election */
     bool master_election_id_defined;
@@ -210,6 +223,8 @@ struct connmgr {
     struct sockaddr_in *extra_in_band_remotes;
     size_t n_extra_remotes;
     int in_band_queue;
+
+    ATOMIC(int) want_packet_in_on_miss;   /* Sum of ofconns' values. */
 };
 
 static void update_in_band_remotes(struct connmgr *);
@@ -249,12 +264,43 @@ connmgr_create(struct ofproto *ofproto,
     mgr->n_extra_remotes = 0;
     mgr->in_band_queue = -1;
 
+    atomic_init(&mgr->want_packet_in_on_miss, 0);
+
     return mgr;
+}
+
+/* The default "table-miss" behaviour for OpenFlow1.3+ is to drop the
+ * packet rather than to send the packet to the controller.
+ *
+ * This function maintains the count of pre-OpenFlow1.3 with controller_id 0,
+ * as we assume these are the controllers that should receive "table-miss"
+ * notifications. */
+static void
+update_want_packet_in_on_miss(struct ofconn *ofconn)
+{
+   /* We want a packet-in on miss when controller_id is zero and OpenFlow is
+    * lower than version 1.3. */
+   enum ofputil_protocol p = ofconn->protocol;
+   int new_want = (ofconn->controller_id == 0 &&
+                   (p == OFPUTIL_P_NONE ||
+                    ofputil_protocol_to_ofp_version(p) < OFP13_VERSION));
+
+   /* Update the setting and the count if necessary. */
+   int old_want = ofconn->want_packet_in_on_miss;
+   if (old_want != new_want) {
+       atomic_int *dst = &ofconn->connmgr->want_packet_in_on_miss;
+       int count;
+       atomic_read_relaxed(dst, &count);
+       atomic_store_relaxed(dst, count - old_want + new_want);
+
+       ofconn->want_packet_in_on_miss = new_want;
+   }
 }
 
 /* Frees 'mgr' and all of its resources. */
 void
 connmgr_destroy(struct connmgr *mgr)
+    OVS_REQUIRES(ofproto_mutex)
 {
     struct ofservice *ofservice, *next_ofservice;
     struct ofconn *ofconn, *next_ofconn;
@@ -264,11 +310,9 @@ connmgr_destroy(struct connmgr *mgr)
         return;
     }
 
-    ovs_mutex_lock(&ofproto_mutex);
     LIST_FOR_EACH_SAFE (ofconn, next_ofconn, node, &mgr->all_conns) {
         ofconn_destroy(ofconn);
     }
-    ovs_mutex_unlock(&ofproto_mutex);
 
     hmap_destroy(&mgr->controllers);
 
@@ -770,7 +814,9 @@ update_fail_open(struct connmgr *mgr)
             mgr->fail_open = fail_open_create(mgr->ofproto, mgr);
         }
     } else {
+        ovs_mutex_lock(&ofproto_mutex);
         fail_open_destroy(mgr->fail_open);
+        ovs_mutex_unlock(&ofproto_mutex);
         mgr->fail_open = NULL;
     }
 }
@@ -991,6 +1037,7 @@ void
 ofconn_set_protocol(struct ofconn *ofconn, enum ofputil_protocol protocol)
 {
     ofconn->protocol = protocol;
+    update_want_packet_in_on_miss(ofconn);
 }
 
 /* Returns the currently configured packet in format for 'ofconn', one of
@@ -1020,6 +1067,7 @@ void
 ofconn_set_controller_id(struct ofconn *ofconn, uint16_t controller_id)
 {
     ofconn->controller_id = controller_id;
+    update_want_packet_in_on_miss(ofconn);
 }
 
 /* Returns the default miss send length for 'ofconn'. */
@@ -1167,8 +1215,6 @@ ofconn_get_bundle(struct ofconn *ofconn, uint32_t id)
 enum ofperr
 ofconn_insert_bundle(struct ofconn *ofconn, struct ofp_bundle *bundle)
 {
-    /* XXX: Check the limit of open bundles */
-
     hmap_insert(&ofconn->bundles, &bundle->node, bundle_hash(bundle->id));
 
     return 0;
@@ -1188,7 +1234,21 @@ bundle_remove_all(struct ofconn *ofconn)
     struct ofp_bundle *b, *next;
 
     HMAP_FOR_EACH_SAFE (b, next, node, &ofconn->bundles) {
-        ofp_bundle_remove__(ofconn, b, false);
+        ofp_bundle_remove__(ofconn, b);
+    }
+}
+
+static void
+bundle_remove_expired(struct ofconn *ofconn, long long int now)
+{
+    struct ofp_bundle *b, *next;
+    long long int limit = now - BUNDLE_IDLE_TIMEOUT;
+
+    HMAP_FOR_EACH_SAFE (b, next, node, &ofconn->bundles) {
+        if (b->used <= limit) {
+            ofconn_send_error(ofconn, &b->ofp_msg, OFPERR_OFPBFC_TIMEOUT);
+            ofp_bundle_remove__(ofconn, b);
+        }
     }
 }
 
@@ -1203,6 +1263,7 @@ ofconn_get_target(const struct ofconn *ofconn)
 static struct ofconn *
 ofconn_create(struct connmgr *mgr, struct rconn *rconn, enum ofconn_type type,
               bool enable_async_msgs)
+    OVS_REQUIRES(ofproto_mutex)
 {
     struct ofconn *ofconn;
 
@@ -1217,6 +1278,7 @@ ofconn_create(struct connmgr *mgr, struct rconn *rconn, enum ofconn_type type,
     ovs_list_init(&ofconn->updates);
 
     hmap_init(&ofconn->bundles);
+    ofconn->next_bundle_expiry_check = time_msec() + BUNDLE_EXPIRY_INTERVAL;
 
     ofconn_flush(ofconn);
 
@@ -1279,6 +1341,11 @@ ofconn_destroy(struct ofconn *ofconn)
     OVS_REQUIRES(ofproto_mutex)
 {
     ofconn_flush(ofconn);
+
+    /* Force clearing of want_packet_in_on_miss to keep the global count
+     * accurate. */
+    ofconn->controller_id = 1;
+    update_want_packet_in_on_miss(ofconn);
 
     if (ofconn->type == OFCONN_PRIMARY) {
         hmap_remove(&ofconn->connmgr->controllers, &ofconn->hmap_node);
@@ -1361,7 +1428,14 @@ ofconn_run(struct ofconn *ofconn,
         ofpbuf_delete(of_msg);
     }
 
-    if (time_msec() >= ofconn->next_op_report) {
+    long long int now = time_msec();
+
+    if (now >= ofconn->next_bundle_expiry_check) {
+        ofconn->next_bundle_expiry_check = now + BUNDLE_EXPIRY_INTERVAL;
+        bundle_remove_expired(ofconn, now);
+    }
+
+    if (now >= ofconn->next_op_report) {
         ofconn_log_flow_mods(ofconn);
     }
 
@@ -1461,37 +1535,17 @@ ofconn_receives_async_msg(const struct ofconn *ofconn,
     return (masks[type] & (1u << reason)) != 0;
 }
 
-/* The default "table-miss" behaviour for OpenFlow1.3+ is to drop the
- * packet rather than to send the packet to the controller.
- *
- * This function returns true to indicate that a packet_in message
+/* This function returns true to indicate that a packet_in message
  * for a "table-miss" should be sent to at least one controller.
- * That is there is at least one controller with controller_id 0
- * which connected using an OpenFlow version earlier than OpenFlow1.3.
  *
- * False otherwise.
- *
- * This logic assumes that "table-miss" packet_in messages
- * are always sent to controller_id 0. */
+ * False otherwise. */
 bool
-connmgr_wants_packet_in_on_miss(struct connmgr *mgr) OVS_EXCLUDED(ofproto_mutex)
+connmgr_wants_packet_in_on_miss(struct connmgr *mgr)
 {
-    struct ofconn *ofconn;
+    int count;
 
-    ovs_mutex_lock(&ofproto_mutex);
-    LIST_FOR_EACH (ofconn, node, &mgr->all_conns) {
-        enum ofputil_protocol protocol = ofconn_get_protocol(ofconn);
-
-        if (ofconn->controller_id == 0 &&
-            (protocol == OFPUTIL_P_NONE ||
-             ofputil_protocol_to_ofp_version(protocol) < OFP13_VERSION)) {
-            ovs_mutex_unlock(&ofproto_mutex);
-            return true;
-        }
-    }
-    ovs_mutex_unlock(&ofproto_mutex);
-
-    return false;
+    atomic_read_relaxed(&mgr->want_packet_in_on_miss, &count);
+    return count > 0;
 }
 
 /* Returns a human-readable name for an OpenFlow connection between 'mgr' and
@@ -1607,10 +1661,13 @@ connmgr_send_requestforward(struct connmgr *mgr, const struct ofconn *source,
 }
 
 /* Sends an OFPT_FLOW_REMOVED or NXT_FLOW_REMOVED message based on 'fr' to
- * appropriate controllers managed by 'mgr'. */
+ * appropriate controllers managed by 'mgr'.
+ *
+ * This may be called from the RCU thread. */
 void
 connmgr_send_flow_removed(struct connmgr *mgr,
                           const struct ofputil_flow_removed *fr)
+    OVS_REQUIRES(ofproto_mutex)
 {
     struct ofconn *ofconn;
 
