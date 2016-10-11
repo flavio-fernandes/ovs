@@ -33,6 +33,7 @@ SCRIPT
 $configure_ovs = <<SCRIPT
 cd /vagrant
 ./boot.sh
+[ -f Makefile ] && ./configure && make distclean
 mkdir -p ~/build
 cd ~/build
 /vagrant/configure --with-linux=/lib/modules/`uname -r`/build --enable-silent-rules
@@ -45,7 +46,7 @@ SCRIPT
 
 $test_kmod = <<SCRIPT
 cd ~/build
-make check-kmod
+make check-kmod RECHECK=yes
 SCRIPT
 
 $install_rpm = <<SCRIPT
@@ -81,7 +82,7 @@ SCRIPT
 
 $test_ovs_system_userspace = <<SCRIPT
 cd ~/build
-make check-system-userspace
+make check-system-userspace RECHECK=yes
 SCRIPT
 
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
