@@ -30,7 +30,7 @@ In particular:
 Testing is also important:
 
   - A patch that modifies existing code should be tested with `make
-    check` before submission.  Please see INSTALL.md, under
+    check` before submission.  Please see INSTALL.rst, under
     "Self-Tests", for more information.
 
   - A patch that adds or deletes files should also be tested with
@@ -50,7 +50,7 @@ Testing is also important:
 If you are using GitHub, then you may utilize the travis-ci.org CI build
 system by linking your GitHub repository to it. This will run some of
 the above tests automatically when you push changes to your repository.
-See the "Continuous Integration with Travis-CI" in the [INSTALL.md] file
+See the "Continuous Integration with Travis-CI" in the [INSTALL.rst] file
 for details on how to set it up.
 
 Email Subject
@@ -366,7 +366,7 @@ If you cannot convince your email client not to mangle patches, then
 sending the patch as an attachment is a second choice.
 
 Please follow the style used in the code that you are modifying.  The
-[CodingStyle.md] file describes the coding style used in most of Open
+[CodingStyle] file describes the coding style used in most of Open
 vSwitch. Use Linux kernel coding style for Linux kernel code.
 
 If your code is non-datapath code, you may use the
@@ -410,5 +410,5 @@ index fdd952e..f6cb88e 100644
 1.7.7.3
 ```
 
-[INSTALL.md]:INSTALL.md
-[CodingStyle.md]:CodingStyle.md
+[INSTALL.rst]:INSTALL.rst
+[CodingStyle]: CodingStyle.rst

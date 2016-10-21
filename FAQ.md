@@ -75,7 +75,7 @@ A: No, Open vSwitch has been ported to a number of different operating
 
 ### Q: What's involved with porting Open vSwitch to a new platform or switching ASIC?
 
-A: The [PORTING.md] document describes how one would go about
+A: The [PORTING.rst] document describes how one would go about
    porting Open vSwitch to a new operating system or hardware platform.
 
 ### Q: Why would I use Open vSwitch instead of the Linux bridge?
@@ -465,7 +465,7 @@ A: Firstly, you must have a DPDK-enabled version of Open vSwitch.
 
    Finally, it is required that DPDK port names begin with 'dpdk'.
 
-   See [INSTALL.DPDK.md] for more information on enabling and using DPDK with
+   See [INSTALL.DPDK.rst] for more information on enabling and using DPDK with
    Open vSwitch.
 
 ### Q: How do I configure a VLAN as an RSPAN VLAN, that is, enable mirroring of all traffic to that VLAN?
@@ -778,7 +778,7 @@ A: More than likely, you've looped your network.  Probably, eth0 and
      for all the details.
 
      Configuration for DPDK-enabled interfaces is slightly less
-     straightforward: see [INSTALL.DPDK.md].
+     straightforward: see [INSTALL.DPDK.rst].
 
    - Perhaps you don't actually need eth0 and eth1 to be on the
      same bridge.  For example, if you simply want to be able to
@@ -851,7 +851,7 @@ A: On Linux kernels before 3.11, the OVS GRE module and Linux GRE module
    dmesg for errors regarding GRE registration). To fix this, unload all
    GRE modules that appear in lsmod as well as the OVS kernel module. You
    can then reload the OVS module following the directions in
-   [INSTALL.md], which will ensure that dependencies are satisfied.
+   [INSTALL.rst], which will ensure that dependencies are satisfied.
 
 ### Q: Open vSwitch does not seem to obey my packet filter rules.
 
@@ -2098,7 +2098,7 @@ A: Add your new message to "enum ofpraw" and "enum ofptype" in
    lib/ofp-msgs.h, following the existing pattern.  Then recompile and
    fix all of the new warnings, implementing new functionality for the
    new message as needed.  (If you configure with --enable-Werror, as
-   described in [INSTALL.md], then it is impossible to miss any warnings.)
+   described in [INSTALL.rst], then it is impossible to miss any warnings.)
 
    If you need to add an OpenFlow vendor extension message for a
    vendor that doesn't yet have any extension messages, then you will
@@ -2114,7 +2114,7 @@ A: Add new members for your field to "struct flow" in lib/flow.h, and
    lib/nx-match.c to output your new field in OXM matches.  Then
    recompile and fix all of the new warnings, implementing new
    functionality for the new field or header as needed.  (If you
-   configure with --enable-Werror, as described in [INSTALL.md], then
+   configure with --enable-Werror, as described in [INSTALL.rst], then
    it is impossible to miss any warnings.)
 
    If you want kernel datapath support for your new field, you also
@@ -2135,7 +2135,7 @@ A: Add your new action to "enum ofp_raw_action_type" in
    lib/ofp-actions.c, following the existing pattern.  Then recompile
    and fix all of the new warnings, implementing new functionality for
    the new action as needed.  (If you configure with --enable-Werror,
-   as described in [INSTALL.md], then it is impossible to miss any
+   as described in [INSTALL.rst], then it is impossible to miss any
    warnings.)
 
    If you need to add an OpenFlow vendor extension action for a vendor
@@ -2149,10 +2149,10 @@ Contact
 bugs@openvswitch.org
 http://openvswitch.org/
 
-[PORTING.md]:PORTING.md
+[PORTING.rst]:PORTING.rst
 [WHY-OVS.md]:WHY-OVS.md
-[INSTALL.md]:INSTALL.md
+[INSTALL.rst]:INSTALL.rst
 [OPENFLOW-1.1+.md]:OPENFLOW-1.1+.md
-[INSTALL.DPDK.md]:INSTALL.DPDK.md
+[INSTALL.DPDK.rst]:INSTALL.DPDK.rst
 [Tutorial.md]:tutorial/Tutorial.md
 [release-process.md]:Documentation/release-process.md
