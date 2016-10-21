@@ -75,6 +75,8 @@ bool ovsdb_idl_is_alive(const struct ovsdb_idl *);
 int ovsdb_idl_get_last_error(const struct ovsdb_idl *);
 
 void ovsdb_idl_set_probe_interval(const struct ovsdb_idl *, int probe_interval);
+
+void ovsdb_idl_check_consistency(const struct ovsdb_idl *);
 
 /* Choosing columns and tables to replicate. */
 
@@ -315,7 +317,7 @@ struct ovsdb_idl_loop {
 
 void ovsdb_idl_loop_destroy(struct ovsdb_idl_loop *);
 struct ovsdb_idl_txn *ovsdb_idl_loop_run(struct ovsdb_idl_loop *);
-void ovsdb_idl_loop_commit_and_wait(struct ovsdb_idl_loop *);
+int ovsdb_idl_loop_commit_and_wait(struct ovsdb_idl_loop *);
 
 /* Conditional Replication
  * =======================

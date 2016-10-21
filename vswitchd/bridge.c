@@ -28,13 +28,13 @@
 #include "daemon.h"
 #include "dirs.h"
 #include "dpif.h"
+#include "dpdk.h"
 #include "hash.h"
 #include "openvswitch/hmap.h"
 #include "hmapx.h"
 #include "if-notifier.h"
 #include "jsonrpc.h"
 #include "lacp.h"
-#include "lib/netdev-dpdk.h"
 #include "mac-learning.h"
 #include "mcast-snooping.h"
 #include "netdev.h"
@@ -2618,6 +2618,7 @@ run_system_stats(void)
 
         txn = ovsdb_idl_txn_create(idl);
         ovsdb_datum_from_smap(&datum, stats);
+        smap_destroy(stats);
         ovsdb_idl_txn_write(&cfg->header_, &ovsrec_open_vswitch_col_statistics,
                             &datum);
         ovsdb_idl_txn_commit(txn);

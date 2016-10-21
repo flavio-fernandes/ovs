@@ -12,7 +12,7 @@ In that case, you need at least the following packages.
   * py27-xml
   * pkg_alternatives
 
-Some components have additional requirements. (See [INSTALL.md])
+Some components have additional requirements. (See [INSTALL.rst])
 
 Assuming you are running NetBSD/amd64 6.1.2, you can download and
 install pre-built binary packages as the following.
@@ -31,8 +31,8 @@ As all executables installed with pkgsrc are placed in `/usr/pkg/bin/`
 directory, it might be a good idea to add it to your PATH.
 
 Open vSwitch on NetBSD is currently "userspace switch" implementation
-in the sense described in [INSTALL.userspace.md] and [PORTING.md].
+in the sense described in [INSTALL.userspace.rst] and [PORTING.rst].
 
-[INSTALL.md]:INSTALL.md
-[INSTALL.userspace.md]:INSTALL.userspace.md
-[PORTING.md]:PORTING.md
+[INSTALL.rst]:INSTALL.rst
+[INSTALL.userspace.rst]:INSTALL.userspace.rst
+[PORTING.rst]:PORTING.rst

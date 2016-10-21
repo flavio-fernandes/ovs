@@ -91,7 +91,10 @@ ovn_init_symtab(struct shash *symtab)
 
     /* Connection tracking state. */
     expr_symtab_add_field(symtab, "ct_mark", MFF_CT_MARK, NULL, false);
+
     expr_symtab_add_field(symtab, "ct_label", MFF_CT_LABEL, NULL, false);
+    expr_symtab_add_subfield(symtab, "ct_label.blocked", NULL, "ct_label[0]");
+
     expr_symtab_add_field(symtab, "ct_state", MFF_CT_STATE, NULL, false);
 
     struct ct_bit {
@@ -134,7 +137,7 @@ ovn_init_symtab(struct shash *symtab)
     expr_symtab_add_predicate(symtab, "ip6", "eth.type == 0x86dd");
     expr_symtab_add_predicate(symtab, "ip", "ip4 || ip6");
     expr_symtab_add_field(symtab, "ip.proto", MFF_IP_PROTO, "ip", true);
-    expr_symtab_add_field(symtab, "ip.dscp", MFF_IP_DSCP, "ip", false);
+    expr_symtab_add_field(symtab, "ip.dscp", MFF_IP_DSCP_SHIFTED, "ip", false);
     expr_symtab_add_field(symtab, "ip.ecn", MFF_IP_ECN, "ip", false);
     expr_symtab_add_field(symtab, "ip.ttl", MFF_IP_TTL, "ip", false);
 

@@ -30,7 +30,7 @@ In particular:
 Testing is also important:
 
   - A patch that modifies existing code should be tested with `make
-    check` before submission.  Please see INSTALL.md, under
+    check` before submission.  Please see INSTALL.rst, under
     "Self-Tests", for more information.
 
   - A patch that adds or deletes files should also be tested with
@@ -50,7 +50,7 @@ Testing is also important:
 If you are using GitHub, then you may utilize the travis-ci.org CI build
 system by linking your GitHub repository to it. This will run some of
 the above tests automatically when you push changes to your repository.
-See the "Continuous Integration with Travis-CI" in the [INSTALL.md] file
+See the "Continuous Integration with Travis-CI" in the [INSTALL.rst] file
 for details on how to set it up.
 
 Email Subject
@@ -202,6 +202,15 @@ Examples of common tags follow.
         not always be appropriate to publicly give credit.  If in
         doubt, please ask.)
 
+    CC: Person <name@email>
+
+        This is a way to tag a patch for the attention of a person
+        when no more specific tag is appropriate.  One use is to
+        request a review from a particular person.  It doesn't make
+        sense to include the same person in CC and another tag, so
+        e.g. if someone who is CCed later provides an Acked-by, add
+        the Acked-by and remove the CC at the same time.
+
     Reported-at: <URL>
 
         If a patch fixes or is otherwise related to a bug reported in
@@ -246,9 +255,11 @@ Examples of common tags follow.
         you may do that with a “Fixes” header.  This assists in determining
         which OVS releases have the bug, so the patch can be applied to all
         affected versions.  The easiest way to generate the header in the
-        proper format is with this git command:
+        proper format is with this git command.  This command also CCs the
+        author of the commit being fixed, which makes sense unless the
+        author also made the fix or is already named in another tag:
 
-        git log -1 --pretty=format:"Fixes: %h (\"%s\")" --abbrev=12 COMMIT_REF
+        git log -1 --pretty=format:"CC: %an <%ae>%nFixes: %h (\"%s\")" --abbrev=12 COMMIT_REF
 
     Vulnerability: CVE-2016-2074
 
@@ -355,7 +366,7 @@ If you cannot convince your email client not to mangle patches, then
 sending the patch as an attachment is a second choice.
 
 Please follow the style used in the code that you are modifying.  The
-[CodingStyle.md] file describes the coding style used in most of Open
+[CodingStyle] file describes the coding style used in most of Open
 vSwitch. Use Linux kernel coding style for Linux kernel code.
 
 If your code is non-datapath code, you may use the
@@ -399,5 +410,5 @@ index fdd952e..f6cb88e 100644
 1.7.7.3
 ```
 
-[INSTALL.md]:INSTALL.md
-[CodingStyle.md]:CodingStyle.md
+[INSTALL.rst]:INSTALL.rst
+[CodingStyle]: CodingStyle.rst

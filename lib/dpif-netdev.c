@@ -31,6 +31,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef DPDK_NETDEV
+#include <rte_cycles.h>
+#endif
+
 #include "bitmap.h"
 #include "cmap.h"
 #include "conntrack.h"
@@ -46,7 +50,6 @@
 #include "hmapx.h"
 #include "latch.h"
 #include "netdev.h"
-#include "netdev-dpdk.h"
 #include "netdev-vport.h"
 #include "netlink.h"
 #include "odp-execute.h"
@@ -287,8 +290,8 @@ struct dp_netdev_port {
     struct netdev *netdev;
     struct hmap_node node;      /* Node in dp_netdev's 'ports'. */
     struct netdev_saved_flags *sf;
-    unsigned n_rxq;             /* Number of elements in 'rxq' */
     struct dp_netdev_rxq *rxqs;
+    unsigned n_rxq;             /* Number of elements in 'rxq' */
     bool dynamic_txqs;          /* If true XPS will be used. */
     unsigned *txq_used;         /* Number of threads that uses each tx queue. */
     struct ovs_mutex txq_used_mutex;
@@ -2602,6 +2605,9 @@ dpif_netdev_execute(struct dpif *dpif, struct dpif_execute *execute)
     pmd = ovsthread_getspecific(dp->per_pmd_key);
     if (!pmd) {
         pmd = dp_netdev_get_pmd(dp, NON_PMD_CORE_ID);
+        if (!pmd) {
+            return EBUSY;
+        }
     }
 
     /* If the current thread is non-pmd thread, acquires
@@ -2967,25 +2973,28 @@ dpif_netdev_run(struct dpif *dpif)
 {
     struct dp_netdev_port *port;
     struct dp_netdev *dp = get_dp_netdev(dpif);
-    struct dp_netdev_pmd_thread *non_pmd = dp_netdev_get_pmd(dp,
-                                                             NON_PMD_CORE_ID);
+    struct dp_netdev_pmd_thread *non_pmd;
     uint64_t new_tnl_seq;
 
     ovs_mutex_lock(&dp->port_mutex);
-    ovs_mutex_lock(&dp->non_pmd_mutex);
-    HMAP_FOR_EACH (port, node, &dp->ports) {
-        if (!netdev_is_pmd(port->netdev)) {
-            int i;
+    non_pmd = dp_netdev_get_pmd(dp, NON_PMD_CORE_ID);
+    if (non_pmd) {
+        ovs_mutex_lock(&dp->non_pmd_mutex);
+        HMAP_FOR_EACH (port, node, &dp->ports) {
+            if (!netdev_is_pmd(port->netdev)) {
+                int i;
 
-            for (i = 0; i < port->n_rxq; i++) {
-                dp_netdev_process_rxq_port(non_pmd, port, port->rxqs[i].rxq);
+                for (i = 0; i < port->n_rxq; i++) {
+                    dp_netdev_process_rxq_port(non_pmd, port,
+                                               port->rxqs[i].rxq);
+                }
             }
         }
-    }
-    dpif_netdev_xps_revalidate_pmd(non_pmd, time_msec(), false);
-    ovs_mutex_unlock(&dp->non_pmd_mutex);
+        dpif_netdev_xps_revalidate_pmd(non_pmd, time_msec(), false);
+        ovs_mutex_unlock(&dp->non_pmd_mutex);
 
-    dp_netdev_pmd_unref(non_pmd);
+        dp_netdev_pmd_unref(non_pmd);
+    }
 
     if (dp_netdev_is_reconf_required(dp) || ports_require_restart(dp)) {
         reconfigure_pmd_threads(dp);
@@ -3189,7 +3198,8 @@ dp_netdev_pmd_reload_done(struct dp_netdev_pmd_thread *pmd)
 }
 
 /* Finds and refs the dp_netdev_pmd_thread on core 'core_id'.  Returns
- * the pointer if succeeds, otherwise, NULL.
+ * the pointer if succeeds, otherwise, NULL (it can return NULL even if
+ * 'core_id' is NON_PMD_CORE_ID).
  *
  * Caller must unrefs the returned reference.  */
 static struct dp_netdev_pmd_thread *
@@ -4156,7 +4166,7 @@ dp_netdev_input__(struct dp_netdev_pmd_thread *pmd,
     /* Sparse or MSVC doesn't like variable length array. */
     enum { PKT_ARRAY_SIZE = NETDEV_MAX_BURST };
 #endif
-    struct netdev_flow_key keys[PKT_ARRAY_SIZE];
+    OVS_ALIGNED_VAR(CACHE_LINE_SIZE) struct netdev_flow_key keys[PKT_ARRAY_SIZE];
     struct packet_batch_per_flow batches[PKT_ARRAY_SIZE];
     long long now = time_msec();
     size_t newcnt, n_batches, i;
@@ -4172,6 +4182,15 @@ dp_netdev_input__(struct dp_netdev_pmd_thread *pmd,
         fast_path_processing(pmd, packets, keys, batches, &n_batches, in_port, now);
     }
 
+    /* All the flow batches need to be reset before any call to
+     * packet_batch_per_flow_execute() as it could potentially trigger
+     * recirculation. When a packet matching flow ‘j’ happens to be
+     * recirculated, the nested call to dp_netdev_input__() could potentially
+     * classify the packet as matching another flow - say 'k'. It could happen
+     * that in the previous call to dp_netdev_input__() that same flow 'k' had
+     * already its own batches[k] still waiting to be served.  So if its
+     * ‘batch’ member is not reset, the recirculated packet would be wrongly
+     * appended to batches[k] of the 1st call to dp_netdev_input__(). */
     for (i = 0; i < n_batches; i++) {
         batches[i].flow->batch = NULL;
     }

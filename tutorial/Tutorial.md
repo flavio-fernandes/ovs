@@ -20,7 +20,8 @@ tutorial will not help you.
 This tutorial does not cover every aspect of the features that it
 mentions.  You can find the details elsewhere in the Open vSwitch
 documentation, especially `ovs-ofctl(8)` and the comments in the
-`include/openflow/nicira-ext.h` header file.
+`include/openflow/nicira-ext.h` and `include/openvswitch/meta-flow.h`
+header files.
 
 > In this tutorial, paragraphs set off like this designate notes
 > with additional information that readers may wish to skip on a
@@ -44,7 +45,7 @@ You can use `ovs-sandbox` three ways:
 
   * If you have not installed Open vSwitch (and you do not want to
     install it), then you can build Open vSwitch according to the
-    instructions in [INSTALL.md], without installing it.  Then run
+    instructions in [INSTALL.rst], without installing it.  Then run
     `./ovs-sandbox -b DIRECTORY` from this directory, substituting
     the Open vSwitch build directory for `DIRECTORY`.
 
@@ -855,4 +856,4 @@ Contact
 bugs@openvswitch.org
 http://openvswitch.org/
 
-[INSTALL.md]:../INSTALL.md
+[INSTALL.rst]:../INSTALL.rst
