@@ -1530,8 +1530,9 @@ nbctl_lflow_classifier_set_logical_destination_port(struct ctl_context *ctx)
 
     lflow_classifier = lflow_classifier_by_name_or_uuid(ctx, id);
 
-    /* Check port exists if given*/
-    if (!strcmp(ctx->argv[2],"") ){
+    /* Check port exists if given name is not an empty string. If empty string is given, that
+       indicates we should be clearing the info. */
+    if (strcmp(ctx->argv[2],"") != 0) {
         lsp = lsp_by_name_or_uuid(ctx, ctx->argv[2], true);
         if (!lsp){
             ctl_fatal("Invalid port %s ", ctx->argv[2]);
