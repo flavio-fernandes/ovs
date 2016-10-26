@@ -2498,6 +2498,30 @@ build_acls(struct ovn_datapath *od, struct hmap *lflows)
 }
 
 
+static int
+cmp_port_pair_groups(const void *ppg1_, const void *ppg2_)
+{
+    const struct nbrec_logical_port_pair_group *const *ppg1p = ppg1_;
+    const struct nbrec_logical_port_pair_group *const *ppg2p = ppg2_;
+    const struct nbrec_logical_port_pair_group *ppg1 = *ppg1p;
+    const struct nbrec_logical_port_pair_group *ppg2 = *ppg2p;
+
+    if (ppg1->n_sortkey == 0 || ppg2->n_sortkey == 0) {
+        return 0;
+    }
+
+    const int64_t key1 = ppg1->sortkey[0];
+    const int64_t key2 = ppg2->sortkey[0];
+
+    if (key1 < key2) {
+        return -1;
+    } else if (key1 > key2) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
 /*
  * Build the rules to insert service chains
  */
@@ -2579,11 +2603,19 @@ install_port_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *po
         VLOG_INFO("Allocating port arrays\n");
         input_port_array = xmalloc(sizeof *src_port * lpc->n_port_pair_groups + 1);
         output_port_array = xmalloc(sizeof *dst_port * (lpc->n_port_pair_groups + 1));
+
+        struct nbrec_logical_port_pair_group **port_pair_groups
+            = xmalloc(sizeof *port_pair_groups * lpc->n_port_pair_groups);
+        memcpy(port_pair_groups, lpc->port_pair_groups,
+               sizeof *port_pair_groups * lpc->n_port_pair_groups);
+        qsort(port_pair_groups, lpc->n_port_pair_groups, sizeof *port_pair_groups,
+              cmp_port_pair_groups);
+
         /*
          * For each port-pair-group in a port chain pull out the port-pairs
          */
         for (size_t j = 0; j < lpc->n_port_pair_groups; j++) {
-            lppg = lpc->port_pair_groups[j];
+            lppg = port_pair_groups[j];
             VLOG_INFO("Iterating through %"PRIuSIZE" port-pair-group %s for chain %s\n", j, lppg->name, lpc->name);
             for (size_t k = 0; k < lppg->n_port_pairs; k++){
                 /*
@@ -2732,6 +2764,7 @@ install_port_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *po
         }
         free(input_port_array);
         free(output_port_array);
+        free(port_pair_groups);
     }
 }
 static void

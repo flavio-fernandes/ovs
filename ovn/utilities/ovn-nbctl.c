@@ -336,8 +336,8 @@ Logical port-chain commands:\n\
                                            de-associate classifier CLASSIFIER with LSP-CHAIN\n\
 \n\
 Logical port-pair-groups commands:\n\
-  lsp-pair-group-add LSP-CHAIN LSP-PAIR-GROUP-NAME\n\
-                           create a logical port-pair-group \n\
+  lsp-pair-group-add LSP-CHAIN LSP-PAIR-GROUP-NAME OFFSET\n\
+                           create a logical port-pair-group. Optionally, indicate the order it should be in chain.\n\
   lsp-pair-group-del LSP-PAIR-GROUP-NAME    delete a port-pair-group, does not delete port-pairs\n\
                                             or flow-classifier\n\
   lsp-pair-group-list LSP-CHAIN   print the names of all logical port-pair-groups\n\
@@ -1150,8 +1150,15 @@ nbctl_lsp_pair_group_add(struct ctl_context *ctx)
 
     /* create the logical port-pair-group. */
     lsp_pair_group = nbrec_logical_port_pair_group_insert(ctx->txn);
-    if (ctx->argc == 3){
+    if (ctx->argc >= 3){
         nbrec_logical_port_pair_group_set_name(lsp_pair_group, ctx->argv[2]);
+    }
+
+    int64_t sortkey = (int64_t) lsp_chain->n_port_pair_groups + 1;
+    if (ctx->argc >= 4) {
+        sortkey = (int64_t) atoi(ctx->argv[3]);
+    } else {
+        nbrec_logical_port_pair_group_set_sortkey(lsp_pair_group, &sortkey, 1);
     }
 
     /* Insert the logical port into the logical switch. */
@@ -3299,7 +3306,7 @@ static const struct ctl_command_syntax nbctl_commands[] = {
       nbctl_lsp_chain_unset_flow_classifier, NULL, "", RW },
 
     /* lsp-pair-group commands. */
-    { "lsp-pair-group-add", 1, 2, "LSP-CHAIN [LSP-PAIR-GROUP]",
+    { "lsp-pair-group-add", 1, 3, "LSP-CHAIN [LSP-PAIR-GROUP] [OFFSET]",
       NULL, nbctl_lsp_pair_group_add, NULL, "", RW },
     { "lsp-pair-group-del", 2, 2, "LSP-CHAIN, LSP-PAIR-GROUP", NULL, nbctl_lsp_pair_group_del,
       NULL, "", RW },
