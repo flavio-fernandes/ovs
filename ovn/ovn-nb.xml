@@ -121,7 +121,7 @@
     </column>
     <column name="port_pairs">
       <p>
-        The logical chains that define the service path.
+        The logical port pairs that are used by the service path.
       </p>
 
       <p>
@@ -136,6 +136,10 @@
 
     <column name="acls">
       Access control rules that apply to packets within the logical switch.
+    </column>
+
+    <column name="acl_chains">
+      Access control rules that apply to packets that need to be part of port chain.
     </column>
 
     <group title="other_config">
@@ -185,12 +189,7 @@
     </column>
     <column name="flow_classifier">
       <p>
-        The logical flow classifier that steeers the flows to the port_pair_groups.
-      </p>
-
-      <p>
-        It is an error for multiple logical port chains to include the same
-        flow classifier.
+        FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
       </p>
     </column>
     <group title="Common Columns">
@@ -256,66 +255,66 @@
 
  <table name="Logical_Flow_Classifier" title="logical flow classifier">
    <p>
-     Flow classifier defining traffic steering rules
+     FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
    </p>
    <column name="name">
      <p>
-       Logical flow classifier
+       FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
      </p>
    </column>
    <column name="logical_source_port">
      <p>
-       Source port for flow
+       FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
      </p>
    </column>
    <column name="logical_destination_port">
      <p>
-       Destination port for flow
+       FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
      </p>
    </column>
    <column name="source_port_range_min">
      <p>
-       minimum port value for source port
+       FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
      </p>
    </column>
    <column name="source_port_range_max">
      <p>
-       maximum port value for source port
+       FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
      </p>
    </column>
    <column name="destination_port_range_min">
      <p>
-       minimum port value for destination port
+       FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
      </p>
    </column>
    <column name="destination_port_range_max">
      <p>
-       maximum port value for destination port
+       FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
      </p>
    </column>
   <column name="source_ip_prefix">
      <p>
-       source ip prefix
+       FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
      </p>
    </column>
    <column name="destination_ip_prefix">
      <p>
-       destination ip prefix
+       FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
      </p>
    </column>
    <column name="protocol">
      <p>
-       protocol
+       FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
      </p>
    </column>
    <column name="ethertype">
      <p>
-       ethertype
+       FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
      </p>
    </column>
    <group title="Common Columns">
       <column name="external_ids">
-        See <em>External IDs</em> at the beginning of this document.
+        FIXME: THIS NEEDS TO BE REMOVED -- it is no longer used
       </column>
     </group>
  </table>
@@ -828,11 +827,12 @@
     </pre>
 
     <p>
-      Address sets may be used in the <ref column="match" table="ACL"/> column
-      of the <ref table="ACL"/> table.  For syntax information, see the details
-      of the expression language used for the <ref column="match"
-      table="Logical_Flow" db="OVN_Southbound"/> column in the <ref
-      table="Logical_Flow" db="OVN_Southbound"/> table of the <ref
+      Address sets may be used in the <ref column="match" table="ACL"/> and
+      <ref column="match" table="ACL_Chain"/> columns of the
+      <ref table="ACL"/> and <ref table="ACL_Chain"/> tables, respectively.
+      For syntax information, see the details of the expression language used
+      for the <ref column="match" table="Logical_Flow" db="OVN_Southbound"/> column
+      in the <ref table="Logical_Flow" db="OVN_Southbound"/> table of the <ref
       db="OVN_Southbound"/> database.
     </p>
 
@@ -982,6 +982,123 @@
           <code>Not implemented--currently treated as drop</code>
         </li>
       </ul>
+    </column>
+
+    <column name="log">
+      <p>
+        If set to <code>true</code>, packets that match the ACL will trigger a
+        log message on the transport node or nodes that perform ACL processing.
+        Logging may be combined with any <ref column="action"/>.
+      </p>
+
+      <p>
+        Logging is not yet implemented.
+      </p>
+    </column>
+
+    <group title="Common Columns">
+      <column name="external_ids">
+        See <em>External IDs</em> at the beginning of this document.
+      </column>
+    </group>
+  </table>
+
+  <table name="ACL_Chain" title="Access Control List (ACL) for Logical port Chain">
+    <p>
+      Each row in this table represents one ACL chain rule for a logical switch
+      that points to it through its <ref column="acl_chains"/> column. In SFC's
+      context, this table is commonly referred as classifiers.
+      The <ref column="port_chain"/> column for the highest-<ref column="priority"/>
+      matching row in this table determines a port chain used by the matching packet.
+      Multiple rows can be used to steer packets into the same port chain.
+    </p>
+
+    <column name="priority">
+      <p>
+        The ACL rule's priority.  Rules with numerically higher priority
+        take precedence over those with lower.  If two ACL chain rules with
+        the same priority both match, then the one actually applied to a
+        packet is undefined.
+      </p>
+    </column>
+
+    <column name="direction">
+      <p>Direction of the traffic to which this rule should apply:</p>
+      <ul>
+        <li>
+          <code>from-lport</code>: Used to implement filters on traffic
+          arriving from a logical port.  These rules are applied to the
+          logical switch's ingress pipeline.
+        </li>
+        <li>
+          <code>to-lport</code>: Used to implement filters on traffic
+          forwarded to a logical port.  These rules are applied to the
+          logical switch's egress pipeline.
+        </li>
+      </ul>
+    </column>
+
+    <column name="match">
+      <p>
+        The packets that the ACL chain should match, in the same expression
+        language used for the <ref column="match" table="Logical_Flow"
+        db="OVN_Southbound"/> column in the OVN Southbound database's
+        <ref table="Logical_Flow" db="OVN_Southbound"/> table.  The
+        <code>outport</code> logical port is only available in the
+        <code>to-lport</code> direction (the <code>inport</code> is
+        available in both directions).
+      </p>
+
+      <p>
+        This table represents the entry point for all port chains. Thus,
+        if there are no rows referring to a port chain, no packets will
+        be classified to go through the corresponding port chain groups.
+      </p>
+
+      <p>
+        Note that you can not create an ACL matching on a port with
+        type=router.
+      </p>
+
+      <p>
+        Note that when <code>localnet</code> port exists in a lswitch, for
+        <code>to-lport</code> direction, the <code>inport</code> works only if
+        the <code>to-lport</code> is located on the same chassis as the
+        <code>inport</code>.
+      </p>
+    </column>
+
+    <column name="port_chain">
+      <p>
+        The chain entry in <ref table="Logical_Port_Chain"/> that will handle
+        matched packets.
+      </p>
+    </column>
+
+    <column name="last_hop_port">
+      <p>
+        Destination logical port that is used at the very end of the chain.
+      </p>
+    </column>
+
+    <column name="bidirectional">
+      <p>
+        If set to <code>true</code>, the rules created for supporting the chain
+        will also include the reverse path. In essence, it removes the need for
+        a symmetric chain to control the packet flow from destination to source.
+      </p>
+
+      <p>
+        Note that the last hop of the chain in the reverse direction will need
+        to be known. In other words, in order to be bidirectional, the
+        <code>inport</code> from the <ref column="match"/> column is expected
+        to be used as the <ref column="last_hop_port"/> for rules in the reverse
+        direction.
+      </p>
+
+      <p>
+        Bidirectional is not yet implemented.
+      </p>
     </column>
 
     <column name="log">
