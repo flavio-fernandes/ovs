@@ -66,11 +66,11 @@ PYCOV_CLEAN_FILES = build-aux/check-structs,cover
 # A list of Markdown- or reStructuredText-formatted documentation that will
 # automatically be included in the "make dist-docs" output.
 docs = \
-	CONTRIBUTING.md \
+	CONTRIBUTING.rst \
 	CodingStyle.rst \
 	DESIGN.md \
 	DocumentationStyle.rst \
-	FAQ.md \
+	FAQ.rst \
 	INSTALL.rst \
 	INSTALL.Debian.rst \
 	INSTALL.Docker.rst \
@@ -88,14 +88,14 @@ docs = \
 	INSTALL.Windows.rst \
 	IntegrationGuide.rst \
 	MAINTAINERS.rst \
-	OPENFLOW-1.1+.md \
+	OPENFLOW.rst \
 	PORTING.rst \
 	README.rst \
-	README-lisp.md \
-	README-native-tunneling.md \
+	README-lisp.rst \
+	README-native-tunneling.rst \
 	REPORTING-BUGS.rst \
-	SECURITY.md \
-	WHY-OVS.md
+	SECURITY.rst \
+	WHY-OVS.rst
 EXTRA_DIST = \
 	$(docs) \
 	NOTICE \
