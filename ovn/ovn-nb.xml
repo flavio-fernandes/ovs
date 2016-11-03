@@ -190,6 +190,11 @@
       </p>
     </column>
 
+    <column name="last_hop_port">
+      The <ref table="Logical_Switch_Port"/> to be used once packet reaches the end
+      of the chain.
+    </column>
+
     <group title="Common Columns">
       <column name="external_ids">
         See <em>External IDs</em> at the beginning of this document.
@@ -991,13 +996,7 @@
 
         <column name="options" key="sfc-port-chain">
           Required when <ref column="action"/> is <code>sfc</code>.
-          The uuid of the <ref table="Logical_Port_Chain"/> to be used.
-        </column>
-
-        <column name="options" key="sfc-last-hop-port">
-          Required when <ref column="action"/> is <code>sfc</code>.
-          The uuid of <ref table="Logical_Switch_Port"/> to be used once packet reaches the end of the
-          chain.
+          The uuid (or name) of the <ref table="Logical_Port_Chain"/> to be used.
         </column>
 
         <column name="options" key="sfc-bidirectional">
@@ -1005,8 +1004,9 @@
           When set with value <code>true</code>, the implementation will also add rules to make packets
           go through the chain in reverse direction. A restriction on making bidirectional chains is
           that the inport parameter must be present in <ref column="match"/>, as it will be used as the
-          <code>sfc-last-hop-port</code>. As expected, all <code>src*</code> fields in <ref column="match"/>
-          will be converted to <code>dst*</code> in order to derive the reverse ACL.
+          <ref table="Logical_Port_Chain" column="last_hop_port"/>. As expected, all <code>src*</code>
+          fields in <ref column="match"/> will be converted to <code>dst*</code> in order to derive the
+          reverse ACL.
 
           <p>
             sfc-bidirectional option is not yet implemented.
