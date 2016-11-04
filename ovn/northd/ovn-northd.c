@@ -2762,8 +2762,9 @@ build_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *ports)
     *     * Bidirectional parameter support
     *     * Support modes of VNF (BitW, L2, L3)
     *     * Remove port-security on VNF Ports (if set by Openstack)
-    *     * Support egress table
     *     * Add some state to allow match that does not require 'inport'
+    *     * Support visiting same VNF more than once
+    *     * Unit tests!
     */
     const uint16_t ingress_inner_priority = 150;
     //const uint16_t egress_inner_priority = 150;
