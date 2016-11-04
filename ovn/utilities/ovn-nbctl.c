@@ -1104,9 +1104,8 @@ nbctl_lsp_pair_group_add(struct ctl_context *ctx)
     int64_t sortkey = (int64_t) lsp_chain->n_port_pair_groups + 1;
     if (ctx->argc >= 4) {
         sortkey = (int64_t) atoi(ctx->argv[3]);
-    } else {
-        nbrec_logical_port_pair_group_set_sortkey(lsp_pair_group, &sortkey, 1);
     }
+    nbrec_logical_port_pair_group_set_sortkey(lsp_pair_group, &sortkey, 1);
 
     /* Insert the logical port-pair-group into the logical switch. */
     nbrec_logical_port_chain_verify_port_pair_groups(lsp_chain);

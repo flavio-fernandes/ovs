@@ -2722,12 +2722,23 @@ build_chain_classifier_entry(struct ovn_datapath *od, struct hmap *ports,
     }
 
     /* extract first logical port of chain, by looking at the initial port pair group */
-    const struct nbrec_logical_port_pair_group *lppg;
-    const struct nbrec_logical_port_pair *lpp;
+    const struct nbrec_logical_port_pair_group *lppg = NULL;
+    const struct nbrec_logical_port_pair *lpp = NULL;
     struct ovn_port *first_ovn_port = NULL;
 
-    // TODO: any port pair off of the first pair group of chain could be used
-    lppg = (lsp_chain->n_port_pair_groups > 0) ? lsp_chain->port_pair_groups[0] : NULL;
+    /* Identify initial port pair group to be used, according to their sortkey */
+    if (lsp_chain->n_port_pair_groups > 0) {
+        struct nbrec_logical_port_pair_group **port_pair_groups
+            = xmalloc(sizeof *port_pair_groups * lsp_chain->n_port_pair_groups);
+        memcpy(port_pair_groups, lsp_chain->port_pair_groups,
+               sizeof *port_pair_groups * lsp_chain->n_port_pair_groups);
+        qsort(port_pair_groups, lsp_chain->n_port_pair_groups, sizeof *port_pair_groups,
+              cmp_port_pair_groups);
+        lppg = port_pair_groups[0];
+        free(port_pair_groups);
+    }
+
+    // TODO: any port pair off of the intial pair group of chain could be used
     lpp = (lppg && lppg->n_port_pairs > 0) ? lppg->port_pairs[0] : NULL;
     first_ovn_port = (lpp && lpp->inport) ? ovn_port_find(ports, lpp->inport->name) : NULL;
 
