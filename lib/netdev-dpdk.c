@@ -391,7 +391,8 @@ struct netdev_rxq_dpdk {
     int port_id;
 };
 
-static int netdev_dpdk_construct(struct netdev *);
+static int netdev_dpdk_class_init(void);
+static int netdev_dpdk_vhost_class_init(void);
 
 int netdev_dpdk_get_vid(const struct netdev_dpdk *dev);
 
@@ -401,7 +402,8 @@ netdev_dpdk_get_ingress_policer(const struct netdev_dpdk *dev);
 static bool
 is_dpdk_class(const struct netdev_class *class)
 {
-    return class->construct == netdev_dpdk_construct;
+    return class->init == netdev_dpdk_class_init
+           || class->init == netdev_dpdk_vhost_class_init;
 }
 
 /* DPDK NIC drivers allocate RX buffers at a particular granularity, typically
@@ -1054,13 +1056,18 @@ netdev_dpdk_get_config(const struct netdev *netdev, struct smap *args)
     smap_add_format(args, "configured_rx_queues", "%d", netdev->n_rxq);
     smap_add_format(args, "requested_tx_queues", "%d", dev->requested_n_txq);
     smap_add_format(args, "configured_tx_queues", "%d", netdev->n_txq);
-    smap_add_format(args, "requested_rxq_descriptors", "%d",
-                    dev->requested_rxq_size);
-    smap_add_format(args, "configured_rxq_descriptors", "%d", dev->rxq_size);
-    smap_add_format(args, "requested_txq_descriptors", "%d",
-                    dev->requested_txq_size);
-    smap_add_format(args, "configured_txq_descriptors", "%d", dev->txq_size);
     smap_add_format(args, "mtu", "%d", dev->mtu);
+
+    if (dev->type == DPDK_DEV_ETH) {
+        smap_add_format(args, "requested_rxq_descriptors", "%d",
+                        dev->requested_rxq_size);
+        smap_add_format(args, "configured_rxq_descriptors", "%d",
+                        dev->rxq_size);
+        smap_add_format(args, "requested_txq_descriptors", "%d",
+                        dev->requested_txq_size);
+        smap_add_format(args, "configured_txq_descriptors", "%d",
+                        dev->txq_size);
+    }
     ovs_mutex_unlock(&dev->mutex);
 
     return 0;
@@ -2160,6 +2167,8 @@ netdev_dpdk_update_flags__(struct netdev_dpdk *dev,
         if (!(dev->flags & NETDEV_UP)) {
             rte_eth_dev_stop(dev->port_id);
         }
+
+        netdev_change_seq_changed(&dev->up);
     } else {
         /* If DPDK_DEV_VHOST device's NETDEV_UP flag was changed and vhost is
          * running then change netdev's change_seq to trigger link state
@@ -2803,7 +2812,7 @@ netdev_dpdk_set_qos(struct netdev *netdev, const char *type,
         if (type && type[0]) {
             error = EOPNOTSUPP;
         }
-    } else if (qos_conf->ops == new_ops
+    } else if (qos_conf && qos_conf->ops == new_ops
                && qos_conf->ops->qos_is_equal(qos_conf, details)) {
         new_qos_conf = qos_conf;
     } else {

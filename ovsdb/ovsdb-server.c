@@ -74,6 +74,8 @@ struct db {
 static char *private_key_file;
 static char *certificate_file;
 static char *ca_cert_file;
+static char *ssl_protocols;
+static char *ssl_ciphers;
 static bool bootstrap_ca_cert;
 
 static unixctl_cb_func ovsdb_server_exit;
@@ -781,6 +783,17 @@ read_string_column(const struct ovsdb_row *row, const char *column_name,
     return atom != NULL;
 }
 
+static bool
+read_bool_column(const struct ovsdb_row *row, const char *column_name,
+                   bool *boolp)
+{
+    const union ovsdb_atom *atom;
+
+    atom = read_column(row, column_name, OVSDB_TYPE_BOOLEAN);
+    *boolp = atom ? atom->boolean : false;
+    return atom != NULL;
+}
+
 static void
 write_bool_column(struct ovsdb_row *row, const char *column_name, bool value)
 {
@@ -849,6 +862,7 @@ add_manager_options(struct shash *remotes, const struct ovsdb_row *row)
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
     struct ovsdb_jsonrpc_options *options;
     long long int max_backoff, probe_interval;
+    bool read_only;
     const char *target, *dscp_string;
 
     if (!read_string_column(row, "target", &target) || !target) {
@@ -863,6 +877,9 @@ add_manager_options(struct shash *remotes, const struct ovsdb_row *row)
     }
     if (read_integer_column(row, "inactivity_probe", &probe_interval)) {
         options->probe_interval = probe_interval;
+    }
+    if (read_bool_column(row, "read_only", &read_only)) {
+        options->read_only = read_only;
     }
 
     options->dscp = DSCP_DEFAULT;
@@ -1095,13 +1112,19 @@ reconfigure_ssl(const struct shash *all_dbs)
     const char *resolved_private_key;
     const char *resolved_certificate;
     const char *resolved_ca_cert;
+    const char *resolved_ssl_protocols;
+    const char *resolved_ssl_ciphers;
 
     resolved_private_key = query_db_string(all_dbs, private_key_file, &errors);
     resolved_certificate = query_db_string(all_dbs, certificate_file, &errors);
     resolved_ca_cert = query_db_string(all_dbs, ca_cert_file, &errors);
+    resolved_ssl_protocols = query_db_string(all_dbs, ssl_protocols, &errors);
+    resolved_ssl_ciphers = query_db_string(all_dbs, ssl_ciphers, &errors);
 
     stream_ssl_set_key_and_cert(resolved_private_key, resolved_certificate);
     stream_ssl_set_ca_cert_file(resolved_ca_cert, bootstrap_ca_cert);
+    stream_ssl_set_protocols(resolved_ssl_protocols);
+    stream_ssl_set_ciphers(resolved_ssl_ciphers);
 
     return errors.string;
 }
@@ -1502,7 +1525,8 @@ parse_options(int *argcp, char **argvp[],
         OPT_SYNC_EXCLUDE,
         OPT_ACTIVE,
         VLOG_OPTION_ENUMS,
-        DAEMON_OPTION_ENUMS
+        DAEMON_OPTION_ENUMS,
+        SSL_OPTION_ENUMS,
     };
     static const struct option long_options[] = {
         {"remote",      required_argument, NULL, OPT_REMOTE},
@@ -1516,9 +1540,7 @@ parse_options(int *argcp, char **argvp[],
         VLOG_LONG_OPTIONS,
         {"bootstrap-ca-cert", required_argument, NULL, OPT_BOOTSTRAP_CA_CERT},
         {"peer-ca-cert", required_argument, NULL, OPT_PEER_CA_CERT},
-        {"private-key", required_argument, NULL, 'p'},
-        {"certificate", required_argument, NULL, 'c'},
-        {"ca-cert",     required_argument, NULL, 'C'},
+        STREAM_SSL_LONG_OPTIONS,
         {"sync-from",   required_argument, NULL, OPT_SYNC_FROM},
         {"sync-exclude-tables", required_argument, NULL, OPT_SYNC_EXCLUDE},
         {"active", no_argument, NULL, OPT_ACTIVE},
@@ -1573,6 +1595,14 @@ parse_options(int *argcp, char **argvp[],
         case 'C':
             ca_cert_file = optarg;
             bootstrap_ca_cert = false;
+            break;
+
+        case OPT_SSL_PROTOCOLS:
+            ssl_protocols = optarg;
+            break;
+
+        case OPT_SSL_CIPHERS:
+            ssl_ciphers = optarg;
             break;
 
         case OPT_BOOTSTRAP_CA_CERT:

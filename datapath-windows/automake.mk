@@ -1,6 +1,6 @@
 EXTRA_DIST += \
-	datapath-windows/CodingStyle \
-	datapath-windows/DESIGN \
+	datapath-windows/CodingStyle.rst \
+	datapath-windows/DESIGN.rst \
 	datapath-windows/Package/package.VcxProj \
 	datapath-windows/Package/package.VcxProj.user \
 	datapath-windows/include/OvsDpInterfaceExt.h \
@@ -14,6 +14,7 @@ EXTRA_DIST += \
 	datapath-windows/ovsext/Atomic.h \
 	datapath-windows/ovsext/BufferMgmt.c \
 	datapath-windows/ovsext/BufferMgmt.h \
+	datapath-windows/ovsext/Conntrack-icmp.c \
 	datapath-windows/ovsext/Conntrack-other.c \
 	datapath-windows/ovsext/Conntrack-tcp.c \
 	datapath-windows/ovsext/Conntrack.c \

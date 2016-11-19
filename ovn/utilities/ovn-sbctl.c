@@ -161,7 +161,8 @@ parse_options(int argc, char *argv[], struct shash *local_options)
         OPT_COMMANDS,
         OPT_OPTIONS,
         VLOG_OPTION_ENUMS,
-        TABLE_OPTION_ENUMS
+        TABLE_OPTION_ENUMS,
+        SSL_OPTION_ENUMS,
     };
     static const struct option global_long_options[] = {
         {"db", required_argument, NULL, OPT_DB},
@@ -775,6 +776,10 @@ static const struct ctl_table_class tables[] = {
 
     {&sbrec_table_address_set,
      {{&sbrec_table_address_set, &sbrec_address_set_col_name, NULL},
+      {NULL, NULL, NULL}}},
+
+    {&sbrec_table_connection,
+     {{&sbrec_table_connection, NULL, NULL},
       {NULL, NULL, NULL}}},
 
     {NULL, {{NULL, NULL, NULL}, {NULL, NULL, NULL}}}

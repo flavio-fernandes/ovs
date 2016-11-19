@@ -23,6 +23,7 @@ ovsdb\-server \- Open vSwitch database server
 .so lib/ssl-syn.man
 .so lib/ssl-bootstrap-syn.man
 .so lib/ssl-peer-ca-cert-syn.man
+.so lib/ssl-connect-syn.man
 .so lib/unixctl-syn.man
 .so lib/common-syn.man
 .
@@ -86,6 +87,8 @@ Maximum number of milliseconds to wait between connection attempts.
 .IP "\fBinactivity_probe\fR (integer)"
 Maximum number of milliseconds of idle time on connection to
 client before sending an inactivity probe message.
+.IP "\fBread_only\fR (boolean)"
+If true, only read-only transactions are allowed on this connection.
 .RE
 .IP
 It is an error for \fIcolumn\fR to have another type.
@@ -133,6 +136,8 @@ one row in \fItable\fR.)
 .so lib/ssl.man
 .so lib/ssl-bootstrap.man
 .so lib/ssl-peer-ca-cert.man
+.SS "SSL Connection Options"
+.so lib/ssl-connect.man
 .SS "Other Options"
 .so lib/unixctl.man
 .so lib/common.man

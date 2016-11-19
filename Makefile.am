@@ -68,21 +68,21 @@ PYCOV_CLEAN_FILES = build-aux/check-structs,cover
 docs = \
 	CONTRIBUTING.rst \
 	CodingStyle.rst \
-	DESIGN.md \
+	DESIGN.rst \
 	DocumentationStyle.rst \
 	FAQ.rst \
 	INSTALL.rst \
 	INSTALL.Debian.rst \
 	INSTALL.Docker.rst \
-	INSTALL.DPDK-ADVANCED.md \
+	INSTALL.DPDK-ADVANCED.rst \
 	INSTALL.DPDK.rst \
-	INSTALL.Fedora.md \
+	INSTALL.Fedora.rst \
 	INSTALL.KVM.rst \
-	INSTALL.Libvirt.md \
-	INSTALL.NetBSD.md \
-	INSTALL.RHEL.md \
-	INSTALL.SELinux.md \
-	INSTALL.SSL.md \
+	INSTALL.Libvirt.rst \
+	INSTALL.NetBSD.rst \
+	INSTALL.RHEL.rst \
+	INSTALL.SELinux.rst \
+	INSTALL.SSL.rst \
 	INSTALL.XenServer.rst \
 	INSTALL.userspace.rst \
 	INSTALL.Windows.rst \
@@ -116,7 +116,8 @@ EXTRA_DIST = \
 	$(MAN_FRAGMENTS) \
 	$(MAN_ROOTS) \
 	Vagrantfile \
-	Vagrantfile-FreeBSD
+	Vagrantfile-FreeBSD \
+	.mailmap
 bin_PROGRAMS =
 sbin_PROGRAMS =
 bin_SCRIPTS =

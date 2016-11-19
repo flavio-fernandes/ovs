@@ -30,10 +30,10 @@ Linux, FreeBSD, or NetBSD host. For specifics around installation on a specific
 platform, refer to one of these installation guides:
 
 - `Debian <INSTALL.Debian.rst>`__
-- `Fedora <INSTALL.Fedora.md>`__
-- `RHEL <INSTALL.RHEL.md>`__
+- `Fedora <INSTALL.Fedora.rst>`__
+- `RHEL <INSTALL.RHEL.rst>`__
 - `XenServer <INSTALL.XenServer.rst>`__
-- `NetBSD <INSTALL.NetBSD.md>`__
+- `NetBSD <INSTALL.NetBSD.rst>`__
 - `Windows <INSTALL.Windows.rst>`__
 - `DPDK <INSTALL.DPDK.rst>`__
 
@@ -80,7 +80,7 @@ vSwitch distribution or to use the kernel module built into the Linux kernel
 are not available in the Open vSwitch kernel datapath that ships as part of the
 upstream Linux kernel?" for more information on this trade-off. You may also
 use the userspace-only implementation, at some cost in features and performance
-(see the `userspace installation guide <INSTALL.userspace.md>`__ for details).
+(see the `userspace installation guide <INSTALL.userspace.rst>`__ for details).
 
 To compile the kernel module on Linux, you must also install the
 following:
