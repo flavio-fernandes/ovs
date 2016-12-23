@@ -431,20 +431,20 @@ ip_parse(const char *s, ovs_be32 *ip)
 
 /* Parses string 's', which must be an IP address with a port number
  * with ":" as a separator (e.g.: 192.168.1.2:80).
- * Stores the IP address into '*ip' and port number to '*port'. */
+ * Stores the IP address into '*ip' and port number to '*port'.
+ *
+ * Returns NULL if successful, otherwise an error message that the caller must
+ * free(). */
 char * OVS_WARN_UNUSED_RESULT
 ip_parse_port(const char *s, ovs_be32 *ip, ovs_be16 *port)
 {
     int n = 0;
-    if (!ovs_scan_len(s, &n, IP_PORT_SCAN_FMT,
-                IP_PORT_SCAN_ARGS(ip, port))) {
-        return xasprintf("%s: invalid IP address or port number", s);
+    if (ovs_scan(s, IP_PORT_SCAN_FMT"%n", IP_PORT_SCAN_ARGS(ip, port), &n)
+        && !s[n]) {
+        return NULL;
     }
 
-    if (s[n]) {
-        return xasprintf("%s: invalid IP address or port number", s);
-    }
-    return NULL;
+    return xasprintf("%s: invalid IP address or port number", s);
 }
 
 /* Parses string 's', which must be an IP address with an optional netmask or
@@ -849,7 +849,7 @@ eth_compose(struct dp_packet *b, const struct eth_addr eth_dst,
     return data;
 }
 
-static void
+void
 packet_set_ipv4_addr(struct dp_packet *packet,
                      ovs_16aligned_be32 *addr, ovs_be32 new_addr)
 {
@@ -1473,6 +1473,26 @@ packet_csum_pseudoheader6(const struct ovs_16aligned_ip6_hdr *ip6)
     partial = csum_add16(partial, ip6->ip6_plen);
 
     return partial;
+}
+
+/* Calculate the IPv6 upper layer checksum according to RFC2460. We pass the
+   ip6_nxt and ip6_plen values, so it will also work if extension headers
+   are present. */
+uint16_t
+packet_csum_upperlayer6(const struct ovs_16aligned_ip6_hdr *ip6,
+                        const void *data, uint8_t l4_protocol,
+                        uint16_t l4_size)
+{
+    uint32_t partial = 0;
+
+    partial = csum_continue(partial, &ip6->ip6_src, sizeof ip6->ip6_src);
+    partial = csum_continue(partial, &ip6->ip6_dst, sizeof ip6->ip6_dst);
+    partial = csum_add16(partial, htons(l4_protocol));
+    partial = csum_add16(partial, htons(l4_size));
+
+    partial = csum_continue(partial, data, l4_size);
+
+    return csum_finish(partial);
 }
 #endif
 

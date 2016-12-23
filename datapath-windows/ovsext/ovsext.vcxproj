@@ -174,10 +174,25 @@
       <MultiProcessorCompilation Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'">true</MultiProcessorCompilation>
       <MultiProcessorCompilation Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|x64'">true</MultiProcessorCompilation>
     </ClCompile>
+    <Inf>
+      <TimeStamp Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|x64'">$(Version)</TimeStamp>
+    </Inf>
+    <Inf>
+      <TimeStamp Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'">$(Version)</TimeStamp>
+    </Inf>
+    <Inf>
+      <TimeStamp Condition="'$(Configuration)|$(Platform)'=='Win8 Release|x64'">$(Version)</TimeStamp>
+    </Inf>
+    <Inf>
+      <TimeStamp Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|x64'">$(Version)</TimeStamp>
+    </Inf>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Actions.c" />
     <ClCompile Include="BufferMgmt.c" />
+    <ClCompile Include="Conntrack-related.c" />
+    <ClCompile Include="Conntrack-ftp.c" />
+    <ClCompile Include="Conntrack-icmp.c" />
     <ClCompile Include="Conntrack-other.c" />
     <ClCompile Include="Conntrack-tcp.c" />
     <ClCompile Include="Conntrack.c" />
@@ -211,7 +226,12 @@
     <ClCompile Include="Util.c" />
     <ClCompile Include="Vport.c" />
     <ClCompile Include="Vxlan.c" />
-    <ResourceCompile Include="ovsext.rc" />
+    <ResourceCompile Include="ovsext.rc">
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win8 Release|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS630=1;VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS630=1;VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1;VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1;VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
+    </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
     <Inf Exclude="@(Inf)" Include="*.inf" />

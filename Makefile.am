@@ -63,41 +63,11 @@ CLEAN_LOCAL =
 DISTCLEANFILES =
 PYCOV_CLEAN_FILES = build-aux/check-structs,cover
 
-# A list of Markdown- or reStructuredText-formatted documentation that will
-# automatically be included in the "make dist-docs" output.
-docs = \
-	CONTRIBUTING.rst \
-	CodingStyle.rst \
-	DESIGN.rst \
-	DocumentationStyle.rst \
-	FAQ.rst \
-	INSTALL.rst \
-	INSTALL.Debian.rst \
-	INSTALL.Docker.rst \
-	INSTALL.DPDK-ADVANCED.rst \
-	INSTALL.DPDK.rst \
-	INSTALL.Fedora.rst \
-	INSTALL.KVM.rst \
-	INSTALL.Libvirt.rst \
-	INSTALL.NetBSD.rst \
-	INSTALL.RHEL.rst \
-	INSTALL.SELinux.rst \
-	INSTALL.SSL.rst \
-	INSTALL.XenServer.rst \
-	INSTALL.userspace.rst \
-	INSTALL.Windows.rst \
-	IntegrationGuide.rst \
-	MAINTAINERS.rst \
-	OPENFLOW.rst \
-	PORTING.rst \
-	README.rst \
-	README-lisp.rst \
-	README-native-tunneling.rst \
-	REPORTING-BUGS.rst \
-	SECURITY.rst \
-	WHY-OVS.rst
 EXTRA_DIST = \
-	$(docs) \
+	AUTHORS.rst \
+	CONTRIBUTING.rst \
+	MAINTAINERS.rst \
+	README.rst \
 	NOTICE \
 	.travis.yml \
 	.travis/linux-build.sh \
@@ -116,7 +86,8 @@ EXTRA_DIST = \
 	$(MAN_FRAGMENTS) \
 	$(MAN_ROOTS) \
 	Vagrantfile \
-	Vagrantfile-FreeBSD
+	Vagrantfile-FreeBSD \
+	.mailmap
 bin_PROGRAMS =
 sbin_PROGRAMS =
 bin_SCRIPTS =
@@ -392,13 +363,13 @@ CLEANFILES += manpage-dep-check
 if VSTUDIO_DDK
 ALL_LOCAL += ovsext
 ovsext: datapath-windows/ovsext.sln $(srcdir)/datapath-windows/include/OvsDpInterface.h
-	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8$(VSTUDIO_CONFIG)"
-	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8.1$(VSTUDIO_CONFIG)"
+	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
+	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8.1$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
 
 CLEAN_LOCAL += ovsext_clean
 ovsext_clean: datapath-windows/ovsext.sln
-	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8$(VSTUDIO_CONFIG)"
-	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8.1$(VSTUDIO_CONFIG)"
+	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
+	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8.1$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
 endif
 .PHONY: ovsext
 

@@ -250,24 +250,22 @@ get_dpdk_args(const struct smap *ovs_other_config, char ***argv,
     return i + extra_argc;
 }
 
-static char **dpdk_argv;
-static int dpdk_argc;
-
 static void
-deferred_argv_release(void)
+argv_release(char **dpdk_argv, char **dpdk_argv_release, size_t dpdk_argc)
 {
     int result;
     for (result = 0; result < dpdk_argc; ++result) {
-        free(dpdk_argv[result]);
+        free(dpdk_argv_release[result]);
     }
 
+    free(dpdk_argv_release);
     free(dpdk_argv);
 }
 
 static void
 dpdk_init__(const struct smap *ovs_other_config)
 {
-    char **argv = NULL;
+    char **argv = NULL, **argv_to_release = NULL;
     int result;
     int argc, argc_tmp;
     bool auto_determine = true;
@@ -366,11 +364,17 @@ dpdk_init__(const struct smap *ovs_other_config)
         ds_destroy(&eal_args);
     }
 
+    argv_to_release = grow_argv(&argv_to_release, 0, argc);
+    for (argc_tmp = 0; argc_tmp < argc; ++argc_tmp) {
+        argv_to_release[argc_tmp] = argv[argc_tmp];
+    }
+
     /* Make sure things are initialized ... */
     result = rte_eal_init(argc, argv);
     if (result < 0) {
         ovs_abort(result, "Cannot init EAL");
     }
+    argv_release(argv, argv_to_release, argc);
 
     /* Set the main thread affinity back to pre rte_eal_init() value */
     if (auto_determine && !err) {
@@ -380,11 +384,6 @@ dpdk_init__(const struct smap *ovs_other_config)
             VLOG_ERR("Thread setaffinity error %d", err);
         }
     }
-
-    dpdk_argv = argv;
-    dpdk_argc = argc;
-
-    atexit(deferred_argv_release);
 
     rte_memzone_dump(stdout);
 

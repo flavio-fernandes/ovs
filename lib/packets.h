@@ -840,6 +840,8 @@ struct icmp6_header {
 BUILD_ASSERT_DECL(ICMP6_HEADER_LEN == sizeof(struct icmp6_header));
 
 uint32_t packet_csum_pseudoheader6(const struct ovs_16aligned_ip6_hdr *);
+uint16_t packet_csum_upperlayer6(const struct ovs_16aligned_ip6_hdr *,
+                                 const void *, uint8_t, uint16_t);
 
 /* Neighbor Discovery option field.
  * ND options are always a multiple of 8 bytes in size. */
@@ -1093,6 +1095,8 @@ void *snap_compose(struct dp_packet *, const struct eth_addr eth_dst,
                    unsigned int oui, uint16_t snap_type, size_t size);
 void packet_set_ipv4(struct dp_packet *, ovs_be32 src, ovs_be32 dst, uint8_t tos,
                      uint8_t ttl);
+void packet_set_ipv4_addr(struct dp_packet *packet, ovs_16aligned_be32 *addr,
+                          ovs_be32 new_addr);
 void packet_set_ipv6(struct dp_packet *, const ovs_be32 src[4],
                      const ovs_be32 dst[4], uint8_t tc,
                      ovs_be32 fl, uint8_t hlmit);
