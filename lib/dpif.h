@@ -389,9 +389,10 @@
 #include <stdint.h>
 
 #include "dpdk.h"
-#include "netdev.h"
 #include "dp-packet.h"
+#include "netdev.h"
 #include "openflow/openflow.h"
+#include "openvswitch/ofp-util.h"
 #include "ovs-numa.h"
 #include "packets.h"
 #include "util.h"
@@ -518,7 +519,8 @@ enum dpif_flow_put_flags {
 };
 
 bool dpif_probe_feature(struct dpif *, const char *name,
-                        const struct ofpbuf *key, const ovs_u128 *ufid);
+                        const struct ofpbuf *key, const struct ofpbuf *actions,
+                        const ovs_u128 *ufid);
 void dpif_flow_hash(const struct dpif *, const void *key, size_t key_len,
                     ovs_u128 *hash);
 int dpif_flow_flush(struct dpif *);
@@ -629,7 +631,8 @@ enum dpif_op_type {
  *
  *   - If the datapath implements multiple pmd thread with its own flow
  *     table, 'pmd_id' should be used to specify the particular polling
- *     thread for the operation.
+ *     thread for the operation. PMD_ID_NULL means that the flow should
+ *     be put on all the polling threads.
  */
 struct dpif_flow_put {
     /* Input. */
@@ -661,7 +664,8 @@ struct dpif_flow_put {
  *
  * If the datapath implements multiple polling thread with its own flow table,
  * 'pmd_id' should be used to specify the particular polling thread for the
- * operation.
+ * operation. PMD_ID_NULL means that the flow should be deleted from all the
+ * polling threads.
  *
  * If the operation succeeds, then 'stats', if nonnull, will be set to the
  * flow's statistics before its deletion. */
@@ -726,7 +730,8 @@ struct dpif_execute {
  *
  * If the datapath implements multiple polling thread with its own flow table,
  * 'pmd_id' should be used to specify the particular polling thread for the
- * operation.
+ * operation. PMD_ID_NULL means that the datapath will return the first
+ * matching flow from any poll thread.
  *
  * Succeeds with status 0 if the flow is fetched, or fails with ENOENT if no
  * such flow exists. Other failures are indicated with a positive errno value.
@@ -842,7 +847,7 @@ void dpif_register_upcall_cb(struct dpif *, upcall_callback *, void *aux);
 
 int dpif_recv_set(struct dpif *, bool enable);
 int dpif_handlers_set(struct dpif *, uint32_t n_handlers);
-int dpif_poll_threads_set(struct dpif *, const char *cmask);
+int dpif_set_config(struct dpif *, const struct smap *cfg);
 int dpif_port_set_config(struct dpif *, odp_port_t, const struct smap *cfg);
 int dpif_recv(struct dpif *, uint32_t handler_id, struct dpif_upcall *,
               struct ofpbuf *);
@@ -853,6 +858,16 @@ void dpif_disable_upcall(struct dpif *);
 
 void dpif_print_packet(struct dpif *, struct dpif_upcall *);
 
+/* Meters. */
+void dpif_meter_get_features(const struct dpif *,
+                             struct ofputil_meter_features *);
+int dpif_meter_set(struct dpif *, ofproto_meter_id *meter_id,
+                   struct ofputil_meter_config *);
+int dpif_meter_get(const struct dpif *, ofproto_meter_id meter_id,
+                   struct ofputil_meter_stats *, uint16_t n_bands);
+int dpif_meter_del(struct dpif *, ofproto_meter_id meter_id,
+                   struct ofputil_meter_stats *, uint16_t n_bands);
+
 /* Miscellaneous. */
 
 void dpif_get_netflow_ids(const struct dpif *,
@@ -860,6 +875,9 @@ void dpif_get_netflow_ids(const struct dpif *,
 
 int dpif_queue_to_priority(const struct dpif *, uint32_t queue_id,
                            uint32_t *priority);
+
+int dpif_get_pmds_for_port(const struct dpif * dpif, odp_port_t port_no,
+                           unsigned int **pmds, size_t *n);
 
 char *dpif_get_dp_version(const struct dpif *);
 bool dpif_supports_tnl_push_pop(const struct dpif *);

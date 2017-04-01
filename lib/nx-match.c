@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@
 #include "tun-metadata.h"
 #include "unaligned.h"
 #include "util.h"
+#include "vl-mff-map.h"
 
 VLOG_DEFINE_THIS_MODULE(nx_match);
 
@@ -231,19 +232,42 @@ mf_nxm_header(enum mf_field_id id)
     return is_experimenter_oxm(oxm) ? 0 : oxm >> 32;
 }
 
+/* Returns the 32-bit OXM or NXM header to use for field 'mff'. If 'mff' is
+ * a mapped variable length mf_field, update the header with the configured
+ * length of 'mff'. Returns 0 if 'mff' cannot be expressed with a 32-bit NXM
+ * or OXM header.*/
+uint32_t
+nxm_header_from_mff(const struct mf_field *mff)
+{
+    uint64_t oxm = mf_oxm_header(mff->id, 0);
+
+    if (mff->mapped) {
+        oxm = nxm_no_len(oxm) | ((uint64_t) mff->n_bytes << 32);
+    }
+
+    return is_experimenter_oxm(oxm) ? 0 : oxm >> 32;
+}
+
 static const struct mf_field *
-mf_from_oxm_header(uint64_t header)
+mf_from_oxm_header(uint64_t header, const struct vl_mff_map *vl_mff_map)
 {
     const struct nxm_field *f = nxm_field_by_header(header);
-    return f ? mf_from_id(f->id) : NULL;
+
+    if (f) {
+        const struct mf_field *mff = mf_from_id(f->id);
+        const struct mf_field *vl_mff = mf_get_vl_mff(mff, vl_mff_map);
+        return vl_mff ? vl_mff : mff;
+    } else {
+        return NULL;
+    }
 }
 
 /* Returns the "struct mf_field" that corresponds to NXM or OXM header
  * 'header', or NULL if 'header' doesn't correspond to any known field.  */
 const struct mf_field *
-mf_from_nxm_header(uint32_t header)
+mf_from_nxm_header(uint32_t header, const struct vl_mff_map *vl_mff_map)
 {
-    return mf_from_oxm_header((uint64_t) header << 32);
+    return mf_from_oxm_header((uint64_t) header << 32, vl_mff_map);
 }
 
 /* Returns the width of the data for a field with the given 'header', in
@@ -286,7 +310,8 @@ is_cookie_pseudoheader(uint64_t header)
 }
 
 static enum ofperr
-nx_pull_header__(struct ofpbuf *b, bool allow_cookie, uint64_t *header,
+nx_pull_header__(struct ofpbuf *b, bool allow_cookie,
+                 const struct vl_mff_map *vl_mff_map, uint64_t *header,
                  const struct mf_field **field)
 {
     if (b->size < 4) {
@@ -310,11 +335,13 @@ nx_pull_header__(struct ofpbuf *b, bool allow_cookie, uint64_t *header,
     ofpbuf_pull(b, nxm_header_len(*header));
 
     if (field) {
-        *field = mf_from_oxm_header(*header);
+        *field = mf_from_oxm_header(*header, vl_mff_map);
         if (!*field && !(allow_cookie && is_cookie_pseudoheader(*header))) {
             VLOG_DBG_RL(&rl, "OXM header "NXM_HEADER_FMT" is unknown",
                         NXM_HEADER_ARGS(*header));
             return OFPERR_OFPBMC_BAD_FIELD;
+        } else if (mf_vl_mff_invalid(*field, vl_mff_map)) {
+            return OFPERR_NXFMFC_INVALID_TLV_FIELD;
         }
     }
 
@@ -350,7 +377,8 @@ copy_entry_value(const struct mf_field *field, union mf_value *value,
 }
 
 static enum ofperr
-nx_pull_entry__(struct ofpbuf *b, bool allow_cookie, uint64_t *header,
+nx_pull_entry__(struct ofpbuf *b, bool allow_cookie,
+                const struct vl_mff_map *vl_mff_map, uint64_t *header,
                 const struct mf_field **field_,
                 union mf_value *value, union mf_value *mask)
 {
@@ -360,7 +388,8 @@ nx_pull_entry__(struct ofpbuf *b, bool allow_cookie, uint64_t *header,
     const uint8_t *payload;
     int width;
 
-    header_error = nx_pull_header__(b, allow_cookie, header, &field);
+    header_error = nx_pull_header__(b, allow_cookie, vl_mff_map, header,
+                                    &field);
     if (header_error && header_error != OFPERR_OFPBMC_BAD_FIELD) {
         return header_error;
     }
@@ -414,12 +443,13 @@ nx_pull_entry__(struct ofpbuf *b, bool allow_cookie, uint64_t *header,
  * errors (with OFPERR_OFPBMC_BAD_MASK).
  */
 enum ofperr
-nx_pull_entry(struct ofpbuf *b, const struct mf_field **field,
-              union mf_value *value, union mf_value *mask)
+nx_pull_entry(struct ofpbuf *b, const struct vl_mff_map *vl_mff_map,
+              const struct mf_field **field, union mf_value *value,
+              union mf_value *mask)
 {
     uint64_t header;
 
-    return nx_pull_entry__(b, false, &header, field, value, mask);
+    return nx_pull_entry__(b, false, vl_mff_map, &header, field, value, mask);
 }
 
 /* Attempts to pull an NXM or OXM header from the beginning of 'b'.  If
@@ -433,12 +463,13 @@ nx_pull_entry(struct ofpbuf *b, const struct mf_field **field,
  * errors (with OFPERR_OFPBMC_BAD_MASK).
  */
 enum ofperr
-nx_pull_header(struct ofpbuf *b, const struct mf_field **field, bool *masked)
+nx_pull_header(struct ofpbuf *b, const struct vl_mff_map *vl_mff_map,
+               const struct mf_field **field, bool *masked)
 {
     enum ofperr error;
     uint64_t header;
 
-    error = nx_pull_header__(b, false, &header, field);
+    error = nx_pull_header__(b, false, vl_mff_map,  &header, field);
     if (masked) {
         *masked = !error && nxm_hasmask(header);
     } else if (!error && nxm_hasmask(header)) {
@@ -449,13 +480,15 @@ nx_pull_header(struct ofpbuf *b, const struct mf_field **field, bool *masked)
 
 static enum ofperr
 nx_pull_match_entry(struct ofpbuf *b, bool allow_cookie,
+                    const struct vl_mff_map *vl_mff_map,
                     const struct mf_field **field,
                     union mf_value *value, union mf_value *mask)
 {
     enum ofperr error;
     uint64_t header;
 
-    error = nx_pull_entry__(b, allow_cookie, &header, field, value, mask);
+    error = nx_pull_entry__(b, allow_cookie, vl_mff_map, &header, field, value,
+                            mask);
     if (error) {
         return error;
     }
@@ -472,10 +505,14 @@ nx_pull_match_entry(struct ofpbuf *b, bool allow_cookie,
     return 0;
 }
 
+/* Prerequisites will only be checked when 'strict' is 'true'.  This allows
+ * decoding conntrack original direction 5-tuple IP addresses without the
+ * ethertype being present, when decoding metadata only. */
 static enum ofperr
 nx_pull_raw(const uint8_t *p, unsigned int match_len, bool strict,
             struct match *match, ovs_be64 *cookie, ovs_be64 *cookie_mask,
-            const struct tun_table *tun_table)
+            const struct tun_table *tun_table,
+            const struct vl_mff_map *vl_mff_map)
 {
     ovs_assert((cookie != NULL) == (cookie_mask != NULL));
 
@@ -493,7 +530,8 @@ nx_pull_raw(const uint8_t *p, unsigned int match_len, bool strict,
         union mf_value mask;
         enum ofperr error;
 
-        error = nx_pull_match_entry(&b, cookie != NULL, &field, &value, &mask);
+        error = nx_pull_match_entry(&b, cookie != NULL, vl_mff_map, &field,
+                                    &value, &mask);
         if (error) {
             if (error == OFPERR_OFPBMC_BAD_FIELD && !strict) {
                 continue;
@@ -507,7 +545,7 @@ nx_pull_raw(const uint8_t *p, unsigned int match_len, bool strict,
                 *cookie = value.be64;
                 *cookie_mask = mask.be64;
             }
-        } else if (!mf_are_prereqs_ok(field, &match->flow, NULL)) {
+        } else if (strict && !mf_are_match_prereqs_ok(field, match)) {
             error = OFPERR_OFPBMC_BAD_PREREQ;
         } else if (!mf_is_all_wild(field, &match->wc)) {
             error = OFPERR_OFPBMC_DUP_FIELD;
@@ -539,7 +577,8 @@ static enum ofperr
 nx_pull_match__(struct ofpbuf *b, unsigned int match_len, bool strict,
                 struct match *match,
                 ovs_be64 *cookie, ovs_be64 *cookie_mask,
-                const struct tun_table *tun_table)
+                const struct tun_table *tun_table,
+                const struct vl_mff_map *vl_mff_map)
 {
     uint8_t *p = NULL;
 
@@ -554,7 +593,7 @@ nx_pull_match__(struct ofpbuf *b, unsigned int match_len, bool strict,
     }
 
     return nx_pull_raw(p, match_len, strict, match, cookie, cookie_mask,
-                       tun_table);
+                       tun_table, vl_mff_map);
 }
 
 /* Parses the nx_match formatted match description in 'b' with length
@@ -562,20 +601,26 @@ nx_pull_match__(struct ofpbuf *b, unsigned int match_len, bool strict,
  * are valid pointers, then stores the cookie and mask in them if 'b' contains
  * a "NXM_NX_COOKIE*" match.  Otherwise, stores 0 in both.
  *
+ * 'vl_mff_map" is an optional parameter that is used to validate the length
+ * of variable length mf_fields in 'match'. If it is not provided, the
+ * default mf_fields with maximum length will be used.
+ *
  * Fails with an error upon encountering an unknown NXM header.
  *
  * Returns 0 if successful, otherwise an OpenFlow error code. */
 enum ofperr
 nx_pull_match(struct ofpbuf *b, unsigned int match_len, struct match *match,
               ovs_be64 *cookie, ovs_be64 *cookie_mask,
-              const struct tun_table *tun_table)
+              const struct tun_table *tun_table,
+              const struct vl_mff_map *vl_mff_map)
 {
     return nx_pull_match__(b, match_len, true, match, cookie, cookie_mask,
-                           tun_table);
+                           tun_table, vl_mff_map);
 }
 
 /* Behaves the same as nx_pull_match(), but skips over unknown NXM headers,
- * instead of failing with an error. */
+ * instead of failing with an error, and does not check for field
+ * prerequisities. */
 enum ofperr
 nx_pull_match_loose(struct ofpbuf *b, unsigned int match_len,
                     struct match *match,
@@ -583,12 +628,13 @@ nx_pull_match_loose(struct ofpbuf *b, unsigned int match_len,
                     const struct tun_table *tun_table)
 {
     return nx_pull_match__(b, match_len, false, match, cookie, cookie_mask,
-                           tun_table);
+                           tun_table, NULL);
 }
 
 static enum ofperr
 oxm_pull_match__(struct ofpbuf *b, bool strict,
-                 const struct tun_table *tun_table, struct match *match)
+                 const struct tun_table *tun_table,
+                 const struct vl_mff_map *vl_mff_map, struct match *match)
 {
     struct ofp11_match_header *omh = b->data;
     uint8_t *p;
@@ -616,42 +662,51 @@ oxm_pull_match__(struct ofpbuf *b, bool strict,
     }
 
     return nx_pull_raw(p + sizeof *omh, match_len - sizeof *omh,
-                       strict, match, NULL, NULL, tun_table);
+                       strict, match, NULL, NULL, tun_table, vl_mff_map);
 }
 
 /* Parses the oxm formatted match description preceded by a struct
  * ofp11_match_header in 'b'.  Stores the result in 'match'.
+ *
+ * 'vl_mff_map' is an optional parameter that is used to validate the length
+ * of variable length mf_fields in 'match'. If it is not provided, the
+ * default mf_fields with maximum length will be used.
  *
  * Fails with an error when encountering unknown OXM headers.
  *
  * Returns 0 if successful, otherwise an OpenFlow error code. */
 enum ofperr
 oxm_pull_match(struct ofpbuf *b, const struct tun_table *tun_table,
-               struct match *match)
+               const struct vl_mff_map *vl_mff_map, struct match *match)
 {
-    return oxm_pull_match__(b, true, tun_table, match);
+    return oxm_pull_match__(b, true, tun_table, vl_mff_map, match);
 }
 
-/* Behaves the same as oxm_pull_match() with one exception.  Skips over unknown
- * OXM headers instead of failing with an error when they are encountered. */
+/* Behaves the same as oxm_pull_match() with two exceptions.  Skips over
+ * unknown OXM headers instead of failing with an error when they are
+ * encountered, and does not check for field prerequisities. */
 enum ofperr
 oxm_pull_match_loose(struct ofpbuf *b, const struct tun_table *tun_table,
                      struct match *match)
 {
-    return oxm_pull_match__(b, false, tun_table, match);
+    return oxm_pull_match__(b, false, tun_table, NULL, match);
 }
 
 /* Parses the OXM match description in the 'oxm_len' bytes in 'oxm'.  Stores
  * the result in 'match'.
  *
- * Fails with an error when encountering unknown OXM headers.
+ * Returns 0 if successful, otherwise an OpenFlow error code.
  *
- * Returns 0 if successful, otherwise an OpenFlow error code. */
+ * If 'loose' is true, encountering unknown OXM headers or missing field
+ * prerequisites are not considered as error conditions.
+ */
 enum ofperr
-oxm_decode_match(const void *oxm, size_t oxm_len,
-                 const struct tun_table *tun_table, struct match *match)
+oxm_decode_match(const void *oxm, size_t oxm_len, bool loose,
+                 const struct tun_table *tun_table,
+                 const struct vl_mff_map *vl_mff_map, struct match *match)
 {
-    return nx_pull_raw(oxm, oxm_len, true, match, NULL, NULL, tun_table);
+    return nx_pull_raw(oxm, oxm_len, !loose, match, NULL, NULL, tun_table,
+                       vl_mff_map);
 }
 
 /* Verify an array of OXM TLVs treating value of each TLV as a mask,
@@ -668,7 +723,8 @@ oxm_pull_field_array(const void *fields_data, size_t fields_len,
         enum ofperr error;
         uint64_t header;
 
-        error = nx_pull_entry__(&b, false, &header, &field, &value, NULL);
+        error = nx_pull_entry__(&b, false, NULL, &header, &field, &value,
+                                NULL);
         if (error) {
             VLOG_DBG_RL(&rl, "error pulling field array field");
             return error;
@@ -930,7 +986,7 @@ nx_put_raw(struct ofpbuf *b, enum ofp_version oxm, const struct match *match,
     int match_len;
     int i;
 
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 36);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 38);
 
     /* Metadata. */
     if (match->wc.masks.dp_hash) {
@@ -973,8 +1029,8 @@ nx_put_raw(struct ofpbuf *b, enum ofp_version oxm, const struct match *match,
     /* 802.1Q. */
     if (oxm) {
         ovs_be16 VID_CFI_MASK = htons(VLAN_VID_MASK | VLAN_CFI);
-        ovs_be16 vid = flow->vlan_tci & VID_CFI_MASK;
-        ovs_be16 mask = match->wc.masks.vlan_tci & VID_CFI_MASK;
+        ovs_be16 vid = flow->vlans[0].tci & VID_CFI_MASK;
+        ovs_be16 mask = match->wc.masks.vlans[0].tci & VID_CFI_MASK;
 
         if (mask == htons(VLAN_VID_MASK | VLAN_CFI)) {
             nxm_put_16(b, MFF_VLAN_VID, oxm, vid);
@@ -982,14 +1038,14 @@ nx_put_raw(struct ofpbuf *b, enum ofp_version oxm, const struct match *match,
             nxm_put_16m(b, MFF_VLAN_VID, oxm, vid, mask);
         }
 
-        if (vid && vlan_tci_to_pcp(match->wc.masks.vlan_tci)) {
+        if (vid && vlan_tci_to_pcp(match->wc.masks.vlans[0].tci)) {
             nxm_put_8(b, MFF_VLAN_PCP, oxm,
-                      vlan_tci_to_pcp(flow->vlan_tci));
+                      vlan_tci_to_pcp(flow->vlans[0].tci));
         }
 
     } else {
-        nxm_put_16m(b, MFF_VLAN_TCI, oxm, flow->vlan_tci,
-                    match->wc.masks.vlan_tci);
+        nxm_put_16m(b, MFF_VLAN_TCI, oxm, flow->vlans[0].tci,
+                    match->wc.masks.vlans[0].tci);
     }
 
     /* MPLS. */
@@ -1078,7 +1134,21 @@ nx_put_raw(struct ofpbuf *b, enum ofp_version oxm, const struct match *match,
                 htonl(match->wc.masks.ct_mark));
     nxm_put_128m(b, MFF_CT_LABEL, oxm, hton128(flow->ct_label),
                  hton128(match->wc.masks.ct_label));
-
+    nxm_put_32m(b, MFF_CT_NW_SRC, oxm,
+                flow->ct_nw_src, match->wc.masks.ct_nw_src);
+    nxm_put_ipv6(b, MFF_CT_IPV6_SRC, oxm,
+                 &flow->ct_ipv6_src, &match->wc.masks.ct_ipv6_src);
+    nxm_put_32m(b, MFF_CT_NW_DST, oxm,
+                flow->ct_nw_dst, match->wc.masks.ct_nw_dst);
+    nxm_put_ipv6(b, MFF_CT_IPV6_DST, oxm,
+                 &flow->ct_ipv6_dst, &match->wc.masks.ct_ipv6_dst);
+    if (flow->ct_nw_proto) {
+        nxm_put_8(b, MFF_CT_NW_PROTO, oxm, flow->ct_nw_proto);
+        nxm_put_16m(b, MFF_CT_TP_SRC, oxm,
+                    flow->ct_tp_src, match->wc.masks.ct_tp_src);
+        nxm_put_16m(b, MFF_CT_TP_DST, oxm,
+                    flow->ct_tp_dst, match->wc.masks.ct_tp_dst);
+    }
     /* OpenFlow 1.1+ Metadata. */
     nxm_put_64m(b, MFF_METADATA, oxm,
                 flow->metadata, match->wc.masks.metadata);
@@ -1267,6 +1337,16 @@ nx_put_header(struct ofpbuf *b, enum mf_field_id field,
     nx_put_header__(b, mf_oxm_header(field, version), masked);
 }
 
+void nx_put_mff_header(struct ofpbuf *b, const struct mf_field *mff,
+                       enum ofp_version version, bool masked)
+{
+    if (mff->mapped) {
+        nx_put_header_len(b, mff->id, version, masked, mff->n_bytes);
+    } else {
+        nx_put_header(b, mff->id, version, masked);
+    }
+}
+
 static void
 nx_put_header_len(struct ofpbuf *b, enum mf_field_id field,
                   enum ofp_version version, bool masked, size_t n_bytes)
@@ -1281,18 +1361,17 @@ nx_put_header_len(struct ofpbuf *b, enum mf_field_id field,
 }
 
 void
-nx_put_entry(struct ofpbuf *b,
-             enum mf_field_id field, enum ofp_version version,
-             const union mf_value *value, const union mf_value *mask)
+nx_put_entry(struct ofpbuf *b, const struct mf_field *mff,
+             enum ofp_version version, const union mf_value *value,
+             const union mf_value *mask)
 {
-    const struct mf_field *mf = mf_from_id(field);
     bool masked;
     int len, offset;
 
-    len = mf_field_len(mf, value, mask, &masked);
-    offset = mf->n_bytes - len;
+    len = mf_field_len(mff, value, mask, &masked);
+    offset = mff->n_bytes - len;
 
-    nx_put_header_len(b, field, version, masked, len);
+    nx_put_header_len(b, mff->id, version, masked, len);
     ofpbuf_put(b, &value->u8 + offset, len);
     if (masked) {
         ofpbuf_put(b, &mask->u8 + offset, len);
@@ -1319,7 +1398,7 @@ nx_match_to_string(const uint8_t *p, unsigned int match_len)
         uint64_t header;
         int value_len;
 
-        error = nx_pull_entry__(&b, true, &header, NULL, &value, &mask);
+        error = nx_pull_entry__(&b, true, NULL, &header, NULL, &value, &mask);
         if (error) {
             break;
         }
@@ -1505,7 +1584,7 @@ nx_match_from_string_raw(const char *s, struct ofpbuf *b)
         b->header = ofpbuf_put_uninit(b, nxm_header_len(header));
         s = ofpbuf_put_hex(b, s, &n);
         if (n != nxm_field_bytes(header)) {
-            const struct mf_field *field = mf_from_oxm_header(header);
+            const struct mf_field *field = mf_from_oxm_header(header, NULL);
 
             if (field && field->variable_len) {
                 if (n <= field->n_bytes) {
@@ -1621,16 +1700,17 @@ nxm_format_reg_move(const struct ofpact_reg_move *move, struct ds *s)
 
 
 enum ofperr
-nxm_reg_move_check(const struct ofpact_reg_move *move, const struct flow *flow)
+nxm_reg_move_check(const struct ofpact_reg_move *move,
+                   const struct match *match)
 {
     enum ofperr error;
 
-    error = mf_check_src(&move->src, flow);
+    error = mf_check_src(&move->src, match);
     if (error) {
         return error;
     }
 
-    return mf_check_dst(&move->dst, flow);
+    return mf_check_dst(&move->dst, match);
 }
 
 /* nxm_execute_reg_move(). */
@@ -1692,37 +1772,64 @@ nxm_format_stack_pop(const struct ofpact_stack *pop, struct ds *s)
 
 enum ofperr
 nxm_stack_push_check(const struct ofpact_stack *push,
-                     const struct flow *flow)
+                     const struct match *match)
 {
-    return mf_check_src(&push->subfield, flow);
+    return mf_check_src(&push->subfield, match);
 }
 
 enum ofperr
 nxm_stack_pop_check(const struct ofpact_stack *pop,
-                    const struct flow *flow)
+                    const struct match *match)
 {
-    return mf_check_dst(&pop->subfield, flow);
+    return mf_check_dst(&pop->subfield, match);
 }
 
-/* nxm_execute_stack_push(), nxm_execute_stack_pop(). */
-static void
-nx_stack_push(struct ofpbuf *stack, union mf_subvalue *v)
+/* nxm_execute_stack_push(), nxm_execute_stack_pop().
+ *
+ * A stack is an ofpbuf with 'data' pointing to the bottom of the stack and
+ * 'size' indexing the top of the stack.  Each value of some byte length is
+ * stored to the stack immediately followed by the length of the value as an
+ * unsigned byte.  This way a POP operation can first read the length byte, and
+ * then the appropriate number of bytes from the stack.  This also means that
+ * it is only possible to traverse the stack from top to bottom.  It is
+ * possible, however, to push values also to the bottom of the stack, which is
+ * useful when a stack has been serialized to a wire format in reverse order
+ * (topmost value first).
+ */
+
+/* Push value 'v' of length 'bytes' to the top of 'stack'. */
+void
+nx_stack_push(struct ofpbuf *stack, const void *v, uint8_t bytes)
 {
-    ofpbuf_put(stack, v, sizeof *v);
+    ofpbuf_put(stack, v, bytes);
+    ofpbuf_put(stack, &bytes, sizeof bytes);
 }
 
-static union mf_subvalue *
-nx_stack_pop(struct ofpbuf *stack)
+/* Push value 'v' of length 'bytes' to the bottom of 'stack'. */
+void
+nx_stack_push_bottom(struct ofpbuf *stack, const void *v, uint8_t bytes)
 {
-    union mf_subvalue *v = NULL;
+    ofpbuf_push(stack, &bytes, sizeof bytes);
+    ofpbuf_push(stack, v, bytes);
+}
 
-    if (stack->size) {
-
-        stack->size -= sizeof *v;
-        v = (union mf_subvalue *) ofpbuf_tail(stack);
+/* Pop the topmost value from 'stack', returning a pointer to the value in the
+ * stack and the length of the value in '*bytes'.  In case of underflow a NULL
+ * is returned and length is returned as zero via '*bytes'. */
+void *
+nx_stack_pop(struct ofpbuf *stack, uint8_t *bytes)
+{
+    if (!stack->size) {
+        *bytes = 0;
+        return NULL;
     }
 
-    return v;
+    stack->size -= sizeof *bytes;
+    memcpy(bytes, ofpbuf_tail(stack), sizeof *bytes);
+
+    ovs_assert(stack->size >= *bytes);
+    stack->size -= *bytes;
+    return ofpbuf_tail(stack);
 }
 
 void
@@ -1730,39 +1837,41 @@ nxm_execute_stack_push(const struct ofpact_stack *push,
                        const struct flow *flow, struct flow_wildcards *wc,
                        struct ofpbuf *stack)
 {
-    union mf_subvalue mask_value;
     union mf_subvalue dst_value;
 
-    memset(&mask_value, 0xff, sizeof mask_value);
-    mf_write_subfield_flow(&push->subfield, &mask_value, &wc->masks);
+    mf_write_subfield_flow(&push->subfield,
+                           (union mf_subvalue *)&exact_match_mask,
+                           &wc->masks);
 
     mf_read_subfield(&push->subfield, flow, &dst_value);
-    nx_stack_push(stack, &dst_value);
+    uint8_t bytes = DIV_ROUND_UP(push->subfield.n_bits, 8);
+    nx_stack_push(stack, &dst_value.u8[sizeof dst_value - bytes], bytes);
 }
 
-void
+bool
 nxm_execute_stack_pop(const struct ofpact_stack *pop,
                       struct flow *flow, struct flow_wildcards *wc,
                       struct ofpbuf *stack)
 {
-    union mf_subvalue *src_value;
+    uint8_t src_bytes;
+    const void *src = nx_stack_pop(stack, &src_bytes);
+    if (src) {
+        union mf_subvalue src_value;
+        uint8_t dst_bytes = DIV_ROUND_UP(pop->subfield.n_bits, 8);
 
-    src_value = nx_stack_pop(stack);
-
-    /* Only pop if stack is not empty. Otherwise, give warning. */
-    if (src_value) {
-        union mf_subvalue mask_value;
-
-        memset(&mask_value, 0xff, sizeof mask_value);
-        mf_write_subfield_flow(&pop->subfield, &mask_value, &wc->masks);
-        mf_write_subfield_flow(&pop->subfield, src_value, flow);
-    } else {
-        if (!VLOG_DROP_WARN(&rl)) {
-            char *flow_str = flow_to_string(flow);
-            VLOG_WARN_RL(&rl, "Failed to pop from an empty stack. On flow\n"
-                           " %s", flow_str);
-            free(flow_str);
+        if (src_bytes < dst_bytes) {
+            memset(&src_value.u8[sizeof src_value - dst_bytes], 0,
+                   dst_bytes - src_bytes);
         }
+        memcpy(&src_value.u8[sizeof src_value - src_bytes], src, src_bytes);
+        mf_write_subfield_flow(&pop->subfield,
+                               (union mf_subvalue *)&exact_match_mask,
+                               &wc->masks);
+        mf_write_subfield_flow(&pop->subfield, &src_value, flow);
+        return true;
+    } else {
+        /* Attempted to pop from an empty stack. */
+        return false;
     }
 }
 
@@ -1812,7 +1921,7 @@ mf_parse_subfield_name(const char *name, int name_len, bool *wild)
 char * OVS_WARN_UNUSED_RESULT
 mf_parse_subfield__(struct mf_subfield *sf, const char **sp)
 {
-    const struct mf_field *field;
+    const struct mf_field *field = NULL;
     const struct nxm_field *f;
     const char *name;
     int start, end;
@@ -1822,30 +1931,31 @@ mf_parse_subfield__(struct mf_subfield *sf, const char **sp)
 
     s = *sp;
     name = s;
-    name_len = strcspn(s, "[");
-    if (s[name_len] != '[') {
-        return xasprintf("%s: missing [ looking for field name", *sp);
-    }
+    name_len = strcspn(s, "[-");
 
     f = mf_parse_subfield_name(name, name_len, &wild);
-    if (!f) {
+    field = f ? mf_from_id(f->id) : mf_from_name_len(name, name_len);
+    if (!field) {
         return xasprintf("%s: unknown field `%.*s'", *sp, name_len, s);
     }
-    field = mf_from_id(f->id);
 
     s += name_len;
-    if (ovs_scan(s, "[%d..%d]", &start, &end)) {
-        /* Nothing to do. */
-    } else if (ovs_scan(s, "[%d]", &start)) {
-        end = start;
-    } else if (!strncmp(s, "[]", 2)) {
-        start = 0;
-        end = field->n_bits - 1;
-    } else {
-        return xasprintf("%s: syntax error expecting [] or [<bit>] or "
-                         "[<start>..<end>]", *sp);
+    /* Assume full field. */
+    start = 0;
+    end = field->n_bits - 1;
+    if (*s == '[') {
+        if (!strncmp(s, "[]", 2)) {
+            /* Nothing to do. */
+        } else if (ovs_scan(s, "[%d..%d]", &start, &end)) {
+            /* Nothing to do. */
+        } else if (ovs_scan(s, "[%d]", &start)) {
+            end = start;
+        } else {
+            return xasprintf("%s: syntax error expecting [] or [<bit>] or "
+                             "[<start>..<end>]", *sp);
+        }
+        s = strchr(s, ']') + 1;
     }
-    s = strchr(s, ']') + 1;
 
     if (start > end) {
         return xasprintf("%s: starting bit %d is after ending bit %d",

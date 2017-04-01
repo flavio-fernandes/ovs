@@ -1,4 +1,4 @@
-/* Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2016 Nicira, Inc.
+/* Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -139,13 +139,13 @@ static void load_config(FILE *config_file, struct sset *remotes,
 
 static void
 ovsdb_replication_init(const char *sync_from, const char *exclude,
-                       struct shash *all_dbs)
+                       struct shash *all_dbs, const struct uuid *server_uuid)
 {
-    replication_init(sync_from, exclude);
+    replication_init(sync_from, exclude, server_uuid);
     struct shash_node *node;
     SHASH_FOR_EACH (node, all_dbs) {
         struct db *db = node->data;
-        replication_add_local_db(db->db->schema->name, db->db);
+        replication_add_local_db(node->name, db->db);
     }
 }
 
@@ -199,8 +199,8 @@ main_loop(struct ovsdb_jsonrpc_server *jsonrpc, struct shash *all_dbs,
         if (*is_backup) {
             replication_run();
             if (!replication_is_alive()) {
-                int retval = replication_get_last_error();
-                ovs_fatal(retval, "replication connection failed");
+                disconnect_active_server();
+                *is_backup = false;
             }
         }
 
@@ -425,7 +425,9 @@ main(int argc, char *argv[])
                              ovsdb_server_disable_monitor_cond, jsonrpc);
 
     if (is_backup) {
-        ovsdb_replication_init(sync_from, sync_exclude, &all_dbs);
+        const struct uuid *server_uuid;
+        server_uuid = ovsdb_jsonrpc_server_get_uuid(jsonrpc);
+        ovsdb_replication_init(sync_from, sync_exclude, &all_dbs, server_uuid);
     }
 
     main_loop(jsonrpc, &all_dbs, unixctl, &remotes, run_process, &exiting,
@@ -527,21 +529,6 @@ open_db(struct server_config *config, const char *filename)
     return error;
 }
 
-static const struct db *
-find_db(const struct shash *all_dbs, const char *db_name)
-{
-    struct shash_node *node;
-
-    SHASH_FOR_EACH (node, all_dbs) {
-        struct db *db = node->data;
-        if (!strcmp(db->db->schema->name, db_name)) {
-            return db;
-        }
-    }
-
-    return NULL;
-}
-
 static char * OVS_WARN_UNUSED_RESULT
 parse_db_column__(const struct shash *all_dbs,
                   const char *name_, char *name,
@@ -572,7 +559,7 @@ parse_db_column__(const struct shash *all_dbs,
     table_name = tokens[1];
     column_name = tokens[2];
 
-    db = find_db(all_dbs, tokens[0]);
+    db = shash_find_data(all_dbs, tokens[0]);
     if (!db) {
         return xasprintf("\"%s\": no database named %s", name_, db_name);
     }
@@ -1074,8 +1061,9 @@ update_remote_status(const struct ovsdb_jsonrpc_server *jsonrpc,
         db = node->data;
         error = ovsdb_txn_commit(db->txn, false);
         if (error) {
-            VLOG_ERR_RL(&rl, "Failed to update remote status: %s",
-                        ovsdb_error_to_string(error));
+            char *msg = ovsdb_error_to_string(error);
+            VLOG_ERR_RL(&rl, "Failed to update remote status: %s", msg);
+            free(msg);
             ovsdb_error_destroy(error);
         }
     }
@@ -1185,8 +1173,10 @@ ovsdb_server_connect_active_ovsdb_server(struct unixctl_conn *conn,
     if ( !*config->sync_from) {
         msg = "Unable to connect: active server is not specified.\n";
     } else {
+        const struct uuid *server_uuid;
+        server_uuid = ovsdb_jsonrpc_server_get_uuid(config->jsonrpc);
         ovsdb_replication_init(*config->sync_from, *config->sync_exclude,
-                               config->all_dbs);
+                               config->all_dbs, server_uuid);
         if (!*config->is_backup) {
             *config->is_backup = true;
             save_config(config);
@@ -1223,8 +1213,10 @@ ovsdb_server_set_sync_exclude_tables(struct unixctl_conn *conn,
         *config->sync_exclude = xstrdup(argv[1]);
         save_config(config);
         if (*config->is_backup) {
+            const struct uuid *server_uuid;
+            server_uuid = ovsdb_jsonrpc_server_get_uuid(config->jsonrpc);
             ovsdb_replication_init(*config->sync_from, *config->sync_exclude,
-                                   config->all_dbs);
+                                   config->all_dbs, server_uuid);
         }
         err = set_blacklist_tables(argv[1], false);
     }
@@ -1302,15 +1294,11 @@ ovsdb_server_compact(struct unixctl_conn *conn, int argc,
 
     ds_init(&reply);
     SHASH_FOR_EACH(node, all_dbs) {
-        const char *name;
-
         db = node->data;
-        name = db->db->schema->name;
-
-        if (argc < 2 || !strcmp(argv[1], name)) {
+        if (argc < 2 || !strcmp(argv[1], node->name)) {
             struct ovsdb_error *error;
 
-            VLOG_INFO("compacting %s database by user request", name);
+            VLOG_INFO("compacting %s database by user request", node->name);
 
             error = ovsdb_file_compact(db->file);
             if (error) {
@@ -1430,8 +1418,10 @@ ovsdb_server_add_database(struct unixctl_conn *conn, int argc OVS_UNUSED,
     if (!error) {
         save_config(config);
         if (*config->is_backup) {
+            const struct uuid *server_uuid;
+            server_uuid = ovsdb_jsonrpc_server_get_uuid(config->jsonrpc);
             ovsdb_replication_init(*config->sync_from, *config->sync_exclude,
-                                   config->all_dbs);
+                                   config->all_dbs, server_uuid);
         }
         unixctl_command_reply(conn, NULL);
     } else {
@@ -1464,8 +1454,10 @@ ovsdb_server_remove_database(struct unixctl_conn *conn, int argc OVS_UNUSED,
 
     save_config(config);
     if (*config->is_backup) {
+        const struct uuid *server_uuid;
+        server_uuid = ovsdb_jsonrpc_server_get_uuid(config->jsonrpc);
         ovsdb_replication_init(*config->sync_from, *config->sync_exclude,
-                               config->all_dbs);
+                               config->all_dbs, server_uuid);
     }
     unixctl_command_reply(conn, NULL);
 }
@@ -1483,8 +1475,7 @@ ovsdb_server_list_databases(struct unixctl_conn *conn, int argc OVS_UNUSED,
 
     nodes = shash_sort(all_dbs);
     for (i = 0; i < shash_count(all_dbs); i++) {
-        struct db *db = nodes[i]->data;
-        ds_put_format(&s, "%s\n", db->db->schema->name);
+        ds_put_format(&s, "%s\n", nodes[i]->name);
     }
     free(nodes);
 

@@ -14,8 +14,7 @@
 
 import errno
 import os
-
-import six
+import sys
 
 import ovs.json
 import ovs.poller
@@ -24,6 +23,8 @@ import ovs.stream
 import ovs.timeval
 import ovs.util
 import ovs.vlog
+
+import six
 
 EOF = ovs.util.EOF
 vlog = ovs.vlog.Vlog("jsonrpc")
@@ -274,6 +275,11 @@ class Connection(object):
                     except UnicodeError:
                         error = errno.EILSEQ
                 if error:
+                    if (sys.platform == "win32" and
+                            error == errno.WSAEWOULDBLOCK):
+                        # WSAEWOULDBLOCK would be the equivalent on Windows
+                        # for EAGAIN on Unix.
+                        error = errno.EAGAIN
                     if error == errno.EAGAIN:
                         return error, None
                     else:

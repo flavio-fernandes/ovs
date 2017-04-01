@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -58,6 +58,9 @@ static struct hmap *const all_bonds OVS_GUARDED_BY(rwlock) = &all_bonds__;
 /* Bit-mask for hashing a flow down to a bucket. */
 #define BOND_MASK 0xff
 #define BOND_BUCKETS (BOND_MASK + 1)
+
+/* Priority for internal rules created to handle recirculation */
+#define RECIRC_RULE_PRIORITY 20
 
 /* A hash bucket for mapping a flow to a slave.
  * "struct bond" has an array of BOND_BUCKETS of these. */
@@ -187,6 +190,7 @@ static struct bond_slave *choose_output_slave(const struct bond *,
                                               struct flow_wildcards *,
                                               uint16_t vlan)
     OVS_REQ_RDLOCK(rwlock);
+static void update_recirc_rules__(struct bond *bond);
 
 /* Attempts to parse 's' as the name of a bond balancing mode.  If successful,
  * stores the mode in '*balance' and returns true.  Otherwise returns false
@@ -239,6 +243,9 @@ bond_create(const struct bond_settings *s, struct ofproto_dpif *ofproto)
     ovs_refcount_init(&bond->ref_cnt);
     hmap_init(&bond->pr_rule_ops);
 
+    bond->active_slave_mac = eth_addr_zero;
+    bond->active_slave_changed = false;
+
     bond_reconfigure(bond, s);
     return bond;
 }
@@ -258,7 +265,6 @@ bond_ref(const struct bond *bond_)
 void
 bond_unref(struct bond *bond)
 {
-    struct bond_pr_rule_op *pr_op;
     struct bond_slave *slave;
 
     if (!bond || ovs_refcount_unref_relaxed(&bond->ref_cnt) != 1) {
@@ -277,18 +283,18 @@ bond_unref(struct bond *bond)
     hmap_destroy(&bond->slaves);
 
     ovs_mutex_destroy(&bond->mutex);
-    free(bond->hash);
-    free(bond->name);
 
-    HMAP_FOR_EACH_POP (pr_op, hmap_node, &bond->pr_rule_ops) {
-        free(pr_op);
-    }
-    hmap_destroy(&bond->pr_rule_ops);
-
+    /* Free bond resources. Remove existing post recirc rules. */
     if (bond->recirc_id) {
         recirc_free_id(bond->recirc_id);
+        bond->recirc_id = 0;
     }
+    free(bond->hash);
+    bond->hash = NULL;
+    update_recirc_rules__(bond);
 
+    hmap_destroy(&bond->pr_rule_ops);
+    free(bond->name);
     free(bond);
 }
 
@@ -316,9 +322,17 @@ add_pr_rule(struct bond *bond, const struct match *match,
     hmap_insert(&bond->pr_rule_ops, &pr_op->hmap_node, hash);
 }
 
+/* This function should almost never be called directly.
+ * 'update_recirc_rules()' should be called instead.  Since
+ * this function modifies 'bond->pr_rule_ops', it is only
+ * safe when 'rwlock' is held.
+ *
+ * However, when the 'bond' is the only reference in the system,
+ * calling this function avoid acquiring lock only to satisfy
+ * lock annotation. Currently, only 'bond_unref()' calls
+ * this function directly.  */
 static void
-update_recirc_rules(struct bond *bond)
-    OVS_REQ_WRLOCK(rwlock)
+update_recirc_rules__(struct bond *bond)
 {
     struct match match;
     struct bond_pr_rule_op *pr_op, *next_op;
@@ -388,6 +402,12 @@ update_recirc_rules(struct bond *bond)
     ofpbuf_uninit(&ofpacts);
 }
 
+static void
+update_recirc_rules(struct bond *bond)
+    OVS_REQ_RDLOCK(rwlock)
+{
+    update_recirc_rules__(bond);
+}
 
 /* Updates 'bond''s overall configuration to 's'.
  *
@@ -454,9 +474,6 @@ bond_reconfigure(struct bond *bond, const struct bond_settings *s)
         bond_entry_reset(bond);
     }
 
-    bond->active_slave_mac = s->active_slave_mac;
-    bond->active_slave_changed = false;
-
     ovs_rwlock_unlock(&rwlock);
     return revalidate;
 }
@@ -485,10 +502,13 @@ bond_find_slave_by_mac(const struct bond *bond, const struct eth_addr mac)
 static void
 bond_active_slave_changed(struct bond *bond)
 {
-    struct eth_addr mac;
-
-    netdev_get_etheraddr(bond->active_slave->netdev, &mac);
-    bond->active_slave_mac = mac;
+    if (bond->active_slave) {
+        struct eth_addr mac;
+        netdev_get_etheraddr(bond->active_slave->netdev, &mac);
+        bond->active_slave_mac = mac;
+    } else {
+        bond->active_slave_mac = eth_addr_zero;
+    }
     bond->active_slave_changed = true;
     seq_change(connectivity_seq_get());
 }
@@ -783,7 +803,11 @@ bond_check_admissibility(struct bond *bond, const void *slave_,
         if (!bond->lacp_fallback_ab) {
             goto out;
         }
+        break;
     case LACP_DISABLED:
+        if (bond->balance == BM_TCP) {
+            goto out;
+        }
         break;
     }
 
@@ -903,20 +927,9 @@ bond_recirculation_account(struct bond *bond)
 }
 
 bool
-bond_may_recirc(const struct bond *bond, uint32_t *recirc_id,
-                uint32_t *hash_bias)
+bond_may_recirc(const struct bond *bond)
 {
-    if (bond->balance == BM_TCP && bond->recirc_id) {
-        if (recirc_id) {
-            *recirc_id = bond->recirc_id;
-        }
-        if (hash_bias) {
-            *hash_bias = bond->basis;
-        }
-        return true;
-    } else {
-        return false;
-    }
+    return bond->balance == BM_TCP && bond->recirc_id;
 }
 
 static void
@@ -944,12 +957,20 @@ bond_update_post_recirc_rules__(struct bond* bond, const bool force)
 }
 
 void
-bond_update_post_recirc_rules(struct bond* bond, const bool force)
+bond_update_post_recirc_rules(struct bond *bond, uint32_t *recirc_id,
+                              uint32_t *hash_basis)
 {
     ovs_rwlock_wrlock(&rwlock);
-    bond_update_post_recirc_rules__(bond, force);
+    if (bond_may_recirc(bond)) {
+        *recirc_id = bond->recirc_id;
+        *hash_basis = bond->basis;
+        bond_update_post_recirc_rules__(bond, false);
+    } else {
+        *recirc_id = *hash_basis = 0;
+    }
     ovs_rwlock_unlock(&rwlock);
 }
+
 
 /* Rebalancing. */
 
@@ -1131,8 +1152,8 @@ bond_rebalance(struct bond *bond)
     }
     bond->next_rebalance = time_msec() + bond->rebalance_interval;
 
-    use_recirc = ofproto_dpif_get_support(bond->ofproto)->odp.recirc &&
-                 bond_may_recirc(bond, NULL, NULL);
+    use_recirc = bond->ofproto->backer->support.odp.recirc &&
+                 bond_may_recirc(bond);
 
     if (use_recirc) {
         bond_recirculation_account(bond);
@@ -1292,7 +1313,8 @@ bond_print_details(struct ds *ds, const struct bond *bond)
     ds_put_format(ds, "bond_mode: %s\n",
                   bond_mode_to_string(bond->balance));
 
-    may_recirc = bond_may_recirc(bond, &recirc_id, NULL);
+    may_recirc = bond_may_recirc(bond);
+    recirc_id = bond->recirc_id;
     ds_put_format(ds, "bond may use recirculation: %s, Recirc-ID : %d\n",
                   may_recirc ? "yes" : "no", may_recirc ? recirc_id: -1);
 
@@ -1321,6 +1343,9 @@ bond_print_details(struct ds *ds, const struct bond *bond)
         ds_put_cstr(ds, "<unknown>\n");
         break;
     }
+
+    ds_put_format(ds, "lacp_fallback_ab: %s\n",
+                  bond->lacp_fallback_ab ? "true" : "false");
 
     ds_put_cstr(ds, "active slave mac: ");
     ds_put_format(ds, ETH_ADDR_FMT, ETH_ADDR_ARGS(bond->active_slave_mac));
@@ -1624,6 +1649,8 @@ bond_entry_reset(struct bond *bond)
     } else {
         free(bond->hash);
         bond->hash = NULL;
+        /* Remove existing post recirc rules. */
+        update_recirc_rules(bond);
     }
 }
 
@@ -1708,7 +1735,7 @@ static unsigned int
 bond_hash_tcp(const struct flow *flow, uint16_t vlan, uint32_t basis)
 {
     struct flow hash_flow = *flow;
-    hash_flow.vlan_tci = htons(vlan);
+    hash_flow.vlans[0].tci = htons(vlan);
 
     /* The symmetric quality of this hash function is not required, but
      * flow_hash_symmetric_l4 already exists, and is sufficient for our
@@ -1856,6 +1883,7 @@ bond_choose_active_slave(struct bond *bond)
             bond_active_slave_changed(bond);
         }
     } else if (old_active_slave) {
+        bond_active_slave_changed(bond);
         VLOG_INFO_RL(&rl, "bond %s: all interfaces disabled", bond->name);
     }
 }

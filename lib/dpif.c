@@ -63,6 +63,9 @@ COVERAGE_DEFINE(dpif_flow_del);
 COVERAGE_DEFINE(dpif_execute);
 COVERAGE_DEFINE(dpif_purge);
 COVERAGE_DEFINE(dpif_execute_with_help);
+COVERAGE_DEFINE(dpif_meter_set);
+COVERAGE_DEFINE(dpif_meter_get);
+COVERAGE_DEFINE(dpif_meter_del);
 
 static const struct dpif_class *base_dpif_classes[] = {
 #if defined(__linux__) || defined(_WIN32)
@@ -602,7 +605,7 @@ bool
 dpif_port_exists(const struct dpif *dpif, const char *devname)
 {
     int error = dpif->dpif_class->port_query_by_name(dpif, devname, NULL);
-    if (error != 0 && error != ENOENT && error != ENODEV) {
+    if (error != 0 && error != ENODEV) {
         VLOG_WARN_RL(&error_rl, "%s: failed to query port %s: %s",
                      dpif_name(dpif), devname, ovs_strerror(error));
     }
@@ -631,6 +634,8 @@ dpif_port_set_config(struct dpif *dpif, odp_port_t port_no,
  * initializes '*port' appropriately; on failure, returns a positive errno
  * value.
  *
+ * Retuns ENODEV if the port doesn't exist.
+ *
  * The caller owns the data in 'port' and must free it with
  * dpif_port_destroy() when it is no longer needed. */
 int
@@ -653,6 +658,8 @@ dpif_port_query_by_number(const struct dpif *dpif, odp_port_t port_no,
  * initializes '*port' appropriately; on failure, returns a positive errno
  * value.
  *
+ * Retuns ENODEV if the port doesn't exist.
+ *
  * The caller owns the data in 'port' and must free it with
  * dpif_port_destroy() when it is no longer needed. */
 int
@@ -666,12 +673,11 @@ dpif_port_query_by_name(const struct dpif *dpif, const char *devname,
     } else {
         memset(port, 0, sizeof *port);
 
-        /* For ENOENT or ENODEV we use DBG level because the caller is probably
+        /* For ENODEV we use DBG level because the caller is probably
          * interested in whether 'dpif' actually has a port 'devname', so that
          * it's not an issue worth logging if it doesn't.  Other errors are
          * uncommon and more likely to indicate a real problem. */
-        VLOG_RL(&error_rl,
-                error == ENOENT || error == ENODEV ? VLL_DBG : VLL_WARN,
+        VLOG_RL(&error_rl, error == ENODEV ? VLL_DBG : VLL_WARN,
                 "%s: failed to query port %s: %s",
                 dpif_name(dpif), devname, ovs_strerror(error));
     }
@@ -891,22 +897,26 @@ dpif_flow_flush(struct dpif *dpif)
  */
 bool
 dpif_probe_feature(struct dpif *dpif, const char *name,
-                   const struct ofpbuf *key, const ovs_u128 *ufid)
+                   const struct ofpbuf *key, const struct ofpbuf *actions,
+                   const ovs_u128 *ufid)
 {
     struct dpif_flow flow;
     struct ofpbuf reply;
     uint64_t stub[DPIF_FLOW_BUFSIZE / 8];
     bool enable_feature = false;
     int error;
+    const struct nlattr *nl_actions = actions ? actions->data : NULL;
+    const size_t nl_actions_size = actions ? actions->size : 0;
 
     /* Use DPIF_FP_MODIFY to cover the case where ovs-vswitchd is killed (and
      * restarted) at just the right time such that feature probes from the
      * previous run are still present in the datapath. */
     error = dpif_flow_put(dpif, DPIF_FP_CREATE | DPIF_FP_MODIFY | DPIF_FP_PROBE,
-                          key->data, key->size, NULL, 0, NULL, 0,
-                          ufid, PMD_ID_NULL, NULL);
+                          key->data, key->size, NULL, 0,
+                          nl_actions, nl_actions_size,
+                          ufid, NON_PMD_CORE_ID, NULL);
     if (error) {
-        if (error != EINVAL) {
+        if (error != EINVAL && error != EOVERFLOW) {
             VLOG_WARN("%s: %s flow probe failed (%s)",
                       dpif_name(dpif), name, ovs_strerror(error));
         }
@@ -915,7 +925,7 @@ dpif_probe_feature(struct dpif *dpif, const char *name,
 
     ofpbuf_use_stack(&reply, &stub, sizeof stub);
     error = dpif_flow_get(dpif, key->data, key->size, ufid,
-                          PMD_ID_NULL, &reply, &flow);
+                          NON_PMD_CORE_ID, &reply, &flow);
     if (!error
         && (!ufid || (flow.ufid_present
                       && ovs_u128_equals(*ufid, flow.ufid)))) {
@@ -923,7 +933,7 @@ dpif_probe_feature(struct dpif *dpif, const char *name,
     }
 
     error = dpif_flow_del(dpif, key->data, key->size, ufid,
-                          PMD_ID_NULL, NULL);
+                          NON_PMD_CORE_ID, NULL);
     if (error) {
         VLOG_WARN("%s: failed to delete %s feature probe flow",
                   dpif_name(dpif), name);
@@ -1098,22 +1108,29 @@ struct dpif_execute_helper_aux {
     struct dpif *dpif;
     const struct flow *flow;
     int error;
+    const struct nlattr *meter_action; /* Non-NULL, if have a meter action. */
 };
 
 /* This is called for actions that need the context of the datapath to be
  * meaningful. */
 static void
 dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
-                       const struct nlattr *action, bool may_steal OVS_UNUSED)
+                       const struct nlattr *action, bool may_steal)
 {
     struct dpif_execute_helper_aux *aux = aux_;
     int type = nl_attr_type(action);
     struct dp_packet *packet = packets_->packets[0];
-    struct dp_packet *trunc_packet = NULL, *orig_packet;
 
     ovs_assert(packets_->count == 1);
 
     switch ((enum ovs_action_attr)type) {
+    case OVS_ACTION_ATTR_METER:
+        /* Maintain a pointer to the first meter action seen. */
+        if (!aux->meter_action) {
+            aux->meter_action = action;
+        }
+	break;
+
     case OVS_ACTION_ATTR_CT:
     case OVS_ACTION_ATTR_OUTPUT:
     case OVS_ACTION_ATTR_TUNNEL_PUSH:
@@ -1124,16 +1141,36 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
         struct ofpbuf execute_actions;
         uint64_t stub[256 / 8];
         struct pkt_metadata *md = &packet->md;
-        bool dst_set, clone = false;
-        uint32_t cutlen = dp_packet_get_cutlen(packet);
 
-        dst_set = flow_tnl_dst_is_set(&md->tunnel);
-        if (dst_set) {
+        if (flow_tnl_dst_is_set(&md->tunnel) || aux->meter_action) {
+            ofpbuf_use_stub(&execute_actions, stub, sizeof stub);
+
+            if (aux->meter_action) {
+                const struct nlattr *a = aux->meter_action;
+
+                /* XXX: This code collects meter actions since the last action
+                 * execution via the datapath to be executed right before the
+                 * current action that needs to be executed by the datapath.
+                 * This is only an approximation, but better than nothing.
+                 * Fundamentally, we should have a mechanism by which the
+                 * datapath could return the result of the meter action so that
+                 * we could execute them at the right order. */
+                do {
+                    ofpbuf_put(&execute_actions, a, NLA_ALIGN(a->nla_len));
+                    /* Find next meter action before 'action', if any. */
+                    do {
+                        a = nl_attr_next(a);
+                    } while (a != action &&
+                             nl_attr_type(a) != OVS_ACTION_ATTR_METER);
+                } while (a != action);
+            }
+
             /* The Linux kernel datapath throws away the tunnel information
              * that we supply as metadata.  We have to use a "set" action to
              * supply it. */
-            ofpbuf_use_stub(&execute_actions, stub, sizeof stub);
-            odp_put_tunnel_action(&md->tunnel, &execute_actions);
+            if (md->tunnel.ip_dst) {
+                odp_put_tunnel_action(&md->tunnel, &execute_actions);
+            }
             ofpbuf_put(&execute_actions, action, NLA_ALIGN(action->nla_len));
 
             execute.actions = execute_actions.data;
@@ -1143,20 +1180,17 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
             execute.actions_len = NLA_ALIGN(action->nla_len);
         }
 
-        orig_packet = packet;
-
-        if (cutlen > 0 && (type == OVS_ACTION_ATTR_OUTPUT ||
-            type == OVS_ACTION_ATTR_TUNNEL_PUSH ||
-            type == OVS_ACTION_ATTR_TUNNEL_POP ||
-            type == OVS_ACTION_ATTR_USERSPACE)) {
+        struct dp_packet *clone = NULL;
+        uint32_t cutlen = dp_packet_get_cutlen(packet);
+        if (cutlen && (type == OVS_ACTION_ATTR_OUTPUT
+                        || type == OVS_ACTION_ATTR_TUNNEL_PUSH
+                        || type == OVS_ACTION_ATTR_TUNNEL_POP
+                        || type == OVS_ACTION_ATTR_USERSPACE)) {
+            dp_packet_reset_cutlen(packet);
             if (!may_steal) {
-                trunc_packet = dp_packet_clone(packet);
-                packet = trunc_packet;
-                clone = true;
+                packet = clone = dp_packet_clone(packet);
             }
-
             dp_packet_set_size(packet, dp_packet_size(packet) - cutlen);
-            dp_packet_reset_cutlen(orig_packet);
         }
 
         execute.packet = packet;
@@ -1167,12 +1201,13 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
         aux->error = dpif_execute(aux->dpif, &execute);
         log_execute_message(aux->dpif, &execute, true, aux->error);
 
-        if (dst_set) {
-            ofpbuf_uninit(&execute_actions);
-        }
+        dp_packet_delete(clone);
 
-        if (clone) {
-            dp_packet_delete(trunc_packet);
+        if (flow_tnl_dst_is_set(&md->tunnel) || aux->meter_action) {
+            ofpbuf_uninit(&execute_actions);
+
+            /* Do not re-use the same meters for later output actions. */
+            aux->meter_action = NULL;
         }
         break;
     }
@@ -1186,6 +1221,9 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
     case OVS_ACTION_ATTR_SET_MASKED:
     case OVS_ACTION_ATTR_SAMPLE:
     case OVS_ACTION_ATTR_TRUNC:
+    case OVS_ACTION_ATTR_PUSH_ETH:
+    case OVS_ACTION_ATTR_POP_ETH:
+    case OVS_ACTION_ATTR_CLONE:
     case OVS_ACTION_ATTR_UNSPEC:
     case __OVS_ACTION_ATTR_MAX:
         OVS_NOT_REACHED();
@@ -1200,12 +1238,12 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
 static int
 dpif_execute_with_help(struct dpif *dpif, struct dpif_execute *execute)
 {
-    struct dpif_execute_helper_aux aux = {dpif, execute->flow, 0};
+    struct dpif_execute_helper_aux aux = {dpif, execute->flow, 0, NULL};
     struct dp_packet_batch pb;
 
     COVERAGE_INC(dpif_execute_with_help);
 
-    packet_batch_init_packet(&pb, execute->packet);
+    dp_packet_batch_init_packet(&pb, execute->packet);
     odp_execute_actions(&aux, &pb, false, execute->actions,
                         execute->actions_len, dpif_execute_helper_cb);
     return aux.error;
@@ -1443,17 +1481,17 @@ dpif_print_packet(struct dpif *dpif, struct dpif_upcall *upcall)
     }
 }
 
-/* If 'dpif' creates its own I/O polling threads, refreshes poll threads
- * configuration. */
+/* Pass custom configuration to the datapath implementation.  Some of the
+ * changes can be postponed until dpif_run() is called. */
 int
-dpif_poll_threads_set(struct dpif *dpif, const char *cmask)
+dpif_set_config(struct dpif *dpif, const struct smap *cfg)
 {
     int error = 0;
 
-    if (dpif->dpif_class->poll_threads_set) {
-        error = dpif->dpif_class->poll_threads_set(dpif, cmask);
+    if (dpif->dpif_class->set_config) {
+        error = dpif->dpif_class->set_config(dpif, cfg);
         if (error) {
-            log_operation(dpif, "poll_threads_set", error);
+            log_operation(dpif, "set_config", error);
         }
     }
 
@@ -1759,4 +1797,88 @@ bool
 dpif_supports_tnl_push_pop(const struct dpif *dpif)
 {
     return dpif_is_netdev(dpif);
+}
+
+/* Meters */
+void
+dpif_meter_get_features(const struct dpif *dpif,
+                        struct ofputil_meter_features *features)
+{
+    memset(features, 0, sizeof *features);
+    if (dpif->dpif_class->meter_get_features) {
+        dpif->dpif_class->meter_get_features(dpif, features);
+    }
+}
+
+/* Adds or modifies meter identified by 'meter_id' in 'dpif'.  If '*meter_id'
+ * is UINT32_MAX, adds a new meter, otherwise modifies an existing meter.
+ *
+ * If meter is successfully added, sets '*meter_id' to the new meter's
+ * meter number. */
+int
+dpif_meter_set(struct dpif *dpif, ofproto_meter_id *meter_id,
+               struct ofputil_meter_config *config)
+{
+    int error;
+
+    COVERAGE_INC(dpif_meter_set);
+
+    error = dpif->dpif_class->meter_set(dpif, meter_id, config);
+    if (!error) {
+        VLOG_DBG_RL(&dpmsg_rl, "%s: DPIF meter %"PRIu32" set",
+                    dpif_name(dpif), meter_id->uint32);
+    } else {
+        VLOG_WARN_RL(&error_rl, "%s: failed to set DPIF meter %"PRIu32": %s",
+                     dpif_name(dpif), meter_id->uint32, ovs_strerror(error));
+        meter_id->uint32 = UINT32_MAX;
+    }
+    return error;
+}
+
+int
+dpif_meter_get(const struct dpif *dpif, ofproto_meter_id meter_id,
+               struct ofputil_meter_stats *stats, uint16_t n_bands)
+{
+    int error;
+
+    COVERAGE_INC(dpif_meter_get);
+
+    error = dpif->dpif_class->meter_get(dpif, meter_id, stats, n_bands);
+    if (!error) {
+        VLOG_DBG_RL(&dpmsg_rl, "%s: DPIF meter %"PRIu32" get stats",
+                    dpif_name(dpif), meter_id.uint32);
+    } else {
+        VLOG_WARN_RL(&error_rl,
+                     "%s: failed to get DPIF meter %"PRIu32" stats: %s",
+                     dpif_name(dpif), meter_id.uint32, ovs_strerror(error));
+        stats->packet_in_count = ~0;
+        stats->byte_in_count = ~0;
+        stats->n_bands = 0;
+    }
+    return error;
+}
+
+int
+dpif_meter_del(struct dpif *dpif, ofproto_meter_id meter_id,
+               struct ofputil_meter_stats *stats, uint16_t n_bands)
+{
+    int error;
+
+    COVERAGE_INC(dpif_meter_del);
+
+    error = dpif->dpif_class->meter_del(dpif, meter_id, stats, n_bands);
+    if (!error) {
+        VLOG_DBG_RL(&dpmsg_rl, "%s: DPIF meter %"PRIu32" deleted",
+                    dpif_name(dpif), meter_id.uint32);
+    } else {
+        VLOG_WARN_RL(&error_rl,
+                     "%s: failed to delete DPIF meter %"PRIu32": %s",
+                     dpif_name(dpif), meter_id.uint32, ovs_strerror(error));
+        if (stats) {
+            stats->packet_in_count = ~0;
+            stats->byte_in_count = ~0;
+            stats->n_bands = 0;
+        }
+    }
+    return error;
 }

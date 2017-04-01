@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2008-2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@
 struct ofpbuf;
 union ofp_action;
 struct ofpact_set_field;
+struct vl_mff_map;
 
 /* Port numbers. */
 enum ofperr ofputil_port_from_ofp11(ovs_be32 ofp11_port,
@@ -221,7 +222,7 @@ void ofputil_match_to_ofp10_match(const struct match *, struct ofp10_match *);
 
 /* Work with ofp11_match. */
 enum ofperr ofputil_pull_ofp11_match(struct ofpbuf *, const struct tun_table *,
-                                     struct match *,
+                                     const struct vl_mff_map *, struct match *,
                                      uint16_t *padded_match_len);
 enum ofperr ofputil_pull_ofp11_mask(struct ofpbuf *, struct match *,
                                     struct mf_bitmap *bm);
@@ -325,12 +326,14 @@ struct ofputil_flow_mod {
     uint16_t importance;     /* Eviction precedence. */
     struct ofpact *ofpacts;  /* Series of "struct ofpact"s. */
     size_t ofpacts_len;      /* Length of ofpacts, in bytes. */
+    uint64_t ofpacts_tlv_bitmap; /* 1-bit for each present TLV in 'ofpacts'. */
 };
 
 enum ofperr ofputil_decode_flow_mod(struct ofputil_flow_mod *,
                                     const struct ofp_header *,
                                     enum ofputil_protocol,
                                     const struct tun_table *,
+                                    const struct vl_mff_map *,
                                     struct ofpbuf *ofpacts,
                                     ofp_port_t max_port,
                                     uint8_t max_table);
@@ -350,7 +353,7 @@ struct ofputil_flow_stats_request {
 
 enum ofperr ofputil_decode_flow_stats_request(
     struct ofputil_flow_stats_request *, const struct ofp_header *,
-    const struct tun_table *);
+    const struct tun_table *, const struct vl_mff_map *);
 struct ofpbuf *ofputil_encode_flow_stats_request(
     const struct ofputil_flow_stats_request *, enum ofputil_protocol);
 
@@ -455,6 +458,7 @@ void ofputil_packet_in_destroy(struct ofputil_packet_in *);
 
 enum ofperr ofputil_decode_packet_in(const struct ofp_header *, bool loose,
                                      const struct tun_table *,
+                                     const struct vl_mff_map *,
                                      struct ofputil_packet_in *,
                                      size_t *total_len, uint32_t *buffer_id,
                                      struct ofpbuf *continuation);
@@ -481,8 +485,8 @@ struct ofputil_packet_in_private {
     struct uuid bridge;
 
     /* NXCPT_STACK. */
-    union mf_subvalue *stack;
-    size_t n_stack;
+    uint8_t *stack;
+    size_t stack_size;
 
     /* NXCPT_MIRRORS. */
     uint32_t mirrors;
@@ -507,6 +511,7 @@ struct ofpbuf *ofputil_encode_packet_in_private(
 enum ofperr ofputil_decode_packet_in_private(
     const struct ofp_header *, bool loose,
     const struct tun_table *,
+    const struct vl_mff_map *,
     struct ofputil_packet_in_private *,
     size_t *total_len, uint32_t *buffer_id);
 
@@ -1083,7 +1088,7 @@ struct ofputil_flow_update {
     uint8_t table_id;
     uint16_t priority;
     ovs_be64 cookie;
-    struct match *match;
+    struct match match;
     const struct ofpact *ofpacts;
     size_t ofpacts_len;
 
@@ -1095,7 +1100,8 @@ int ofputil_decode_flow_update(struct ofputil_flow_update *,
                                struct ofpbuf *msg, struct ofpbuf *ofpacts);
 void ofputil_start_flow_update(struct ovs_list *replies);
 void ofputil_append_flow_update(const struct ofputil_flow_update *,
-                                struct ovs_list *replies);
+                                struct ovs_list *replies,
+                                const struct tun_table *);
 
 /* Abstract nx_flow_monitor_cancel. */
 uint32_t ofputil_decode_flow_monitor_cancel(const struct ofp_header *);

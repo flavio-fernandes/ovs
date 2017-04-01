@@ -32,7 +32,7 @@
 
 struct tun_meta_entry {
     struct hmap_node node;      /* In struct tun_table's key_hmap. */
-    uint32_t key;               /* (class << 16) | type. */
+    uint32_t key;               /* (class << 8) | type. */
     struct tun_metadata_loc loc;
     bool valid;                 /* True if allocated to a class and type. */
 };
@@ -156,8 +156,8 @@ tun_metadata_table_mod(struct ofputil_tlv_table_mod *ttm,
                                          ofp_map->option_type,
                                          ofp_map->option_len);
             if (err) {
-                *new_tab = NULL;
                 tun_metadata_free(*new_tab);
+                *new_tab = NULL;
                 return err;
             }
         }

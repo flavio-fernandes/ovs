@@ -40,7 +40,6 @@
 #include "netlink.h"
 #include "odp-util.h"
 #include "openvswitch/ofpbuf.h"
-#include "ovs-numa.h"
 #include "packets.h"
 #include "openvswitch/shash.h"
 #include "simap.h"
@@ -876,43 +875,12 @@ out_freefilter:
     return error;
 }
 
-/* Extracts the in_port from the parsed keys, and returns the reference
- * to the 'struct netdev *' of the dpif port.  On error, returns NULL.
- * Users must call 'netdev_close()' after finish using the returned
- * reference. */
-static struct netdev *
-get_in_port_netdev_from_key(struct dpif *dpif, const struct ofpbuf *key)
-{
-    const struct nlattr *in_port_nla;
-    struct netdev *dev = NULL;
-
-    in_port_nla = nl_attr_find(key, 0, OVS_KEY_ATTR_IN_PORT);
-    if (in_port_nla) {
-        struct dpif_port dpif_port;
-        odp_port_t port_no;
-        int error;
-
-        port_no = ODP_PORT_C(nl_attr_get_u32(in_port_nla));
-        error = dpif_port_query_by_number(dpif, port_no, &dpif_port);
-        if (error) {
-            goto out;
-        }
-
-        netdev_open(dpif_port.name, dpif_port.type, &dev);
-        dpif_port_destroy(&dpif_port);
-    }
-
-out:
-    return dev;
-}
-
 static int
 dpctl_put_flow(int argc, const char *argv[], enum dpif_flow_put_flags flags,
                struct dpctl_params *dpctl_p)
 {
     const char *key_s = argv[argc - 2];
     const char *actions_s = argv[argc - 1];
-    struct netdev *in_port_netdev = NULL;
     struct dpif_flow_stats stats;
     struct dpif_port dpif_port;
     struct dpif_port_dump port_dump;
@@ -968,39 +936,15 @@ dpctl_put_flow(int argc, const char *argv[], enum dpif_flow_put_flags flags,
         goto out_freeactions;
     }
 
-    /* For DPDK interface, applies the operation to all pmd threads
-     * on the same numa node. */
-    in_port_netdev = get_in_port_netdev_from_key(dpif, &key);
-    if (in_port_netdev && netdev_is_pmd(in_port_netdev)) {
-        int numa_id;
+    /* The flow will be added on all pmds currently in the datapath. */
+    error = dpif_flow_put(dpif, flags,
+                          key.data, key.size,
+                          mask.size == 0 ? NULL : mask.data,
+                          mask.size, actions.data,
+                          actions.size, ufid_present ? &ufid : NULL,
+                          PMD_ID_NULL,
+                          dpctl_p->print_statistics ? &stats : NULL);
 
-        numa_id = netdev_get_numa_id(in_port_netdev);
-        if (ovs_numa_numa_id_is_valid(numa_id)) {
-            struct ovs_numa_dump *dump = ovs_numa_dump_cores_on_numa(numa_id);
-            struct ovs_numa_info *iter;
-
-            FOR_EACH_CORE_ON_NUMA (iter, dump) {
-                if (ovs_numa_core_is_pinned(iter->core_id)) {
-                    error = dpif_flow_put(dpif, flags,
-                                          key.data, key.size,
-                                          mask.size == 0 ? NULL : mask.data,
-                                          mask.size, actions.data,
-                                          actions.size, ufid_present ? &ufid : NULL,
-                                          iter->core_id, dpctl_p->print_statistics ? &stats : NULL);
-                }
-            }
-            ovs_numa_dump_destroy(dump);
-        } else {
-            error = EINVAL;
-        }
-    } else {
-        error = dpif_flow_put(dpif, flags,
-                              key.data, key.size,
-                              mask.size == 0 ? NULL : mask.data,
-                              mask.size, actions.data,
-                              actions.size, ufid_present ? &ufid : NULL,
-                              PMD_ID_NULL, dpctl_p->print_statistics ? &stats : NULL);
-    }
     if (error) {
         dpctl_error(dpctl_p, error, "updating flow table");
         goto out_freeactions;
@@ -1021,7 +965,6 @@ out_freekeymask:
     ofpbuf_uninit(&mask);
     ofpbuf_uninit(&key);
     dpif_close(dpif);
-    netdev_close(in_port_netdev);
     return error;
 }
 
@@ -1110,7 +1053,6 @@ static int
 dpctl_del_flow(int argc, const char *argv[], struct dpctl_params *dpctl_p)
 {
     const char *key_s = argv[argc - 1];
-    struct netdev *in_port_netdev = NULL;
     struct dpif_flow_stats stats;
     struct dpif_port dpif_port;
     struct dpif_port_dump port_dump;
@@ -1158,33 +1100,11 @@ dpctl_del_flow(int argc, const char *argv[], struct dpctl_params *dpctl_p)
         goto out;
     }
 
-    /* For DPDK interface, applies the operation to all pmd threads
-     * on the same numa node. */
-    in_port_netdev = get_in_port_netdev_from_key(dpif, &key);
-    if (in_port_netdev && netdev_is_pmd(in_port_netdev)) {
-        int numa_id;
+    /* The flow will be deleted from all pmds currently in the datapath. */
+    error = dpif_flow_del(dpif, key.data, key.size,
+                          ufid_present ? &ufid : NULL, PMD_ID_NULL,
+                          dpctl_p->print_statistics ? &stats : NULL);
 
-        numa_id = netdev_get_numa_id(in_port_netdev);
-        if (ovs_numa_numa_id_is_valid(numa_id)) {
-            struct ovs_numa_dump *dump = ovs_numa_dump_cores_on_numa(numa_id);
-            struct ovs_numa_info *iter;
-
-            FOR_EACH_CORE_ON_NUMA (iter, dump) {
-                if (ovs_numa_core_is_pinned(iter->core_id)) {
-                    error = dpif_flow_del(dpif, key.data,
-                                          key.size, ufid_present ? &ufid : NULL,
-                                          iter->core_id, dpctl_p->print_statistics ? &stats : NULL);
-                }
-            }
-            ovs_numa_dump_destroy(dump);
-        } else {
-            error = EINVAL;
-        }
-    } else {
-        error = dpif_flow_del(dpif, key.data, key.size,
-                              ufid_present ? &ufid : NULL, PMD_ID_NULL,
-                              dpctl_p->print_statistics ? &stats : NULL);
-    }
     if (error) {
         dpctl_error(dpctl_p, error, "deleting flow");
         if (error == ENOENT && !ufid_present) {
@@ -1212,7 +1132,6 @@ out:
     ofpbuf_uninit(&key);
     simap_destroy(&port_names);
     dpif_close(dpif);
-    netdev_close(in_port_netdev);
     return error;
 }
 
@@ -1489,6 +1408,7 @@ dpctl_normalize_actions(int argc, const char *argv[],
     struct ds s;
     int left;
     int i, error;
+    int encaps = 0;
 
     ds_init(&s);
 
@@ -1545,12 +1465,14 @@ dpctl_normalize_actions(int argc, const char *argv[],
         const struct ovs_action_push_vlan *push;
         switch(nl_attr_type(a)) {
         case OVS_ACTION_ATTR_POP_VLAN:
-            flow.vlan_tci = htons(0);
+            flow_pop_vlan(&flow, NULL);
             continue;
 
         case OVS_ACTION_ATTR_PUSH_VLAN:
+            flow_push_vlan_uninit(&flow, NULL);
             push = nl_attr_get_unspec(a, sizeof *push);
-            flow.vlan_tci = push->vlan_tci;
+            flow.vlans[0].tpid = push->vlan_tpid;
+            flow.vlans[0].tci = push->vlan_tci;
             continue;
         }
 
@@ -1576,12 +1498,22 @@ dpctl_normalize_actions(int argc, const char *argv[],
 
         sort_output_actions(af->actions.data, af->actions.size);
 
-        if (af->flow.vlan_tci != htons(0)) {
-            dpctl_print(dpctl_p, "vlan(vid=%"PRIu16",pcp=%d): ",
-                        vlan_tci_to_vid(af->flow.vlan_tci),
-                        vlan_tci_to_pcp(af->flow.vlan_tci));
-        } else {
-            dpctl_print(dpctl_p, "no vlan: ");
+        for (encaps = 0; encaps < FLOW_MAX_VLAN_HEADERS; encaps ++) {
+            union flow_vlan_hdr *vlan = &af->flow.vlans[encaps];
+            if (vlan->tci != htons(0)) {
+                dpctl_print(dpctl_p, "vlan(");
+                if (vlan->tpid != htons(ETH_TYPE_VLAN)) {
+                    dpctl_print(dpctl_p, "tpid=0x%04"PRIx16",", vlan->tpid);
+                }
+                dpctl_print(dpctl_p, "vid=%"PRIu16",pcp=%d): ",
+                            vlan_tci_to_vid(vlan->tci),
+                            vlan_tci_to_pcp(vlan->tci));
+            } else {
+                if (encaps == 0) {
+                    dpctl_print(dpctl_p, "no vlan: ");
+                }
+                break;
+            }
         }
 
         if (eth_type_mpls(af->flow.dl_type)) {

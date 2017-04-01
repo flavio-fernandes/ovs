@@ -65,7 +65,7 @@ Many of the basic documentation guidelines match those of the
      An exception to this rule is text within code-block elements that cannot
      be wrapped and links within references.
 
-- Use spaces for indenation.
+- Use spaces for indentation.
 
 - Match indentation levels.
 
@@ -115,9 +115,11 @@ Titles
 Code
 ~~~~
 
-- Use ``::``, the ``code`` role or the ``code-block:: <syntax>`` role to prefix
-  code. The ``code-block:: <syntax>`` format is preferred as this provides
-  syntax highlighting for non-Python languages, such as Bash or PowerShell.
+- Use ``::`` to prefix code.
+
+- Don't use syntax highlighting such as ``.. highlight:: <syntax>`` or
+  ``code-block:: <syntax>`` because it depends on external ``pygments``
+  library.
 
 - Prefix commands with ``$``.
 
@@ -259,7 +261,7 @@ Figures and Other Media
 - All images should be in PNG format and compressed where possible. For PNG
   files, use OptiPNG and AdvanceCOMP's ``advpng``:
 
-  .. code-block:: shell
+  ::
 
      $ optipng -o7 -zm1-9 -i0 -strip all <path_to_png>
      $ advpng -z4 <path_to_png>
@@ -365,4 +367,4 @@ Useful Links
 - `Quick reStructuredText
   <http://docutils.sourceforge.net/docs/user/rst/quickref.html>`__
 
-- `Sphinx Documentation <http://sphinx.readthedocs.org/en/latest/rest.html>`__
+- `Sphinx Documentation <http://sphinx.readthedocs.io/en/latest/rest.html>`__

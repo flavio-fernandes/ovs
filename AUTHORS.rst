@@ -33,12 +33,14 @@ Name                            Email
 =============================== ===============================================
 Aaron Conole                    aconole@redhat.com
 Aaron Rosen                     arosen@clemson.edu
+Alan Pevec                      alan.pevec@redhat.com
 Alexander Duyck                 alexander.h.duyck@redhat.com
 Alexandru Copot                 alex.mihai.c@gmail.com
 Alexei Starovoitov              ast@plumgrid.com
 Alexey I. Froloff               raorn@raorn.name
 Alex Wang                       ee07b291@gmail.com
 Alfredo Finelli                 alf@computationes.de
+Alin Balutoiu                   abalutoiu@cloudbasesolutions.com
 Alin Serdean                    aserdean@cloudbasesolutions.com
 Ambika Arora                    ambika.arora@tcs.com
 Amit Bose                       bose@noironetworks.com
@@ -146,6 +148,7 @@ Ian Campbell                    Ian.Campbell@citrix.com
 Ian Stokes                      ian.stokes@intel.com
 Ilya Maximets                   i.maximets@samsung.com
 Isaku Yamahata                  yamahata@valinux.co.jp
+Jakub Libosvar                  libosvar@redhat.com
 James P.                        roampune@gmail.com
 James Page                      james.page@ubuntu.com
 Jamie Lennox                    jamielennox@gmail.com
@@ -173,6 +176,7 @@ Kenneth Duda                    kduda@arista.com
 Kentaro Ebisawa                 ebiken.g@gmail.com
 Kevin Lo                        kevlo@FreeBSD.org
 Kevin Traynor                   kevin.traynor@intel.com
+Khem Raj                        raj.khem@gmail.com
 Kmindg G                        kmindg@gmail.com
 Krishna Kondaka                 kkondaka@vmware.com
 Kyle Mestery                    mestery@mestery.com
@@ -180,6 +184,7 @@ Kyle Upton                      kupton@baymicrosystems.com
 Lance Richardson                lrichard@redhat.com
 Lars Kellogg-Stedman            lars@redhat.com
 Lei Huang                       huang.f.lei@gmail.com
+Leif Madsen                     lmadsen@redhat.com
 Leo Alterman                    lalterman@nicira.com
 Lilijun                         jerry.lilijun@huawei.com
 Linda Sun                       lsun@vmware.com
@@ -189,7 +194,9 @@ Luca Giraudo                    lgiraudo@nicira.com
 Lucian Petrut                   lpetrut@cloudbasesolutions.com
 Luigi Rizzo                     rizzo@iet.unipi.it
 Luis E. P.                      l31g@hotmail.com
+Lukasz Rzasik                   lukasz.rzasik@gmail.com
 Madhu Challa                    challa@noironetworks.com
+Marcin Mirecki                  mmirecki@redhat.com
 Mario Cabrera                   mario.cabrera@hpe.com
 Mark D. Gray                    mark.d.gray@intel.com
 Mark Hamilton                   mhamilton@nicira.com
@@ -204,7 +211,9 @@ Maxime Coquelin                 maxime.coquelin@redhat.com
 Mehak Mahajan                   mmahajan@nicira.com
 Michael Arnaldi                 arnaldimichael@gmail.com
 Michal Weglicki                 michalx.weglicki@intel.com
+Mickey Spiegel                  mickeys.dev@gmail.com
 Mijo Safradin                   mijo@linux.vnet.ibm.com
+Mika Vaisanen                   mika.vaisanen@gmail.com
 Minoru TAKAHASHI                takahashi.minoru7@gmail.com
 Murphy McCauley                 murphy.mccauley@gmail.com
 Natasha Gude                    natasha@nicira.com
@@ -240,7 +249,9 @@ Rich Lane                       rlane@bigswitch.com
 Rishi Bamba                     rishi.bamba@tcs.com
 Rob Adams                       readams@readams.net
 Robert Åkerblom-Andersson       Robert.nr1@gmail.com
+Robert Wojciechowicz            robertx.wojciechowicz@intel.com
 Rob Hoes                        rob.hoes@citrix.com
+Roi Dayan                       roid@mellanox.com
 Romain Lenglet                  romain.lenglet@berabera.info
 Russell Bryant                  russell@ovn.org
 RYAN D. MOATS                   rmoats@us.ibm.com
@@ -256,6 +267,7 @@ Saurabh Shrivastava             saurabh.shrivastava@nuagenetworks.net
 Scott Lowe                      scott.lowe@scottlowe.org
 Scott Mann                      sdmnix@gmail.com
 Selvamuthukumar                 smkumar@merunetworks.com
+Sha Zhang                       zhangsha.zhang@huawei.com
 Shad Ansari                     shad.ansari@hpe.com
 Shan Wei                        davidshan@tencent.com
 Shashank Ram                    rams@vmware.com
@@ -281,12 +293,14 @@ Thomas Goirand                  zigo@debian.org
 Thomas Graf                     tgraf@noironetworks.com
 Thomas Lacroix                  thomas.lacroix@citrix.com
 Timo Puha                       timox.puha@intel.com
+Timothy Redaelli                tredaelli@redhat.com
 Todd Deshane                    deshantm@gmail.com
 Tom Everman                     teverman@google.com
 Torgny Lindberg                 torgny.lindberg@ericsson.com
 Tsvi Slonim                     tsvi@toroki.com
 Tuan Nguyen                     tuan.nguyen@veriksystems.com
 Tyler Coumbes                   coumbes@gmail.com
+Tony van der Peet               tony.vanderpeet@alliedtelesis.co.nz
 Valient Gough                   vgough@pobox.com
 Vivien Bernet-Rollande          vbr@soprive.net
 Wang Sheng-Hui                  shhuiw@gmail.com
@@ -295,6 +309,7 @@ Wei Yongjun                     yjwei@cn.fujitsu.com
 Wenyu Zhang                     wenyuz@vmware.com
 William Fulton
 William Tu                      u9012063@gmail.com
+Xiao Liang                      shaw.leon@gmail.com
 YAMAMOTO Takashi                yamamoto@midokura.com
 Yasuhito Takamiya               yasuhito@gmail.com
 Yi-Hung Wei                     yihung.wei@gmail.com
@@ -311,6 +326,7 @@ wisd0me                         ak47izatool@gmail.com
 xushengping                     shengping.xu@huawei.com
 yinpeijun                       yinpeijun@huawei.com
 zangchuanqiang                  zangchuanqiang@huawei.com
+zhaojingjing                    zhao.jingjing1@zte.com.cn
 =============================== ===============================================
 
 The following additional people are mentioned in commit logs as having
@@ -367,6 +383,7 @@ Derek Cormier                   derek.cormier@lab.ntt.co.jp
 Dhaval Badiani                  dbadiani@vmware.com
 DK Moon                         dkmoon@nicira.com
 Ding Zhi                        zhi.ding@6wind.com
+Dong Jun                        dongj@dtdream.com
 Dustin Spinhirne                dspinhirne@vmware.com
 Edwin Chiu                      echiu@vmware.com
 Eivind Bulie Haanaes
@@ -375,6 +392,7 @@ Eric Lopez                      elopez@nicira.com
 Frido Roose                     fr.roose@gmail.com
 Gaetano Catalli                 gaetano.catalli@gmail.com
 Gavin Remaley                   gavin_remaley@selinc.com
+Georg Schmuecking               georg.schmuecking@ericsson.com
 George Shuklin                  amarao@desunote.ru
 Gerald Rogers                   gerald.rogers@intel.com
 Ghanem Bahri                    bahri.ghanem@gmail.com
@@ -426,6 +444,7 @@ Konstantin Khorenko             khorenko@openvz.org
 Kris zhang                      zhang.kris@gmail.com
 Krishna Miriyala                krishna@nicira.com
 Krishna Mohan Elluru            elluru.kri.mohan@hpe.com
+László Sürü                     laszlo.suru@ericsson.com
 Len Gao                         leng@vmware.com
 Logan Rosen                     logatronico@gmail.com
 Luca Falavigna                  dktrkranz@debian.org
@@ -441,6 +460,7 @@ Michael Hu                      mhu@nicira.com
 Michael J. Smalley              michaeljsmalley@gmail.com
 Michael Mao                     mmao@nicira.com
 Michael Shigorin                mike@osdn.org.ua
+Michael Stapelberg              stapelberg@debian.org
 Mihir Gangar                    gangarm@vmware.com
 Mike Bursell                    mike.bursell@citrix.com
 Mike Kruze                      mkruze@nicira.com
@@ -490,9 +510,11 @@ Srini Seetharaman               seethara@stanford.edu
 Sabyasachi Sengupta             Sabyasachi.Sengupta@alcatel-lucent.com
 Salvatore Cambria               salvatore.cambria@citrix.com
 Soner Sevinc                    sevincs@vmware.com
+Stepan Andrushko                stepanx.andrushko@intel.com
 Stephen Hemminger               shemminger@vyatta.com
 Stuart Cardall                  developer@it-offshore.co.uk
 Suganya Ramachandran            suganyar@vmware.com
+Sundar Nadathur                 undar.nadathur@intel.com
 Taekho Nam                      thnam@smartx.kr
 Takayuki HAMA                   t-hama@cb.jp.nec.com
 Teemu Koponen                   koponen@nicira.com

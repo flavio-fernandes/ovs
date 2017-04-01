@@ -105,13 +105,13 @@ bundle_execute(const struct ofpact_bundle *bundle,
 
 enum ofperr
 bundle_check(const struct ofpact_bundle *bundle, ofp_port_t max_ports,
-             const struct flow *flow)
+             const struct match *match)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
     size_t i;
 
     if (bundle->dst.field) {
-        enum ofperr error = mf_check_dst(&bundle->dst, flow);
+        enum ofperr error = mf_check_dst(&bundle->dst, match);
         if (error) {
             return error;
         }
@@ -123,7 +123,7 @@ bundle_check(const struct ofpact_bundle *bundle, ofp_port_t max_ports,
         if (ofp_port != OFPP_NONE) {
             enum ofperr error = ofpact_check_output_port(ofp_port, max_ports);
             if (error) {
-                VLOG_WARN_RL(&rl, "invalid slave %"PRIu16, ofp_port);
+                VLOG_WARN_RL(&rl, "invalid slave %"PRIu32, ofp_port);
                 return error;
             }
         }

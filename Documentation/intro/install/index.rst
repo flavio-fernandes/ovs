@@ -56,9 +56,18 @@ provided below.
 .. toctree::
    :maxdepth: 2
 
+   distributions
    debian
    fedora
    rhel
+
+Upgrades
+--------
+
+.. toctree::
+   :maxdepth: 2
+
+   ovn-upgrades
 
 Others
 ------

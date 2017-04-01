@@ -62,7 +62,7 @@ To run all the unit tests in Open vSwitch in parallel, run::
 You can run up to eight threads. This takes under a minute on a modern 4-core
 desktop system.
 
-To see a list of all the available tests, run:
+To see a list of all the available tests, run::
 
     $ make check TESTSUITEFLAGS=--list
 
@@ -99,13 +99,13 @@ Coverage
 
 If the build was configured with ``--enable-coverage`` and the ``lcov`` utility
 is installed, you can run the testsuite and generate a code coverage report by
-using the ``check-lcoc`` target::
+using the ``check-lcov`` target::
 
     $ make check-lcov
 
 All the same options are avaiable via TESTSUITEFLAGS. For example::
 
-    $ make check-lcov TESTSUITEFLAGS=-j8 -k ovn
+    $ make check-lcov TESTSUITEFLAGS='-j8 -k ovn'
 
 .. _testing-valgrind:
 
@@ -198,7 +198,7 @@ do not get installed, so it does not help).
 To run Ryu tests, run the following command from your Open vSwitch build
 directory::
 
-    $ make check-ryu RYUDIR=<ryu-source-dir>``
+    $ make check-ryu RYUDIR=<ryu-source-dir>
 
 where ``<ryu-source-dir>`` is the absolute path to the root of the Ryu source
 distribution. The default ``<ryu-source-dir>`` is ``$srcdir/../ryu``
@@ -210,6 +210,8 @@ omit ``RYUDIR``
   you believe to represent bugs in Open vSwitch. Include the precise versions
   of Open vSwitch and Ryu in your bug report, plus any other information
   needed to reproduce the problem.
+
+.. _datapath-testing:
 
 Datapath testing
 ~~~~~~~~~~~~~~~~
@@ -355,7 +357,7 @@ travis-ci.
 
 Instructions to setup travis-ci for your GitHub repository:
 
-1. Go to http://travis-ci.org/ and sign in using your GitHub ID.
+1. Go to https://travis-ci.org/ and sign in using your GitHub ID.
 2. Go to the "Repositories" tab and enable the ovs repository. You may disable
    builds for pushes or pull requests.
 3. In order to avoid forks sending build failures to the upstream mailing list,

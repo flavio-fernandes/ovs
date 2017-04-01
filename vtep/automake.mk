@@ -14,7 +14,7 @@ vtep/vtep-idl.ovsidl: $(VTEP_IDL_FILES)
 # libvtep
 lib_LTLIBRARIES += vtep/libvtep.la
 vtep_libvtep_la_LDFLAGS = \
-	-version-info $(LT_CURRENT):$(LT_REVISION):$(LT_AGE) \
+	$(OVS_LTINFO) \
 	-Wl,--version-script=$(top_builddir)/vtep/libvtep.sym \
 	$(AM_LDFLAGS)
 nodist_vtep_libvtep_la_SOURCES = \
@@ -27,7 +27,7 @@ bin_PROGRAMS += \
 MAN_ROOTS += \
    vtep/vtep-ctl.8.in
 
-DISTCLEANFILES += \
+CLEANFILES += \
    vtep/vtep-ctl.8
 
 man_MANS += \
@@ -61,13 +61,13 @@ vtep/vtep.pic: vtep/vtep.gv ovsdb/dot2pic
 	mv $@.tmp $@
 VTEP_PIC = vtep/vtep.pic
 VTEP_DOT_DIAGRAM_ARG = --er-diagram=$(VTEP_PIC)
-DISTCLEANFILES += vtep/vtep.gv vtep/vtep.pic
+CLEANFILES += vtep/vtep.gv vtep/vtep.pic
 endif
 endif
 
 # VTEP schema documentation
 EXTRA_DIST += vtep/vtep.xml
-DISTCLEANFILES += vtep/vtep.5
+CLEANFILES += vtep/vtep.5
 man_MANS += vtep/vtep.5
 vtep/vtep.5: \
 	ovsdb/ovsdb-doc vtep/vtep.xml $(srcdir)/vtep/vtep.ovsschema $(VTEP_PIC)

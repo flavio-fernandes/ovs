@@ -541,7 +541,7 @@ udpif_start_threads(struct udpif *udpif, size_t n_handlers,
                 "handler", udpif_upcall_handler, handler);
         }
 
-        enable_ufid = ofproto_dpif_get_enable_ufid(udpif->backer);
+        enable_ufid = udpif->backer->support.ufid;
         atomic_init(&udpif->enable_ufid, enable_ufid);
         dpif_enable_upcall(udpif->dpif);
 
@@ -567,7 +567,7 @@ udpif_start_threads(struct udpif *udpif, size_t n_handlers,
 static void
 udpif_pause_revalidators(struct udpif *udpif)
 {
-    if (ofproto_dpif_backer_enabled(udpif->backer)) {
+    if (udpif->backer->recv_set_enable) {
         latch_set(&udpif->pause_latch);
         ovs_barrier_block(&udpif->pause_barrier);
     }
@@ -578,7 +578,7 @@ udpif_pause_revalidators(struct udpif *udpif)
 static void
 udpif_resume_revalidators(struct udpif *udpif)
 {
-    if (ofproto_dpif_backer_enabled(udpif->backer)) {
+    if (udpif->backer->recv_set_enable) {
         latch_poll(&udpif->pause_latch);
         ovs_barrier_block(&udpif->pause_barrier);
     }
@@ -700,7 +700,7 @@ udpif_use_ufid(struct udpif *udpif)
     bool enable;
 
     atomic_read_relaxed(&enable_ufid, &enable);
-    return enable && ofproto_dpif_get_enable_ufid(udpif->backer);
+    return enable && udpif->backer->support.ufid;
 }
 
 
@@ -1352,11 +1352,14 @@ handle_upcalls(struct udpif *udpif, struct upcall *upcalls,
 
     /* Handle the packets individually in order of arrival.
      *
-     *   - For SLOW_CFM, SLOW_LACP, SLOW_STP, and SLOW_BFD, translation is what
-     *     processes received packets for these protocols.
+     *   - For SLOW_CFM, SLOW_LACP, SLOW_STP, SLOW_BFD, and SLOW_LLDP,
+     *     translation is what processes received packets for these
+     *     protocols.
      *
      *   - For SLOW_CONTROLLER, translation sends the packet to the OpenFlow
      *     controller.
+     *
+     *   - For SLOW_ACTION, translation executes the actions directly.
      *
      * The loop fills 'ops' with an array of operations to execute in the
      * datapath. */
@@ -1404,7 +1407,7 @@ handle_upcalls(struct udpif *udpif, struct upcall *upcalls,
             ovs_mutex_lock(&ukey->mutex);
             if (ops[i].dop.error) {
                 transition_ukey(ukey, UKEY_EVICTED);
-            } else {
+            } else if (ukey->state < UKEY_OPERATIONAL) {
                 transition_ukey(ukey, UKEY_OPERATIONAL);
             }
             ovs_mutex_unlock(&ukey->mutex);
@@ -1507,7 +1510,7 @@ ukey_create_from_upcall(struct upcall *upcall, struct flow_wildcards *wc)
         .mask = wc ? &wc->masks : NULL,
     };
 
-    odp_parms.support = ofproto_dpif_get_support(upcall->ofproto)->odp;
+    odp_parms.support = upcall->ofproto->backer->support.odp;
     if (upcall->key_len) {
         ofpbuf_use_const(&keybuf, upcall->key, upcall->key_len);
     } else {
@@ -1672,7 +1675,7 @@ transition_ukey(struct udpif_key *ukey, enum ukey_state dst)
     OVS_REQUIRES(ukey->mutex)
 {
     ovs_assert(dst >= ukey->state);
-    if (ukey->state == dst) {
+    if (ukey->state == dst && dst == UKEY_OPERATIONAL) {
         return;
     }
 
@@ -1794,9 +1797,11 @@ ukey_delete(struct umap *umap, struct udpif_key *ukey)
     OVS_REQUIRES(umap->mutex)
 {
     ovs_mutex_lock(&ukey->mutex);
-    cmap_remove(&umap->cmap, &ukey->cmap_node, ukey->hash);
-    ovsrcu_postpone(ukey_delete__, ukey);
-    transition_ukey(ukey, UKEY_DELETED);
+    if (ukey->state < UKEY_DELETED) {
+        cmap_remove(&umap->cmap, &ukey->cmap_node, ukey->hash);
+        ovsrcu_postpone(ukey_delete__, ukey);
+        transition_ukey(ukey, UKEY_DELETED);
+    }
     ovs_mutex_unlock(&ukey->mutex);
 }
 
@@ -1945,6 +1950,10 @@ revalidate_ukey__(struct udpif *udpif, const struct udpif_key *ukey,
         goto exit;
     }
     xoutp = &ctx.xout;
+
+    if (xoutp->avoid_caching) {
+        goto exit;
+    }
 
     if (xoutp->slow) {
         ofpbuf_clear(odp_actions);

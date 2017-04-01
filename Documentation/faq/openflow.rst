@@ -462,6 +462,15 @@ What's going on?
     messages and will send an error response if any other value of this field
     is included in a "packet-out" or a "flow mod" sent by a controller.
 
+    Packet buffers have limited usefulness in any case.  Table-miss packet-in
+    messages most commonly pass the first packet in a microflow to the OpenFlow
+    controller, which then sets up an OpenFlow flow that handles remaining
+    traffic in the microflow without further controller intervention.  In such
+    a case, the packet that initiates the microflow is in practice usually
+    small (certainly for TCP), which means that the switch sends the entire
+    packet to the controller and the buffer only saves a small number of bytes
+    in the reverse direction.
+
 Q: How does OVS divide flows among buckets in an OpenFlow "select" group?
 
     A: In Open vSwitch 2.3 and earlier, Open vSwitch used the destination
@@ -496,6 +505,27 @@ but the packets are actually being output in VLAN 123.  Why?
 
         $ ovs-ofctl add-flow br0 dl_vlan=123,actions=mod_vlan_vid:456,output:1
 
+    See also the following question.
+
+Q: I added a flow to a redirect packets for TCP port 80 to port 443,
+like so::
+
+    $ ovs-ofctl add-flow br0 tcp,tcp_dst=123,actions=mod_tp_dst:443
+
+but the packets are getting dropped instead.  Why?
+
+    A: This set of actions does change the TCP destination port to 443, but
+    then it does nothing more.  It doesn't, for example, say to continue to
+    another flow table or to output the packet.  Therefore, the packet is
+    dropped.
+
+    To solve the problem, add an action that does something with the modified
+    packet.  For example::
+
+        $ ovs-ofctl add-flow br0 tcp,tcp_dst=123,actions=mod_tp_dst:443,normal
+
+    See also the preceding question.
+
 Q: The "learn" action can't learn the action I want, can you improve it?
 
     A: By itself, the "learn" action can only put two kinds of actions into the
@@ -523,7 +553,7 @@ Q: The "learn" action can't learn the action I want, can you improve it?
     example:
 
     - Resubmit to a table selected based on learned information, e.g. see:
-      http://openvswitch.org/pipermail/discuss/2016-June/021694.html
+      https://mail.openvswitch.org/pipermail/ovs-discuss/2016-June/021694.html
 
     - MAC learning in the middle of a pipeline, as described in
       :doc:`/tutorials/ovs-advanced`
@@ -533,4 +563,13 @@ Q: The "learn" action can't learn the action I want, can you improve it?
 
     - At least some of the features described in T. A. Hoff, "Extending Open
       vSwitch to Facilitate Creation of Stateful SDN Applications".
+
+Q: When using the "ct" action with FTP connections, it doesn't seem to matter
+if I set the "alg=ftp" parameter in the action. Is this required?
+
+    A: It is advisable to use this option. Some platforms may automatically
+    detect and apply ALGs in the "ct" action regardless of the parameters you
+    provide, however this is not consistent across all implementations. The
+    `ovs-ofctl(8) <http://openvswitch.org/support/dist-docs/ovs-ofctl.8.html>`_
+    man pages contain further details in the description of the ALG parameter.
 

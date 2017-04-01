@@ -19,6 +19,9 @@
 #include "PacketParser.h"
 #include "Event.h"
 
+#pragma warning(push)
+#pragma warning(disable:4311)
+
 #define WINDOWS_TICK 10000000
 #define SEC_TO_UNIX_EPOCH 11644473600LL
 #define SEC_TO_NANOSEC 1000000000LL
@@ -165,7 +168,7 @@ OvsCtAddEntry(POVS_CT_ENTRY entry, OvsConntrackKeyLookupCtx *ctx, UINT64 now)
     entry->timestampStart = now;
     InsertHeadList(&ovsConntrackTable[ctx->hash & CT_HASH_TABLE_MASK],
                    &entry->link);
-    OvsPostCtEventEntry(entry, OVS_EVENT_CT_NEW);
+
     ctTotalEntries++;
 }
 
@@ -176,9 +179,11 @@ OvsCtEntryCreate(PNET_BUFFER_LIST curNbl,
                  OvsConntrackKeyLookupCtx *ctx,
                  OvsFlowKey *key,
                  BOOLEAN commit,
-                 UINT64 currentTime)
+                 UINT64 currentTime,
+                 BOOLEAN *entryCreated)
 {
     POVS_CT_ENTRY entry = NULL;
+    *entryCreated = FALSE;
     UINT32 state = 0;
     switch (ipProto)
     {
@@ -208,6 +213,7 @@ OvsCtEntryCreate(PNET_BUFFER_LIST curNbl,
                     entry->parent = parentEntry;
                 }
                 OvsCtAddEntry(entry, ctx, currentTime);
+                *entryCreated = TRUE;
             }
 
             OvsCtUpdateFlowKey(key, state, ctx->key.zone, 0, NULL);
@@ -229,6 +235,7 @@ OvsCtEntryCreate(PNET_BUFFER_LIST curNbl,
                     return NULL;
                 }
                 OvsCtAddEntry(entry, ctx, currentTime);
+                *entryCreated = TRUE;
             }
 
             OvsCtUpdateFlowKey(key, state, ctx->key.zone, 0, NULL);
@@ -243,6 +250,7 @@ OvsCtEntryCreate(PNET_BUFFER_LIST curNbl,
                     return NULL;
                 }
                 OvsCtAddEntry(entry, ctx, currentTime);
+                *entryCreated = TRUE;
             }
 
             OvsCtUpdateFlowKey(key, state, ctx->key.zone, 0, NULL);
@@ -522,10 +530,12 @@ OvsProcessConntrackEntry(PNET_BUFFER_LIST curNbl,
                          OvsFlowKey *key,
                          UINT16 zone,
                          BOOLEAN commit,
-                         UINT64 currentTime)
+                         UINT64 currentTime,
+                         BOOLEAN *entryCreated)
 {
     POVS_CT_ENTRY entry = ctx->entry;
     UINT32 state = 0;
+    *entryCreated = FALSE;
 
     /* If an entry was found, update the state based on TCP flags */
     if (ctx->related) {
@@ -552,7 +562,8 @@ OvsProcessConntrackEntry(PNET_BUFFER_LIST curNbl,
             OvsCtEntryDelete(ctx->entry);
             ctx->entry = NULL;
             entry = OvsCtEntryCreate(curNbl, key->ipKey.nwProto, l4Offset,
-                                     ctx, key, commit, currentTime);
+                                     ctx, key, commit, currentTime,
+                                     entryCreated);
             if (!entry) {
                 return NULL;
             }
@@ -622,6 +633,7 @@ OvsCtExecute_(PNET_BUFFER_LIST curNbl,
               OvsFlowKey *key,
               OVS_PACKET_HDR_INFO *layers,
               BOOLEAN commit,
+              BOOLEAN force,
               UINT16 zone,
               MD_MARK *mark,
               MD_LABELS *labels,
@@ -641,17 +653,26 @@ OvsCtExecute_(PNET_BUFFER_LIST curNbl,
 
     /* Lookup Conntrack entries for a matching entry */
     entry = OvsCtLookup(&ctx);
+    BOOLEAN entryCreated = FALSE;
+
+    /* Delete entry in reverse direction if 'force' is specified */
+    if (entry && force && ctx.reply) {
+        OvsCtEntryDelete(entry);
+        entry = NULL;
+    }
 
     if (!entry) {
         /* If no matching entry was found, create one and add New state */
         entry = OvsCtEntryCreate(curNbl, key->ipKey.nwProto,
                                  layers->l4Offset, &ctx,
-                                 key, commit, currentTime);
+                                 key, commit, currentTime,
+                                 &entryCreated);
     } else {
         /* Process the entry and update CT flags */
         OvsCtIncrementCounters(entry, ctx.reply, curNbl);
         entry = OvsProcessConntrackEntry(curNbl, layers->l4Offset, &ctx, key,
-                                         zone, commit, currentTime);
+                                         zone, commit, currentTime,
+                                         &entryCreated);
     }
 
     if (entry && mark) {
@@ -673,6 +694,10 @@ OvsCtExecute_(PNET_BUFFER_LIST curNbl,
         }
     }
 
+    if (entryCreated && entry) {
+        OvsPostCtEventEntry(entry, OVS_EVENT_CT_NEW);
+    }
+
     NdisReleaseRWLock(ovsConntrackLockObj, &lockState);
 
     return status;
@@ -692,6 +717,7 @@ OvsExecuteConntrackAction(PNET_BUFFER_LIST curNbl,
 {
     PNL_ATTR ctAttr;
     BOOLEAN commit = FALSE;
+    BOOLEAN force = FALSE;
     UINT16 zone = 0;
     MD_MARK *mark = NULL;
     MD_LABELS *labels = NULL;
@@ -704,6 +730,7 @@ OvsExecuteConntrackAction(PNET_BUFFER_LIST curNbl,
         return status;
     }
 
+    /* XXX Convert this to NL_ATTR_FOR_EACH */
     ctAttr = NlAttrFindNested(a, OVS_CT_ATTR_ZONE);
     if (ctAttr) {
         zone = NlAttrGetU16(ctAttr);
@@ -731,9 +758,15 @@ OvsExecuteConntrackAction(PNET_BUFFER_LIST curNbl,
             return NDIS_STATUS_NOT_SUPPORTED;
         }
     }
+    ctAttr = NlAttrFindNested(a, OVS_CT_ATTR_FORCE_COMMIT);
+    if (ctAttr) {
+        force = TRUE;
+        /* Force implicitly means commit */
+        commit = TRUE;
+    }
 
-    status = OvsCtExecute_(curNbl, key, layers,
-                           commit, zone, mark, labels, helper);
+    status = OvsCtExecute_(curNbl, key, layers, commit, force,
+                           zone, mark, labels, helper);
     return status;
 }
 
@@ -1311,3 +1344,5 @@ OvsCtDumpCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     return STATUS_SUCCESS;
 }
+
+#pragma warning(pop)
