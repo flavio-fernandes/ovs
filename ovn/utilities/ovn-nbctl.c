@@ -448,6 +448,7 @@ Options:\n\
   --oneline                   print exactly one line of output per command\n",
            program_name, program_name, ctl_get_db_cmd_usage(),
            default_nb_db());
+    table_usage();
     vlog_usage();
     printf("\
   --no-syslog             equivalent to --verbose=nbctl:syslog:warn\n");
@@ -455,6 +456,7 @@ Options:\n\
 Other options:\n\
   -h, --help                  display this help message\n\
   -V, --version               display version information\n");
+    stream_usage("database", true, true, false);
     exit(EXIT_SUCCESS);
 }
 
@@ -586,6 +588,18 @@ print_lr(const struct nbrec_logical_router *lr, struct ds *s)
             }
             ds_put_cstr(s, "]\n");
         }
+    }
+
+    for (size_t i = 0; i < lr->n_nat; i++) {
+        const struct nbrec_nat *nat = lr->nat[i];
+        ds_put_format(s, "        nat "UUID_FMT"\n",
+                  UUID_ARGS(&nat->header_.uuid));
+        ds_put_cstr(s, "            external ip: ");
+        ds_put_format(s, "\"%s\"\n", nat->external_ip);
+        ds_put_cstr(s, "            logical ip: ");
+        ds_put_format(s, "\"%s\"\n", nat->logical_ip);
+        ds_put_cstr(s, "            type: ");
+        ds_put_format(s, "\"%s\"\n", nat->type);
     }
 }
 

@@ -38,6 +38,7 @@ DOC_SOURCE = \
 	Documentation/topics/openflow.rst \
 	Documentation/topics/ovsdb-replication.rst \
 	Documentation/topics/porting.rst \
+	Documentation/topics/tracing.rst \
 	Documentation/topics/windows.rst \
 	Documentation/howto/index.rst \
 	Documentation/howto/docker.rst \
@@ -76,6 +77,7 @@ DOC_SOURCE = \
 	Documentation/internals/bugs.rst \
 	Documentation/internals/committer-grant-revocation.rst \
 	Documentation/internals/committer-responsibilities.rst \
+	Documentation/internals/documentation.rst \
 	Documentation/internals/mailing-lists.rst \
 	Documentation/internals/maintainers.rst \
 	Documentation/internals/patchwork.rst \
@@ -89,7 +91,7 @@ DOC_SOURCE = \
 	Documentation/internals/contributing/libopenvswitch-abi.rst \
 	Documentation/internals/contributing/submitting-patches.rst \
 	Documentation/requirements.txt
-
+FLAKE8_PYFILES += Documentation/conf.py
 EXTRA_DIST += $(DOC_SOURCE)
 
 # You can set these variables from the command line.
@@ -120,6 +122,7 @@ clean-docs:
 	rm -rf $(SPHINXBUILDDIR)/doctrees
 	rm -rf $(SPHINXBUILDDIR)/html
 	rm -rf $(SPHINXBUILDDIR)/linkcheck
+	rm -f docs-check
 CLEAN_LOCAL += clean-docs
 endif
 .PHONY: check-docs

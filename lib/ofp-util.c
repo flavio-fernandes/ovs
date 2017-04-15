@@ -4325,7 +4325,7 @@ ofputil_decode_ofp10_phy_port(struct ofputil_phy_port *pp,
 {
     pp->port_no = u16_to_ofp(ntohs(opp->port_no));
     pp->hw_addr = opp->hw_addr;
-    ovs_strlcpy(pp->name, opp->name, OFP_MAX_PORT_NAME_LEN);
+    ovs_strlcpy_arrays(pp->name, opp->name);
 
     pp->config = ntohl(opp->config) & OFPPC10_ALL;
     pp->state = ntohl(opp->state) & OFPPS10_ALL;
@@ -4352,7 +4352,7 @@ ofputil_decode_ofp11_port(struct ofputil_phy_port *pp,
         return error;
     }
     pp->hw_addr = op->hw_addr;
-    ovs_strlcpy(pp->name, op->name, OFP_MAX_PORT_NAME_LEN);
+    ovs_strlcpy_arrays(pp->name, op->name);
 
     pp->config = ntohl(op->config) & OFPPC11_ALL;
     pp->state = ntohl(op->state) & OFPPS11_ALL;
@@ -4390,31 +4390,10 @@ parse_ofp14_port_ethernet_property(const struct ofpbuf *payload,
 }
 
 static enum ofperr
-ofputil_pull_ofp14_port(struct ofputil_phy_port *pp, struct ofpbuf *msg)
+ofputil_pull_ofp14_port_properties(const void *props, size_t len,
+                                   struct ofputil_phy_port *pp)
 {
-    struct ofp14_port *op = ofpbuf_try_pull(msg, sizeof *op);
-    if (!op) {
-        return OFPERR_OFPBRC_BAD_LEN;
-    }
-
-    size_t len = ntohs(op->length);
-    if (len < sizeof *op || len - sizeof *op > msg->size) {
-        return OFPERR_OFPBRC_BAD_LEN;
-    }
-    len -= sizeof *op;
-
-    enum ofperr error = ofputil_port_from_ofp11(op->port_no, &pp->port_no);
-    if (error) {
-        return error;
-    }
-    pp->hw_addr = op->hw_addr;
-    ovs_strlcpy(pp->name, op->name, OFP_MAX_PORT_NAME_LEN);
-
-    pp->config = ntohl(op->config) & OFPPC11_ALL;
-    pp->state = ntohl(op->state) & OFPPS11_ALL;
-
-    struct ofpbuf properties = ofpbuf_const_initializer(ofpbuf_pull(msg, len),
-                                                        len);
+    struct ofpbuf properties = ofpbuf_const_initializer(props, len);
     while (properties.size > 0) {
         struct ofpbuf payload;
         enum ofperr error;
@@ -4443,6 +4422,65 @@ ofputil_pull_ofp14_port(struct ofputil_phy_port *pp, struct ofpbuf *msg)
     return 0;
 }
 
+static enum ofperr
+ofputil_pull_ofp14_port(struct ofputil_phy_port *pp, struct ofpbuf *msg)
+{
+    const struct ofp14_port *op = ofpbuf_try_pull(msg, sizeof *op);
+    if (!op) {
+        return OFPERR_OFPBRC_BAD_LEN;
+    }
+
+    size_t len = ntohs(op->length);
+    if (len < sizeof *op || len - sizeof *op > msg->size) {
+        return OFPERR_OFPBRC_BAD_LEN;
+    }
+    len -= sizeof *op;
+
+    enum ofperr error = ofputil_port_from_ofp11(op->port_no, &pp->port_no);
+    if (error) {
+        return error;
+    }
+    pp->hw_addr = op->hw_addr;
+    ovs_strlcpy_arrays(pp->name, op->name);
+
+    pp->config = ntohl(op->config) & OFPPC11_ALL;
+    pp->state = ntohl(op->state) & OFPPS11_ALL;
+
+    return ofputil_pull_ofp14_port_properties(ofpbuf_pull(msg, len), len, pp);
+}
+
+static enum ofperr
+ofputil_pull_ofp16_port(struct ofputil_phy_port *pp, struct ofpbuf *msg)
+{
+    const struct ofp16_port *op = ofpbuf_try_pull(msg, sizeof *op);
+    if (!op) {
+        return OFPERR_OFPBRC_BAD_LEN;
+    }
+
+    size_t len = ntohs(op->length);
+    if (len < sizeof *op || len - sizeof *op > msg->size) {
+        return OFPERR_OFPBRC_BAD_LEN;
+    }
+    len -= sizeof *op;
+
+    enum ofperr error = ofputil_port_from_ofp11(op->port_no, &pp->port_no);
+    if (error) {
+        return error;
+    }
+    if (op->hw_addr_type & htons(OFPPHAT16_EUI48)) {
+        pp->hw_addr = op->hw_addr;
+    }
+    if (op->hw_addr_type & htons(OFPPHAT16_EUI64)) {
+        pp->hw_addr64 = op->hw_addr64;
+    }
+    ovs_strlcpy_arrays(pp->name, op->name);
+
+    pp->config = ntohl(op->config) & OFPPC11_ALL;
+    pp->state = ntohl(op->state) & OFPPS11_ALL;
+
+    return ofputil_pull_ofp14_port_properties(ofpbuf_pull(msg, len), len, pp);
+}
+
 static void
 ofputil_encode_ofp10_phy_port(const struct ofputil_phy_port *pp,
                               struct ofp10_phy_port *opp)
@@ -4451,7 +4489,7 @@ ofputil_encode_ofp10_phy_port(const struct ofputil_phy_port *pp,
 
     opp->port_no = htons(ofp_to_u16(pp->port_no));
     opp->hw_addr = pp->hw_addr;
-    ovs_strlcpy(opp->name, pp->name, OFP_MAX_PORT_NAME_LEN);
+    ovs_strlcpy_arrays(opp->name, pp->name);
 
     opp->config = htonl(pp->config & OFPPC10_ALL);
     opp->state = htonl(pp->state & OFPPS10_ALL);
@@ -4470,7 +4508,7 @@ ofputil_encode_ofp11_port(const struct ofputil_phy_port *pp,
 
     op->port_no = ofputil_port_to_ofp11(pp->port_no);
     op->hw_addr = pp->hw_addr;
-    ovs_strlcpy(op->name, pp->name, OFP_MAX_PORT_NAME_LEN);
+    ovs_strlcpy_arrays(op->name, pp->name);
 
     op->config = htonl(pp->config & OFPPC11_ALL);
     op->state = htonl(pp->state & OFPPS11_ALL);
@@ -4485,8 +4523,20 @@ ofputil_encode_ofp11_port(const struct ofputil_phy_port *pp,
 }
 
 static void
-ofputil_put_ofp14_port(const struct ofputil_phy_port *pp,
-                       struct ofpbuf *b)
+ofputil_encode_ofp14_port_ethernet_prop(
+    const struct ofputil_phy_port *pp,
+    struct ofp14_port_desc_prop_ethernet *eth)
+{
+    eth->curr = netdev_port_features_to_ofp11(pp->curr);
+    eth->advertised = netdev_port_features_to_ofp11(pp->advertised);
+    eth->supported = netdev_port_features_to_ofp11(pp->supported);
+    eth->peer = netdev_port_features_to_ofp11(pp->peer);
+    eth->curr_speed = htonl(pp->curr_speed);
+    eth->max_speed = htonl(pp->max_speed);
+}
+
+static void
+ofputil_put_ofp14_port(const struct ofputil_phy_port *pp, struct ofpbuf *b)
 {
     struct ofp14_port *op;
     struct ofp14_port_desc_prop_ethernet *eth;
@@ -4497,17 +4547,39 @@ ofputil_put_ofp14_port(const struct ofputil_phy_port *pp,
     op->port_no = ofputil_port_to_ofp11(pp->port_no);
     op->length = htons(sizeof *op + sizeof *eth);
     op->hw_addr = pp->hw_addr;
-    ovs_strlcpy(op->name, pp->name, sizeof op->name);
+    ovs_strlcpy_arrays(op->name, pp->name);
     op->config = htonl(pp->config & OFPPC11_ALL);
     op->state = htonl(pp->state & OFPPS11_ALL);
 
     eth = ofpprop_put_zeros(b, OFPPDPT14_ETHERNET, sizeof *eth);
-    eth->curr = netdev_port_features_to_ofp11(pp->curr);
-    eth->advertised = netdev_port_features_to_ofp11(pp->advertised);
-    eth->supported = netdev_port_features_to_ofp11(pp->supported);
-    eth->peer = netdev_port_features_to_ofp11(pp->peer);
-    eth->curr_speed = htonl(pp->curr_speed);
-    eth->max_speed = htonl(pp->max_speed);
+    ofputil_encode_ofp14_port_ethernet_prop(pp, eth);
+}
+
+static void
+ofputil_put_ofp16_port(const struct ofputil_phy_port *pp, struct ofpbuf *b)
+{
+    struct ofp16_port *op;
+    struct ofp14_port_desc_prop_ethernet *eth;
+
+    ofpbuf_prealloc_tailroom(b, sizeof *op + sizeof *eth);
+
+    op = ofpbuf_put_zeros(b, sizeof *op);
+    op->port_no = ofputil_port_to_ofp11(pp->port_no);
+    op->length = htons(sizeof *op + sizeof *eth);
+    if (!eth_addr_is_zero(pp->hw_addr)) {
+        op->hw_addr_type |= htons(OFPPHAT16_EUI48);
+        op->hw_addr = pp->hw_addr;
+    }
+    if (!eth_addr64_is_zero(pp->hw_addr64)) {
+        op->hw_addr_type |= htons(OFPPHAT16_EUI64);
+        op->hw_addr64 = pp->hw_addr64;
+    }
+    ovs_strlcpy_arrays(op->name, pp->name);
+    op->config = htonl(pp->config & OFPPC11_ALL);
+    op->state = htonl(pp->state & OFPPS11_ALL);
+
+    eth = ofpprop_put_zeros(b, OFPPDPT14_ETHERNET, sizeof *eth);
+    ofputil_encode_ofp14_port_ethernet_prop(pp, eth);
 }
 
 static void
@@ -4531,8 +4603,10 @@ ofputil_put_phy_port(enum ofp_version ofp_version,
 
     case OFP14_VERSION:
     case OFP15_VERSION:
-    case OFP16_VERSION:
         ofputil_put_ofp14_port(pp, b);
+        break;
+    case OFP16_VERSION:
+        ofputil_put_ofp16_port(pp, b);
         break;
 
     default:
@@ -4932,8 +5006,11 @@ ofputil_encode_port_status(const struct ofputil_port_status *ps,
 
     case OFP14_VERSION:
     case OFP15_VERSION:
-    case OFP16_VERSION:
         raw = OFPRAW_OFPT14_PORT_STATUS;
+        break;
+
+    case OFP16_VERSION:
+        raw = OFPRAW_OFPT16_PORT_STATUS;
         break;
 
     default:
@@ -4964,74 +5041,126 @@ parse_port_mod_ethernet_property(struct ofpbuf *property,
     return error;
 }
 
+static enum ofperr
+ofputil_decode_ofp10_port_mod(const struct ofp10_port_mod *opm,
+                              struct ofputil_port_mod *pm)
+{
+    pm->port_no = u16_to_ofp(ntohs(opm->port_no));
+    pm->hw_addr = opm->hw_addr;
+    pm->config = ntohl(opm->config) & OFPPC10_ALL;
+    pm->mask = ntohl(opm->mask) & OFPPC10_ALL;
+    pm->advertise = netdev_port_features_from_ofp10(opm->advertise);
+    return 0;
+}
+
+static enum ofperr
+ofputil_decode_ofp11_port_mod(const struct ofp11_port_mod *opm,
+                              struct ofputil_port_mod *pm)
+{
+    enum ofperr error;
+
+    error = ofputil_port_from_ofp11(opm->port_no, &pm->port_no);
+    if (error) {
+        return error;
+    }
+
+    pm->hw_addr = opm->hw_addr;
+    pm->config = ntohl(opm->config) & OFPPC11_ALL;
+    pm->mask = ntohl(opm->mask) & OFPPC11_ALL;
+    pm->advertise = netdev_port_features_from_ofp11(opm->advertise);
+
+    return 0;
+}
+
+static enum ofperr
+ofputil_decode_ofp14_port_mod_properties(struct ofpbuf *b, bool loose,
+                                         struct ofputil_port_mod *pm)
+{
+    while (b->size > 0) {
+        struct ofpbuf property;
+        enum ofperr error;
+        uint64_t type;
+
+        error = ofpprop_pull(b, &property, &type);
+        if (error) {
+            return error;
+        }
+
+        switch (type) {
+        case OFPPMPT14_ETHERNET:
+            error = parse_port_mod_ethernet_property(&property, pm);
+            break;
+
+        default:
+            error = OFPPROP_UNKNOWN(loose, "port_mod", type);
+            break;
+        }
+
+        if (error) {
+            return error;
+        }
+    }
+    return 0;
+}
+
+static enum ofperr
+ofputil_decode_ofp14_port_mod(struct ofpbuf *b, bool loose,
+                              struct ofputil_port_mod *pm)
+{
+    const struct ofp14_port_mod *opm = ofpbuf_pull(b, sizeof *opm);
+    enum ofperr error = ofputil_port_from_ofp11(opm->port_no, &pm->port_no);
+    if (error) {
+        return error;
+    }
+
+    pm->hw_addr = opm->hw_addr;
+    pm->config = ntohl(opm->config) & OFPPC11_ALL;
+    pm->mask = ntohl(opm->mask) & OFPPC11_ALL;
+
+    return ofputil_decode_ofp14_port_mod_properties(b, loose, pm);
+}
+
+static enum ofperr
+ofputil_decode_ofp16_port_mod(struct ofpbuf *b, bool loose,
+                              struct ofputil_port_mod *pm)
+{
+    const struct ofp16_port_mod *opm = ofpbuf_pull(b, sizeof *opm);
+    enum ofperr error = ofputil_port_from_ofp11(opm->port_no, &pm->port_no);
+    if (error) {
+        return error;
+    }
+
+    if (opm->hw_addr_type & htons(OFPPHAT16_EUI48)) {
+        pm->hw_addr = opm->hw_addr;
+    }
+    if (opm->hw_addr_type & htons(OFPPHAT16_EUI64)) {
+        pm->hw_addr64 = opm->hw_addr64;
+    }
+    pm->hw_addr = opm->hw_addr;
+    pm->config = ntohl(opm->config) & OFPPC11_ALL;
+    pm->mask = ntohl(opm->mask) & OFPPC11_ALL;
+
+    return ofputil_decode_ofp14_port_mod_properties(b, loose, pm);
+}
+
 /* Decodes the OpenFlow "port mod" message in '*oh' into an abstract form in
  * '*pm'.  Returns 0 if successful, otherwise an OFPERR_* value. */
 enum ofperr
 ofputil_decode_port_mod(const struct ofp_header *oh,
                         struct ofputil_port_mod *pm, bool loose)
 {
+    memset(pm, 0, sizeof *pm);
+
     struct ofpbuf b = ofpbuf_const_initializer(oh, ntohs(oh->length));
     enum ofpraw raw = ofpraw_pull_assert(&b);
     if (raw == OFPRAW_OFPT10_PORT_MOD) {
-        const struct ofp10_port_mod *opm = b.data;
-
-        pm->port_no = u16_to_ofp(ntohs(opm->port_no));
-        pm->hw_addr = opm->hw_addr;
-        pm->config = ntohl(opm->config) & OFPPC10_ALL;
-        pm->mask = ntohl(opm->mask) & OFPPC10_ALL;
-        pm->advertise = netdev_port_features_from_ofp10(opm->advertise);
+        return ofputil_decode_ofp10_port_mod(b.data, pm);
     } else if (raw == OFPRAW_OFPT11_PORT_MOD) {
-        const struct ofp11_port_mod *opm = b.data;
-        enum ofperr error;
-
-        error = ofputil_port_from_ofp11(opm->port_no, &pm->port_no);
-        if (error) {
-            return error;
-        }
-
-        pm->hw_addr = opm->hw_addr;
-        pm->config = ntohl(opm->config) & OFPPC11_ALL;
-        pm->mask = ntohl(opm->mask) & OFPPC11_ALL;
-        pm->advertise = netdev_port_features_from_ofp11(opm->advertise);
+        return ofputil_decode_ofp11_port_mod(b.data, pm);
     } else if (raw == OFPRAW_OFPT14_PORT_MOD) {
-        const struct ofp14_port_mod *opm = ofpbuf_pull(&b, sizeof *opm);
-        enum ofperr error;
-
-        memset(pm, 0, sizeof *pm);
-
-        error = ofputil_port_from_ofp11(opm->port_no, &pm->port_no);
-        if (error) {
-            return error;
-        }
-
-        pm->hw_addr = opm->hw_addr;
-        pm->config = ntohl(opm->config) & OFPPC11_ALL;
-        pm->mask = ntohl(opm->mask) & OFPPC11_ALL;
-
-        while (b.size > 0) {
-            struct ofpbuf property;
-            enum ofperr error;
-            uint64_t type;
-
-            error = ofpprop_pull(&b, &property, &type);
-            if (error) {
-                return error;
-            }
-
-            switch (type) {
-            case OFPPMPT14_ETHERNET:
-                error = parse_port_mod_ethernet_property(&property, pm);
-                break;
-
-            default:
-                error = OFPPROP_UNKNOWN(loose, "port_mod", type);
-                break;
-            }
-
-            if (error) {
-                return error;
-            }
-        }
+        return ofputil_decode_ofp14_port_mod(&b, loose, pm);
+    } else if (raw == OFPRAW_OFPT16_PORT_MOD) {
+        return ofputil_decode_ofp16_port_mod(&b, loose, pm);
     } else {
         return OFPERR_OFPBRC_BAD_TYPE;
     }
@@ -5079,14 +5208,36 @@ ofputil_encode_port_mod(const struct ofputil_port_mod *pm,
         break;
     }
     case OFP14_VERSION:
-    case OFP15_VERSION:
-    case OFP16_VERSION: {
+    case OFP15_VERSION: {
         struct ofp14_port_mod *opm;
 
         b = ofpraw_alloc(OFPRAW_OFPT14_PORT_MOD, ofp_version, 0);
         opm = ofpbuf_put_zeros(b, sizeof *opm);
         opm->port_no = ofputil_port_to_ofp11(pm->port_no);
         opm->hw_addr = pm->hw_addr;
+        opm->config = htonl(pm->config & OFPPC11_ALL);
+        opm->mask = htonl(pm->mask & OFPPC11_ALL);
+
+        if (pm->advertise) {
+            ofpprop_put_be32(b, OFPPMPT14_ETHERNET,
+                             netdev_port_features_to_ofp11(pm->advertise));
+        }
+        break;
+    }
+    case OFP16_VERSION: {
+        struct ofp16_port_mod *opm;
+
+        b = ofpraw_alloc(OFPRAW_OFPT16_PORT_MOD, ofp_version, 0);
+        opm = ofpbuf_put_zeros(b, sizeof *opm);
+        opm->port_no = ofputil_port_to_ofp11(pm->port_no);
+        if (!eth_addr_is_zero(pm->hw_addr)) {
+            opm->hw_addr_type |= htons(OFPPHAT16_EUI48);
+            opm->hw_addr = pm->hw_addr;
+        }
+        if (!eth_addr64_is_zero(pm->hw_addr64)) {
+            opm->hw_addr_type |= htons(OFPPHAT16_EUI64);
+            opm->hw_addr64 = pm->hw_addr64;
+        }
         opm->config = htonl(pm->config & OFPPC11_ALL);
         opm->mask = htonl(pm->mask & OFPPC11_ALL);
 
@@ -5269,7 +5420,7 @@ ofputil_decode_table_features(struct ofpbuf *msg,
         return OFPERR_OFPTFFC_BAD_TABLE;
     }
 
-    ovs_strlcpy(tf->name, otf->name, OFP_MAX_TABLE_NAME_LEN);
+    ovs_strlcpy_arrays(tf->name, otf->name);
     tf->metadata_match = otf->metadata_match;
     tf->metadata_write = otf->metadata_write;
     tf->miss_config = OFPUTIL_TABLE_MISS_DEFAULT;
@@ -5480,7 +5631,7 @@ ofputil_append_table_features_reply(const struct ofputil_table_features *tf,
 
     otf = ofpbuf_put_zeros(reply, sizeof *otf);
     otf->table_id = tf->table_id;
-    ovs_strlcpy(otf->name, tf->name, sizeof otf->name);
+    ovs_strlcpy_arrays(otf->name, tf->name);
     otf->metadata_match = tf->metadata_match;
     otf->metadata_write = tf->metadata_write;
     if (version >= OFP14_VERSION) {
@@ -6257,7 +6408,7 @@ ofputil_put_ofp10_table_stats(const struct ofputil_table_stats *stats,
 
     out = ofpbuf_put_zeros(buf, sizeof *out);
     out->table_id = features->table_id;
-    ovs_strlcpy(out->name, features->name, sizeof out->name);
+    ovs_strlcpy_arrays(out->name, features->name);
     out->wildcards = mf_bitmap_to_of10(&wc);
     out->max_entries = htonl(features->max_entries);
     out->active_count = htonl(stats->active_count);
@@ -6328,7 +6479,7 @@ ofputil_put_ofp11_table_stats(const struct ofputil_table_stats *stats,
 
     out = ofpbuf_put_zeros(buf, sizeof *out);
     out->table_id = features->table_id;
-    ovs_strlcpy(out->name, features->name, sizeof out->name);
+    ovs_strlcpy_arrays(out->name, features->name);
     out->wildcards = mf_bitmap_to_of11(&wc);
     out->match = mf_bitmap_to_of11(&features->match);
     out->instructions = ovsinst_bitmap_to_openflow(
@@ -6353,7 +6504,7 @@ ofputil_put_ofp12_table_stats(const struct ofputil_table_stats *stats,
 
     out = ofpbuf_put_zeros(buf, sizeof *out);
     out->table_id = features->table_id;
-    ovs_strlcpy(out->name, features->name, sizeof out->name);
+    ovs_strlcpy_arrays(out->name, features->name);
     out->match = oxm_bitmap_from_mf_bitmap(&features->match, OFP12_VERSION);
     out->wildcards = oxm_bitmap_from_mf_bitmap(&features->wildcard,
                                              OFP12_VERSION);
@@ -6445,7 +6596,7 @@ ofputil_decode_ofp10_table_stats(struct ofpbuf *msg,
     }
 
     features->table_id = ots->table_id;
-    ovs_strlcpy(features->name, ots->name, sizeof features->name);
+    ovs_strlcpy_arrays(features->name, ots->name);
     features->max_entries = ntohl(ots->max_entries);
     features->match = features->wildcard = mf_bitmap_from_of10(ots->wildcards);
 
@@ -6470,7 +6621,7 @@ ofputil_decode_ofp11_table_stats(struct ofpbuf *msg,
     }
 
     features->table_id = ots->table_id;
-    ovs_strlcpy(features->name, ots->name, sizeof features->name);
+    ovs_strlcpy_arrays(features->name, ots->name);
     features->max_entries = ntohl(ots->max_entries);
     features->nonmiss.instructions = ovsinst_bitmap_from_openflow(
         ots->instructions, OFP11_VERSION);
@@ -6506,7 +6657,7 @@ ofputil_decode_ofp12_table_stats(struct ofpbuf *msg,
     }
 
     features->table_id = ots->table_id;
-    ovs_strlcpy(features->name, ots->name, sizeof features->name);
+    ovs_strlcpy_arrays(features->name, ots->name);
     features->metadata_match = ots->metadata_match;
     features->metadata_write = ots->metadata_write;
     features->miss_config = ofputil_decode_table_miss(ots->config,
@@ -7103,7 +7254,7 @@ ofputil_port_from_string(const char *s, ofp_port_t *portp)
                       "be translated to %u when talking to an OF1.1 or "
                       "later controller", port32, port32 + OFPP11_OFFSET);
         } else if (port32 <= ofp_to_u16(OFPP_LAST_RESV)) {
-            char name[OFP_MAX_PORT_NAME_LEN];
+            char name[OFP10_MAX_PORT_NAME_LEN];
 
             ofputil_port_to_string(u16_to_ofp(port32), name, sizeof name);
             VLOG_WARN_ONCE("referring to port %s as %"PRIu32" is deprecated "
@@ -7148,7 +7299,7 @@ ofputil_port_from_string(const char *s, ofp_port_t *portp)
 void
 ofputil_format_port(ofp_port_t port, struct ds *s)
 {
-    char name[OFP_MAX_PORT_NAME_LEN];
+    char name[OFP10_MAX_PORT_NAME_LEN];
 
     ofputil_port_to_string(port, name, sizeof name);
     ds_put_cstr(s, name);
@@ -7160,7 +7311,7 @@ ofputil_format_port(ofp_port_t port, struct ds *s)
  * by name, e.g. "LOCAL". */
 void
 ofputil_port_to_string(ofp_port_t port,
-                       char namebuf[OFP_MAX_PORT_NAME_LEN], size_t bufsize)
+                       char namebuf[OFP10_MAX_PORT_NAME_LEN], size_t bufsize)
 {
     switch (port) {
 #define OFPUTIL_NAMED_PORT(NAME)                        \
@@ -7259,8 +7410,9 @@ ofputil_pull_phy_port(enum ofp_version ofp_version, struct ofpbuf *b,
     }
     case OFP14_VERSION:
     case OFP15_VERSION:
-    case OFP16_VERSION:
         return b->size ? ofputil_pull_ofp14_port(pp, b) : EOF;
+    case OFP16_VERSION:
+        return b->size ? ofputil_pull_ofp16_port(pp, b) : EOF;
     default:
         OVS_NOT_REACHED();
     }

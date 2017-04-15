@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -156,6 +156,8 @@ static const struct eth_addr eth_addr_exact OVS_UNUSED
 
 static const struct eth_addr eth_addr_zero OVS_UNUSED
     = { { { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } } };
+static const struct eth_addr64 eth_addr64_zero OVS_UNUSED
+    = { { { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } } };
 
 static const struct eth_addr eth_addr_stp OVS_UNUSED
     = { { { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x00 } } };
@@ -188,6 +190,10 @@ static inline bool eth_addr_is_zero(const struct eth_addr a)
 {
     return !(a.be16[0] | a.be16[1] | a.be16[2]);
 }
+static inline bool eth_addr64_is_zero(const struct eth_addr64 a)
+{
+    return !(a.be16[0] | a.be16[1] | a.be16[2] | a.be16[3]);
+}
 
 static inline int eth_mask_is_exact(const struct eth_addr a)
 {
@@ -199,11 +205,21 @@ static inline int eth_addr_compare_3way(const struct eth_addr a,
 {
     return memcmp(&a, &b, sizeof a);
 }
+static inline int eth_addr64_compare_3way(const struct eth_addr64 a,
+                                          const struct eth_addr64 b)
+{
+    return memcmp(&a, &b, sizeof a);
+}
 
 static inline bool eth_addr_equals(const struct eth_addr a,
                                    const struct eth_addr b)
 {
     return !eth_addr_compare_3way(a, b);
+}
+static inline bool eth_addr64_equals(const struct eth_addr64 a,
+                                     const struct eth_addr64 b)
+{
+    return !eth_addr64_compare_3way(a, b);
 }
 
 static inline bool eth_addr_equal_except(const struct eth_addr a,
@@ -312,6 +328,22 @@ ovs_be32 set_mpls_lse_values(uint8_t ttl, uint8_t tc, uint8_t bos,
 #define ETH_ADDR_BYTES_ARGS(EAB) \
          (EAB)[0], (EAB)[1], (EAB)[2], (EAB)[3], (EAB)[4], (EAB)[5]
 #define ETH_ADDR_STRLEN 17
+
+/* Example:
+ *
+ * struct eth_addr64 eui64;
+ *    [...]
+ * printf("The EUI-64 address is "ETH_ADDR64_FMT"\n", ETH_ADDR64_ARGS(mac));
+ *
+ */
+#define ETH_ADDR64_FMT \
+    "%02"PRIx8":%02"PRIx8":%02"PRIx8":%02"PRIx8":" \
+    "%02"PRIx8":%02"PRIx8":%02"PRIx8":%02"PRIx8
+#define ETH_ADDR64_ARGS(EA) ETH_ADDR64_BYTES_ARGS((EA).ea64)
+#define ETH_ADDR64_BYTES_ARGS(EAB) \
+         (EAB)[0], (EAB)[1], (EAB)[2], (EAB)[3], \
+         (EAB)[4], (EAB)[5], (EAB)[6], (EAB)[7]
+#define ETH_ADDR64_STRLEN 23
 
 /* Example:
  *
@@ -1004,6 +1036,26 @@ in6_addr_solicited_node(struct in6_addr *addr, const struct in6_addr *ip6)
     taddr->be16[5] = htons(0x1);
     taddr->be16[6] = htons(0xff00);
     memcpy(&addr->s6_addr[13], &ip6->s6_addr[13], 3);
+}
+
+/*
+ * Generates ipv6 EUI64 address from the given eth addr
+ * and prefix and stores it in 'lla'
+ */
+static inline void
+in6_generate_eui64(struct eth_addr ea, struct in6_addr *prefix,
+                   struct in6_addr *lla)
+{
+    union ovs_16aligned_in6_addr *taddr = (void *) lla;
+    union ovs_16aligned_in6_addr *prefix_taddr = (void *) prefix;
+    taddr->be16[0] = prefix_taddr->be16[0];
+    taddr->be16[1] = prefix_taddr->be16[1];
+    taddr->be16[2] = prefix_taddr->be16[2];
+    taddr->be16[3] = prefix_taddr->be16[3];
+    taddr->be16[4] = htons(((ea.ea[0] ^ 0x02) << 8) | ea.ea[1]);
+    taddr->be16[5] = htons(ea.ea[2] << 8 | 0x00ff);
+    taddr->be16[6] = htons(0xfe << 8 | ea.ea[3]);
+    taddr->be16[7] = ea.be16[2];
 }
 
 /*

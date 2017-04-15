@@ -191,6 +191,7 @@ Linda Sun                       lsun@vmware.com
 Lior Neudorfer                  lior@guardicore.com
 Lorand Jakab                    lojakab@cisco.com
 Luca Giraudo                    lgiraudo@nicira.com
+Lucas Alvares Gomes             lucasagomes@gmail.com
 Lucian Petrut                   lpetrut@cloudbasesolutions.com
 Luigi Rizzo                     rizzo@iet.unipi.it
 Luis E. P.                      l31g@hotmail.com
@@ -322,6 +323,7 @@ Zoltan Kiss                     zoltan.kiss@citrix.com
 Zhi Yong Wu                     zwu.kernel@gmail.com
 Zang MingJie                    zealot0630@gmail.com
 nickcooper-zhangtonghao         nickcooper-zhangtonghao@opencloud.tech
+wenxu                           wenxu@ucloud.cn
 wisd0me                         ak47izatool@gmail.com
 xushengping                     shengping.xu@huawei.com
 yinpeijun                       yinpeijun@huawei.com
