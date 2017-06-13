@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,6 +37,7 @@ struct ds;
 struct flow_wildcards;
 struct minimask;
 struct dp_packet;
+struct ofputil_port_map;
 struct pkt_metadata;
 struct match;
 
@@ -73,7 +74,10 @@ void flow_unwildcard_tp_ports(const struct flow *, struct flow_wildcards *);
 void flow_get_metadata(const struct flow *, struct match *flow_metadata);
 
 const char *ct_state_to_string(uint32_t state);
-char *flow_to_string(const struct flow *);
+uint32_t ct_state_from_string(const char *);
+void flow_clear_conntrack(struct flow *);
+
+char *flow_to_string(const struct flow *, const struct ofputil_port_map *);
 void format_flags(struct ds *ds, const char *(*bit_to_string)(uint32_t),
                   uint32_t flags, char del);
 void format_flags_masked(struct ds *ds, const char *name,
@@ -83,8 +87,9 @@ int parse_flags(const char *s, const char *(*bit_to_string)(uint32_t),
                 char end, const char *field_name, char **res_string,
                 uint32_t *res_flags, uint32_t allowed, uint32_t *res_mask);
 
-void flow_format(struct ds *, const struct flow *);
-void flow_print(FILE *, const struct flow *);
+void flow_format(struct ds *, const struct flow *,
+                 const struct ofputil_port_map *);
+void flow_print(FILE *, const struct flow *, const struct ofputil_port_map *);
 static inline int flow_compare_3way(const struct flow *, const struct flow *);
 static inline bool flow_equal(const struct flow *, const struct flow *);
 static inline size_t flow_hash(const struct flow *, uint32_t basis);
@@ -905,7 +910,7 @@ static inline void
 pkt_metadata_from_flow(struct pkt_metadata *md, const struct flow *flow)
 {
     /* Update this function whenever struct flow changes. */
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 38);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 39);
 
     md->recirc_id = flow->recirc_id;
     md->dp_hash = flow->dp_hash;
@@ -949,6 +954,15 @@ pkt_metadata_from_flow(struct pkt_metadata *md, const struct flow *flow)
 
 #define FLOW_WC_GET_AND_MASK_WC(FLOW, WC, FIELD) \
     (((WC) ? WC_MASK_FIELD(WC, FIELD) : NULL), ((FLOW)->FIELD))
+
+static inline bool is_ethernet(const struct flow *flow,
+                               struct flow_wildcards *wc)
+{
+    if (wc) {
+        WC_MASK_FIELD(wc, packet_type);
+    }
+    return flow->packet_type == htonl(PT_ETH);
+}
 
 static inline bool is_vlan(const struct flow *flow,
                            struct flow_wildcards *wc)

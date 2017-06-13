@@ -1435,7 +1435,7 @@ do_execute__(struct ovs_cmdl_context *ctx, bool ro)
         char *s;
 
         params = parse_json(ctx->argv[i]);
-        result = ovsdb_execute(db, NULL, params, ro,  0, NULL);
+        result = ovsdb_execute(db, NULL, params, ro,  NULL, NULL, 0, NULL);
         s = json_to_string(result, JSSF_SORT);
         printf("%s\n", s);
         free(s);
@@ -1513,7 +1513,8 @@ do_trigger(struct ovs_cmdl_context *ctx)
             json_destroy(params);
         } else {
             struct test_trigger *t = xmalloc(sizeof *t);
-            ovsdb_trigger_init(&session, db, &t->trigger, params, now, false);
+            ovsdb_trigger_init(&session, db, &t->trigger, params, now, false,
+                               NULL, NULL);
             t->number = number++;
             if (ovsdb_trigger_is_complete(&t->trigger)) {
                 do_trigger_dump(t, now, "immediate");
@@ -2529,6 +2530,7 @@ do_idl_partial_update_map_column(struct ovs_cmdl_context *ctx)
     printf("%03d: After trying to delete a deleted element\n", step++);
     dump_simple2(idl, myRow, step++);
 
+    ovsdb_idl_destroy(idl);
     printf("%03d: End test\n", step);
     return;
 }
@@ -2648,6 +2650,7 @@ do_idl_partial_update_set_column(struct ovs_cmdl_context *ctx)
     ovsdb_idl_get_initial_snapshot(idl);
     printf("%03d: After add to other table + set of strong ref\n", step++);
     dump_simple3(idl, myRow, step++);
+    ovsdb_idl_destroy(idl);
     printf("%03d: End test\n", step);
     return;
 }

@@ -173,6 +173,7 @@ ovs_key_attr_to_string(enum ovs_key_attr attr, char *namebuf, size_t bufsize)
     case OVS_KEY_ATTR_MPLS: return "mpls";
     case OVS_KEY_ATTR_DP_HASH: return "dp_hash";
     case OVS_KEY_ATTR_RECIRC_ID: return "recirc_id";
+    case OVS_KEY_ATTR_PACKET_TYPE: return "packet_type";
 
     case __OVS_KEY_ATTR_MAX:
     default:
@@ -1078,14 +1079,41 @@ parse_odp_userspace_action(const char *s, struct ofpbuf *actions)
             odp_put_userspace_action(pid, user_data, user_data_size,
                                      tunnel_out_port, include_actions, actions);
             res = n + n1;
+            goto out;
         } else if (s[n] == ')') {
             odp_put_userspace_action(pid, user_data, user_data_size,
                                      ODPP_NONE, include_actions, actions);
             res = n + 1;
-        } else {
-            res = -EINVAL;
+            goto out;
         }
     }
+
+    {
+        struct ovs_action_push_eth push;
+        int eth_type = 0;
+        int n1 = -1;
+
+        if (ovs_scan(&s[n], "push_eth(src="ETH_ADDR_SCAN_FMT","
+                     "dst="ETH_ADDR_SCAN_FMT",type=%i)%n",
+                     ETH_ADDR_SCAN_ARGS(push.addresses.eth_src),
+                     ETH_ADDR_SCAN_ARGS(push.addresses.eth_dst),
+                     &eth_type, &n1)) {
+
+            nl_msg_put_unspec(actions, OVS_ACTION_ATTR_PUSH_ETH,
+                              &push, sizeof push);
+
+            res = n + n1;
+            goto out;
+        }
+    }
+
+    if (!strncmp(&s[n], "pop_eth", 7)) {
+        nl_msg_put_flag(actions, OVS_ACTION_ATTR_POP_ETH);
+        res = 7;
+        goto out;
+    }
+
+    res = -EINVAL;
 out:
     ofpbuf_uninit(&buf);
     return res;
@@ -1109,7 +1137,7 @@ ovs_parse_tnl_push(const char *s, struct ovs_action_push_tnl *data)
         return -EINVAL;
     }
     eth = (struct eth_header *) data->header;
-    l3 = (data->header + sizeof *eth);
+    l3 = (struct ip_header *) (eth + 1);
     ip = (struct ip_header *) l3;
     ip6 = (struct ovs_16aligned_ip6_hdr *) l3;
     if (!ovs_scan_len(s, &n, "header(size=%"SCNi32",type=%"SCNi32","
@@ -1920,6 +1948,7 @@ static const struct attr_len_tbl ovs_flow_key_attr_lens[OVS_KEY_ATTR_MAX + 1] = 
     [OVS_KEY_ATTR_CT_LABELS] = { .len = sizeof(struct ovs_key_ct_labels) },
     [OVS_KEY_ATTR_CT_ORIG_TUPLE_IPV4] = { .len = sizeof(struct ovs_key_ct_tuple_ipv4) },
     [OVS_KEY_ATTR_CT_ORIG_TUPLE_IPV6] = { .len = sizeof(struct ovs_key_ct_tuple_ipv6) },
+    [OVS_KEY_ATTR_PACKET_TYPE] = { .len = 4  },
 };
 
 /* Returns the correct length of the payload for a flow key attribute of the
@@ -2924,6 +2953,27 @@ format_odp_key_attr(const struct nlattr *a, const struct nlattr *ma,
         }
         break;
 
+    case OVS_KEY_ATTR_PACKET_TYPE: {
+        ovs_be32 packet_type = nl_attr_get_be32(a);
+        uint16_t ns = pt_ns(packet_type);
+        uint16_t ns_type = pt_ns_type(packet_type);
+
+        if (!is_exact) {
+            ovs_be32 mask = nl_attr_get_be32(ma);
+            uint16_t mask_ns_type = pt_ns_type(mask);
+
+            if (mask == 0) {
+                ds_put_format(ds, "ns=%u,id=*", ns);
+            } else {
+                ds_put_format(ds, "ns=%u,id=%#"PRIx16"/%#"PRIx16,
+                              ns, ns_type, mask_ns_type);
+            }
+        } else {
+            ds_put_format(ds, "ns=%u,id=%#"PRIx16, ns, ns_type);
+        }
+        break;
+    }
+
     case OVS_KEY_ATTR_ETHERNET: {
         const struct ovs_key_ethernet *mask = ma ? nl_attr_get(ma) : NULL;
         const struct ovs_key_ethernet *key = nl_attr_get(a);
@@ -3533,30 +3583,12 @@ ovs_to_odp_ct_state(uint8_t state)
 {
     uint32_t odp = 0;
 
-    if (state & CS_NEW) {
-        odp |= OVS_CS_F_NEW;
+#define CS_STATE(ENUM, INDEX, NAME)             \
+    if (state & CS_##ENUM) {                    \
+        odp |= OVS_CS_F_##ENUM;                 \
     }
-    if (state & CS_ESTABLISHED) {
-        odp |= OVS_CS_F_ESTABLISHED;
-    }
-    if (state & CS_RELATED) {
-        odp |= OVS_CS_F_RELATED;
-    }
-    if (state & CS_INVALID) {
-        odp |= OVS_CS_F_INVALID;
-    }
-    if (state & CS_REPLY_DIR) {
-        odp |= OVS_CS_F_REPLY_DIR;
-    }
-    if (state & CS_TRACKED) {
-        odp |= OVS_CS_F_TRACKED;
-    }
-    if (state & CS_SRC_NAT) {
-        odp |= OVS_CS_F_SRC_NAT;
-    }
-    if (state & CS_DST_NAT) {
-        odp |= OVS_CS_F_DST_NAT;
-    }
+    CS_STATES
+#undef CS_STATE
 
     return odp;
 }
@@ -3566,30 +3598,12 @@ odp_to_ovs_ct_state(uint32_t flags)
 {
     uint32_t state = 0;
 
-    if (flags & OVS_CS_F_NEW) {
-        state |= CS_NEW;
+#define CS_STATE(ENUM, INDEX, NAME) \
+    if (flags & OVS_CS_F_##ENUM) {  \
+        state |= CS_##ENUM;         \
     }
-    if (flags & OVS_CS_F_ESTABLISHED) {
-        state |= CS_ESTABLISHED;
-    }
-    if (flags & OVS_CS_F_RELATED) {
-        state |= CS_RELATED;
-    }
-    if (flags & OVS_CS_F_INVALID) {
-        state |= CS_INVALID;
-    }
-    if (flags & OVS_CS_F_REPLY_DIR) {
-        state |= CS_REPLY_DIR;
-    }
-    if (flags & OVS_CS_F_TRACKED) {
-        state |= CS_TRACKED;
-    }
-    if (flags & OVS_CS_F_SRC_NAT) {
-        state |= CS_SRC_NAT;
-    }
-    if (flags & OVS_CS_F_DST_NAT) {
-        state |= CS_DST_NAT;
-    }
+    CS_STATES
+#undef CS_STATE
 
     return state;
 }
@@ -4426,7 +4440,8 @@ odp_flow_key_from_flow__(const struct odp_flow_key_parms *parms,
     size_t encap[FLOW_MAX_VLAN_HEADERS] = {0};
     size_t max_vlans;
     const struct flow *flow = parms->flow;
-    const struct flow *data = export_mask ? parms->mask : parms->flow;
+    const struct flow *mask = parms->mask;
+    const struct flow *data = export_mask ? mask : flow;
 
     nl_msg_put_u32(buf, OVS_KEY_ATTR_PRIORITY, data->skb_priority);
 
@@ -4485,36 +4500,44 @@ odp_flow_key_from_flow__(const struct odp_flow_key_parms *parms,
         nl_msg_put_odp_port(buf, OVS_KEY_ATTR_IN_PORT, data->in_port.odp_port);
     }
 
-    eth_key = nl_msg_put_unspec_uninit(buf, OVS_KEY_ATTR_ETHERNET,
-                                       sizeof *eth_key);
-    get_ethernet_key(data, eth_key);
+    if (export_mask || flow->packet_type != htonl(PT_ETH)) {
+        nl_msg_put_be32(buf, OVS_KEY_ATTR_PACKET_TYPE, data->packet_type);
+    }
 
     if (OVS_UNLIKELY(parms->probe)) {
         max_vlans = FLOW_MAX_VLAN_HEADERS;
     } else {
         max_vlans = MIN(parms->support.max_vlan_headers, flow_vlan_limit);
     }
-    for (int encaps = 0; encaps < max_vlans; encaps++) {
-        ovs_be16 tpid = flow->vlans[encaps].tpid;
 
-        if (flow->vlans[encaps].tci == htons(0)) {
-            if (eth_type_vlan(flow->dl_type)) {
-                /* If VLAN was truncated the tpid is in dl_type */
-                tpid = flow->dl_type;
-            } else {
-                break;
+    /* Conditionally add L2 attributes for Ethernet packets */
+    if (flow->packet_type == htonl(PT_ETH)) {
+        eth_key = nl_msg_put_unspec_uninit(buf, OVS_KEY_ATTR_ETHERNET,
+                                           sizeof *eth_key);
+        get_ethernet_key(data, eth_key);
+
+        for (int encaps = 0; encaps < max_vlans; encaps++) {
+            ovs_be16 tpid = flow->vlans[encaps].tpid;
+
+            if (flow->vlans[encaps].tci == htons(0)) {
+                if (eth_type_vlan(flow->dl_type)) {
+                    /* If VLAN was truncated the tpid is in dl_type */
+                    tpid = flow->dl_type;
+                } else {
+                    break;
+                }
             }
-        }
 
-        if (export_mask) {
-            nl_msg_put_be16(buf, OVS_KEY_ATTR_ETHERTYPE, OVS_BE16_MAX);
-        } else {
-            nl_msg_put_be16(buf, OVS_KEY_ATTR_ETHERTYPE, tpid);
-        }
-        nl_msg_put_be16(buf, OVS_KEY_ATTR_VLAN, data->vlans[encaps].tci);
-        encap[encaps] = nl_msg_start_nested(buf, OVS_KEY_ATTR_ENCAP);
-        if (flow->vlans[encaps].tci == htons(0)) {
-            goto unencap;
+            if (export_mask) {
+                nl_msg_put_be16(buf, OVS_KEY_ATTR_ETHERTYPE, OVS_BE16_MAX);
+            } else {
+                nl_msg_put_be16(buf, OVS_KEY_ATTR_ETHERTYPE, tpid);
+            }
+            nl_msg_put_be16(buf, OVS_KEY_ATTR_VLAN, data->vlans[encaps].tci);
+            encap[encaps] = nl_msg_start_nested(buf, OVS_KEY_ATTR_ENCAP);
+            if (flow->vlans[encaps].tci == htons(0)) {
+                goto unencap;
+            }
         }
     }
 
@@ -4667,8 +4690,10 @@ odp_flow_key_from_mask(const struct odp_flow_key_parms *parms,
 
 /* Generate ODP flow key from the given packet metadata */
 void
-odp_key_from_pkt_metadata(struct ofpbuf *buf, const struct pkt_metadata *md)
+odp_key_from_dp_packet(struct ofpbuf *buf, const struct dp_packet *packet)
 {
+    const struct pkt_metadata *md = &packet->md;
+
     nl_msg_put_u32(buf, OVS_KEY_ATTR_PRIORITY, md->skb_priority);
 
     if (flow_tnl_dst_is_set(&md->tunnel)) {
@@ -4710,18 +4735,29 @@ odp_key_from_pkt_metadata(struct ofpbuf *buf, const struct pkt_metadata *md)
     if (md->in_port.odp_port != ODPP_NONE) {
         nl_msg_put_odp_port(buf, OVS_KEY_ATTR_IN_PORT, md->in_port.odp_port);
     }
+
+    /* Add OVS_KEY_ATTR_ETHERNET for non-Ethernet packets */
+    if (pt_ns(packet->packet_type) == OFPHTN_ETHERTYPE) {
+        nl_msg_put_be16(buf, OVS_KEY_ATTR_ETHERTYPE,
+                        pt_ns_type_be(packet->packet_type));
+    }
 }
 
 /* Generate packet metadata from the given ODP flow key. */
 void
-odp_key_to_pkt_metadata(const struct nlattr *key, size_t key_len,
-                        struct pkt_metadata *md)
+odp_key_to_dp_packet(const struct nlattr *key, size_t key_len,
+                     struct dp_packet *packet)
 {
+    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
     const struct nlattr *nla;
+    struct pkt_metadata *md = &packet->md;
+    ovs_be32 packet_type = htonl(PT_UNKNOWN);
+    ovs_be16 ethertype = 0;
     size_t left;
     uint32_t wanted_attrs = 1u << OVS_KEY_ATTR_PRIORITY |
         1u << OVS_KEY_ATTR_SKB_MARK | 1u << OVS_KEY_ATTR_TUNNEL |
-        1u << OVS_KEY_ATTR_IN_PORT;
+        1u << OVS_KEY_ATTR_IN_PORT | 1u << OVS_KEY_ATTR_ETHERTYPE |
+        1u << OVS_KEY_ATTR_ETHERNET;
 
     pkt_metadata_init(md, ODPP_NONE);
 
@@ -4801,13 +4837,31 @@ odp_key_to_pkt_metadata(const struct nlattr *key, size_t key_len,
             md->in_port.odp_port = nl_attr_get_odp_port(nla);
             wanted_attrs &= ~(1u << OVS_KEY_ATTR_IN_PORT);
             break;
+        case OVS_KEY_ATTR_ETHERNET:
+            /* Presence of OVS_KEY_ATTR_ETHERNET indicates Ethernet packet. */
+            packet_type = htonl(PT_ETH);
+            wanted_attrs &= ~(1u << OVS_KEY_ATTR_ETHERNET);
+            break;
+        case OVS_KEY_ATTR_ETHERTYPE:
+            ethertype = nl_attr_get_be16(nla);
+            wanted_attrs &= ~(1u << OVS_KEY_ATTR_ETHERTYPE);
+            break;
         default:
             break;
         }
 
         if (!wanted_attrs) {
-            return; /* Have everything. */
+            break; /* Have everything. */
         }
+    }
+
+    if (packet_type == htonl(PT_ETH)) {
+        packet->packet_type = htonl(PT_ETH);
+    } else if (packet_type == htonl(PT_UNKNOWN) && ethertype != 0) {
+        packet->packet_type = PACKET_TYPE_BE(OFPHTN_ETHERTYPE,
+                                             ntohs(ethertype));
+    } else {
+        VLOG_ERR_RL(&rl, "Packet without ETHERTYPE. Unknown packet_type.");
     }
 }
 
@@ -4972,7 +5026,19 @@ parse_ethertype(const struct nlattr *attrs[OVS_KEY_ATTR_MAX + 1],
         *expected_attrs |= UINT64_C(1) << OVS_KEY_ATTR_ETHERTYPE;
     } else {
         if (!is_mask) {
-            flow->dl_type = htons(FLOW_DL_TYPE_NONE);
+            /* Default ethertype for well-known L3 packets. */
+            if (present_attrs & (UINT64_C(1) << OVS_KEY_ATTR_IPV4)) {
+                flow->dl_type = htons(ETH_TYPE_IP);
+            } else if (present_attrs & (UINT64_C(1) << OVS_KEY_ATTR_IPV6)) {
+                flow->dl_type = htons(ETH_TYPE_IPV6);
+            } else if (present_attrs & (UINT64_C(1) << OVS_KEY_ATTR_MPLS)) {
+                flow->dl_type = htons(ETH_TYPE_MPLS);
+            } else {
+                flow->dl_type = htons(FLOW_DL_TYPE_NONE);
+            }
+        } else if (src_flow->packet_type != htonl(PT_ETH)) {
+            /* dl_type is mandatory for non-Ethernet packets */
+            flow->dl_type = htons(0xffff);
         } else if (ntohs(src_flow->dl_type) < ETH_TYPE_MIN) {
             /* See comments in odp_flow_key_from_flow__(). */
             VLOG_ERR_RL(&rl, "mask expected for non-Ethernet II frame");
@@ -5414,23 +5480,37 @@ odp_flow_key_to_flow__(const struct nlattr *key, size_t key_len,
         flow->in_port.odp_port = ODPP_NONE;
     }
 
-    /* Ethernet header. */
+    if (present_attrs & (UINT64_C(1) << OVS_KEY_ATTR_PACKET_TYPE)) {
+        flow->packet_type
+            = nl_attr_get_be32(attrs[OVS_KEY_ATTR_PACKET_TYPE]);
+        expected_attrs |= UINT64_C(1) << OVS_KEY_ATTR_PACKET_TYPE;
+    } else if (!is_mask) {
+        flow->packet_type = htonl(PT_ETH);
+    }
+
+    /* Check for Ethernet header. */
     if (present_attrs & (UINT64_C(1) << OVS_KEY_ATTR_ETHERNET)) {
         const struct ovs_key_ethernet *eth_key;
 
         eth_key = nl_attr_get(attrs[OVS_KEY_ATTR_ETHERNET]);
         put_ethernet_key(eth_key, flow);
-        if (is_mask) {
-            expected_attrs |= UINT64_C(1) << OVS_KEY_ATTR_ETHERNET;
+        if (!is_mask) {
+            flow->packet_type = htonl(PT_ETH);
         }
-    }
-    if (!is_mask) {
         expected_attrs |= UINT64_C(1) << OVS_KEY_ATTR_ETHERNET;
+    }
+    else if (present_attrs & (UINT64_C(1) << OVS_KEY_ATTR_ETHERTYPE)) {
+        ovs_be16 ethertype = nl_attr_get_be16(attrs[OVS_KEY_ATTR_ETHERTYPE]);
+        if (!is_mask) {
+            flow->packet_type = PACKET_TYPE_BE(OFPHTN_ETHERTYPE,
+                                               ntohs(ethertype));
+        }
+        expected_attrs |= UINT64_C(1) << OVS_KEY_ATTR_ETHERTYPE;
     }
 
     /* Get Ethertype or 802.1Q TPID or FLOW_DL_TYPE_NONE. */
     if (!parse_ethertype(attrs, present_attrs, &expected_attrs, flow,
-        src_flow)) {
+                         src_flow)) {
         return ODP_FIT_ERROR;
     }
 
@@ -5564,6 +5644,31 @@ odp_put_userspace_action(uint32_t pid,
 }
 
 void
+odp_put_pop_eth_action(struct ofpbuf *odp_actions)
+{
+    nl_msg_put_flag(odp_actions, OVS_ACTION_ATTR_POP_ETH);
+}
+
+void
+odp_put_push_eth_action(struct ofpbuf *odp_actions,
+                        const struct eth_addr *eth_src,
+                        const struct eth_addr *eth_dst)
+{
+    struct ovs_action_push_eth eth;
+
+    memset(&eth, 0, sizeof eth);
+    if (eth_src) {
+        eth.addresses.eth_src = *eth_src;
+    }
+    if (eth_dst) {
+        eth.addresses.eth_dst = *eth_dst;
+    }
+
+    nl_msg_put_unspec(odp_actions, OVS_ACTION_ATTR_PUSH_ETH,
+                      &eth, sizeof eth);
+}
+
+void
 odp_put_tunnel_action(const struct flow_tnl *tunnel,
                       struct ofpbuf *odp_actions)
 {
@@ -5692,6 +5797,29 @@ commit_set_ether_addr_action(const struct flow *flow, struct flow *base_flow,
                &key, &base, &mask, sizeof key, odp_actions)) {
         put_ethernet_key(&base, base_flow);
         put_ethernet_key(&mask, &wc->masks);
+    }
+}
+
+static void
+commit_ether_action(const struct flow *flow, struct flow *base_flow,
+                    struct ofpbuf *odp_actions, struct flow_wildcards *wc,
+                    bool use_masked)
+{
+    if (flow->packet_type == htonl(PT_ETH)) {
+        if (base_flow->packet_type != htonl(PT_ETH)) {
+            odp_put_push_eth_action(odp_actions, &flow->dl_src, &flow->dl_dst);
+            base_flow->packet_type = flow->packet_type;
+            base_flow->dl_src = flow->dl_src;
+            base_flow->dl_dst = flow->dl_dst;
+        } else {
+            commit_set_ether_addr_action(flow, base_flow, odp_actions, wc,
+                                         use_masked);
+        }
+    } else {
+        if (base_flow->packet_type == htonl(PT_ETH)) {
+            odp_put_pop_eth_action(odp_actions);
+            base_flow->packet_type = flow->packet_type;
+        }
     }
 }
 
@@ -6149,7 +6277,7 @@ commit_odp_actions(const struct flow *flow, struct flow *base,
     enum slow_path_reason slow1, slow2;
     bool mpls_done = false;
 
-    commit_set_ether_addr_action(flow, base, odp_actions, wc, use_masked);
+    commit_ether_action(flow, base, odp_actions, wc, use_masked);
     /* Make packet a non-MPLS packet before committing L3/4 actions,
      * which would otherwise do nothing. */
     if (eth_type_mpls(base->dl_type) && !eth_type_mpls(flow->dl_type)) {

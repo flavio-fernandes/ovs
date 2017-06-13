@@ -143,7 +143,7 @@ void odp_portno_names_destroy(struct hmap *portno_names);
  * add another field and forget to adjust this value.
  */
 #define ODPUTIL_FLOW_KEY_BYTES 640
-BUILD_ASSERT_DECL(FLOW_WC_SEQ == 38);
+BUILD_ASSERT_DECL(FLOW_WC_SEQ == 39);
 
 /* A buffer with sufficient size and alignment to hold an nlattr-formatted flow
  * key.  An array of "struct nlattr" might not, in theory, be sufficiently
@@ -233,9 +233,9 @@ uint32_t odp_flow_key_hash(const struct nlattr *, size_t);
 
 /* Estimated space needed for metadata. */
 enum { ODP_KEY_METADATA_SIZE = 9 * 8 };
-void odp_key_from_pkt_metadata(struct ofpbuf *, const struct pkt_metadata *);
-void odp_key_to_pkt_metadata(const struct nlattr *key, size_t key_len,
-                              struct pkt_metadata *md);
+void odp_key_from_dp_packet(struct ofpbuf *, const struct dp_packet *);
+void odp_key_to_dp_packet(const struct nlattr *key, size_t key_len,
+                          struct dp_packet *md);
 
 /* How well a kernel-provided flow key (a sequence of OVS_KEY_ATTR_*
  * attributes) matches OVS userspace expectations.
@@ -328,4 +328,10 @@ void odp_put_tunnel_action(const struct flow_tnl *tunnel,
 
 void odp_put_tnl_push_action(struct ofpbuf *odp_actions,
                              struct ovs_action_push_tnl *data);
+
+void odp_put_pop_eth_action(struct ofpbuf *odp_actions);
+void odp_put_push_eth_action(struct ofpbuf *odp_actions,
+                             const struct eth_addr *eth_src,
+                             const struct eth_addr *eth_dst);
+
 #endif /* odp-util.h */

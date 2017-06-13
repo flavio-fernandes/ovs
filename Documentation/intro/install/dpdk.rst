@@ -199,9 +199,10 @@ DPDK functionality. DPDK configuration arguments can be passed to ovs-vswitchd
 via the ``other_config`` column of the ``Open_vSwitch`` table. At a minimum,
 the ``dpdk-init`` option must be set to ``true``. For example::
 
+    $ export PATH=$PATH:/usr/local/share/openvswitch/scripts
     $ export DB_SOCK=/usr/local/var/run/openvswitch/db.sock
     $ ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-init=true
-    $ ovs-vswitchd unix:$DB_SOCK --pidfile --detach
+    $ ovs-ctl --no-ovsdb-server --db-sock="$DB_SOCK" start
 
 There are many other configuration options, the most important of which are
 listed below. Defaults will be provided for all values not explicitly set.
@@ -226,10 +227,15 @@ listed below. Defaults will be provided for all values not explicitly set.
 
 If allocating more than one GB hugepage, you can configure the
 amount of memory used from any given NUMA nodes. For example, to use 1GB from
-NUMA node 0, run::
+NUMA node 0 and 0GB for all other NUMA nodes, run::
 
     $ ovs-vsctl --no-wait set Open_vSwitch . \
         other_config:dpdk-socket-mem="1024,0"
+
+or::
+
+    $ ovs-vsctl --no-wait set Open_vSwitch . \
+        other_config:dpdk-socket-mem="1024"
 
 Similarly, if you wish to better scale the workloads across cores, then
 multiple pmd threads can be created and pinned to CPU cores by explicity

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -773,10 +773,28 @@ netdev_linux_alloc(void)
     return &netdev->up;
 }
 
-static void
-netdev_linux_common_construct(struct netdev_linux *netdev)
+static int
+netdev_linux_common_construct(struct netdev *netdev_)
 {
+    /* Prevent any attempt to create (or open) a network device named "default"
+     * or "all".  These device names are effectively reserved on Linux because
+     * /proc/sys/net/ipv4/conf/ always contains directories by these names.  By
+     * itself this wouldn't call for any special treatment, but in practice if
+     * a program tries to create devices with these names, it causes the kernel
+     * to fire a "new device" notification event even though creation failed,
+     * and in turn that causes OVS to wake up and try to create them again,
+     * which ends up as a 100% CPU loop. */
+    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
+    const char *name = netdev_->name;
+    if (!strcmp(name, "default") || !strcmp(name, "all")) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_WARN_RL(&rl, "%s: Linux forbids network device with this name",
+                     name);
+        return EINVAL;
+    }
+
     ovs_mutex_init(&netdev->mutex);
+    return 0;
 }
 
 /* Creates system and internal devices. */
@@ -784,9 +802,10 @@ static int
 netdev_linux_construct(struct netdev *netdev_)
 {
     struct netdev_linux *netdev = netdev_linux_cast(netdev_);
-    int error;
-
-    netdev_linux_common_construct(netdev);
+    int error = netdev_linux_common_construct(netdev_);
+    if (error) {
+        return error;
+    }
 
     error = get_flags(&netdev->up, &netdev->ifi_flags);
     if (error == ENODEV) {
@@ -817,9 +836,11 @@ netdev_linux_construct_tap(struct netdev *netdev_)
     static const char tap_dev[] = "/dev/net/tun";
     const char *name = netdev_->name;
     struct ifreq ifr;
-    int error;
 
-    netdev_linux_common_construct(netdev);
+    int error = netdev_linux_common_construct(netdev_);
+    if (error) {
+        return error;
+    }
 
     /* Open tap device. */
     netdev->tap_fd = open(tap_dev, O_RDWR);
@@ -830,6 +851,7 @@ netdev_linux_construct_tap(struct netdev *netdev_)
     }
 
     /* Create tap device. */
+    get_flags(&netdev->up, &netdev->ifi_flags);
     ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
     ovs_strzcpy(ifr.ifr_name, name, sizeof ifr.ifr_name);
     if (ioctl(netdev->tap_fd, TUNSETIFF, &ifr) == -1) {
@@ -842,6 +864,13 @@ netdev_linux_construct_tap(struct netdev *netdev_)
     /* Make non-blocking. */
     error = set_nonblocking(netdev->tap_fd);
     if (error) {
+        goto error_close;
+    }
+
+    if (ioctl(netdev->tap_fd, TUNSETPERSIST, 1)) {
+        VLOG_WARN("%s: creating tap device failed (persist): %s", name,
+                  ovs_strerror(errno));
+        error = errno;
         goto error_close;
     }
 
@@ -864,6 +893,7 @@ netdev_linux_destruct(struct netdev *netdev_)
     if (netdev_get_class(netdev_) == &netdev_tap_class
         && netdev->tap_fd >= 0)
     {
+        ioctl(netdev->tap_fd, TUNSETPERSIST, 0);
         close(netdev->tap_fd);
     }
 
@@ -1112,6 +1142,7 @@ netdev_linux_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet_batch *batch)
         mtu = ETH_PAYLOAD_MAX;
     }
 
+    /* Assume Ethernet port. No need to set packet_type. */
     buffer = dp_packet_new_with_headroom(VLAN_ETH_HEADER_LEN + mtu,
                                            DP_NETDEV_HEADROOM);
     retval = (rx->is_tap
@@ -1170,11 +1201,40 @@ netdev_linux_send(struct netdev *netdev_, int qid OVS_UNUSED,
                   struct dp_packet_batch *batch, bool may_steal,
                   bool concurrent_txq OVS_UNUSED)
 {
-    int i;
     int error = 0;
+    int sock = 0;
+
+    struct sockaddr_ll sll;
+    struct msghdr msg;
+    if (!is_tap_netdev(netdev_)) {
+        sock = af_packet_sock();
+        if (sock < 0) {
+            error = -sock;
+            goto free_batch;
+        }
+
+        int ifindex = netdev_get_ifindex(netdev_);
+        if (ifindex < 0) {
+            error = -ifindex;
+            goto free_batch;
+        }
+
+        /* We don't bother setting most fields in sockaddr_ll because the
+         * kernel ignores them for SOCK_RAW. */
+        memset(&sll, 0, sizeof sll);
+        sll.sll_family = AF_PACKET;
+        sll.sll_ifindex = ifindex;
+
+        msg.msg_name = &sll;
+        msg.msg_namelen = sizeof sll;
+        msg.msg_iovlen = 1;
+        msg.msg_control = NULL;
+        msg.msg_controllen = 0;
+        msg.msg_flags = 0;
+    }
 
     /* 'i' is incremented only if there's no error */
-    for (i = 0; i < batch->count;) {
+    for (int i = 0; i < batch->count; ) {
         const void *data = dp_packet_data(batch->packets[i]);
         size_t size = dp_packet_size(batch->packets[i]);
         ssize_t retval;
@@ -1184,38 +1244,12 @@ netdev_linux_send(struct netdev *netdev_, int qid OVS_UNUSED,
 
         if (!is_tap_netdev(netdev_)) {
             /* Use our AF_PACKET socket to send to this device. */
-            struct sockaddr_ll sll;
-            struct msghdr msg;
             struct iovec iov;
-            int ifindex;
-            int sock;
-
-            sock = af_packet_sock();
-            if (sock < 0) {
-                return -sock;
-            }
-
-            ifindex = netdev_get_ifindex(netdev_);
-            if (ifindex < 0) {
-                return -ifindex;
-            }
-
-            /* We don't bother setting most fields in sockaddr_ll because the
-             * kernel ignores them for SOCK_RAW. */
-            memset(&sll, 0, sizeof sll);
-            sll.sll_family = AF_PACKET;
-            sll.sll_ifindex = ifindex;
 
             iov.iov_base = CONST_CAST(void *, data);
             iov.iov_len = size;
 
-            msg.msg_name = &sll;
-            msg.msg_namelen = sizeof sll;
             msg.msg_iov = &iov;
-            msg.msg_iovlen = 1;
-            msg.msg_control = NULL;
-            msg.msg_controllen = 0;
-            msg.msg_flags = 0;
 
             retval = sendmsg(sock, &msg, 0);
         } else {
@@ -1256,12 +1290,13 @@ netdev_linux_send(struct netdev *netdev_, int qid OVS_UNUSED,
         i++;
     }
 
-    dp_packet_delete_batch(batch, may_steal);
-
     if (error && error != EAGAIN) {
             VLOG_WARN_RL(&rl, "error sending Ethernet packet on %s: %s",
                          netdev_get_name(netdev_), ovs_strerror(error));
     }
+
+free_batch:
+    dp_packet_delete_batch(batch, may_steal);
 
     return error;
 
@@ -5504,7 +5539,8 @@ get_etheraddr(const char *netdev_name, struct eth_addr *ea)
         return error;
     }
     hwaddr_family = ifr.ifr_hwaddr.sa_family;
-    if (hwaddr_family != AF_UNSPEC && hwaddr_family != ARPHRD_ETHER) {
+    if (hwaddr_family != AF_UNSPEC && hwaddr_family != ARPHRD_ETHER &&
+        hwaddr_family != ARPHRD_NONE) {
         VLOG_INFO("%s device has unknown hardware address family %d",
                   netdev_name, hwaddr_family);
         return EINVAL;

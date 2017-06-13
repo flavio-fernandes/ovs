@@ -275,16 +275,6 @@ features are listed in the previous section.
 
   (required for OF1.4+)
 
-* More descriptive reasons for packet-in
-
-  Distinguish ``OFPR_APPLY_ACTION``, ``OFPR_ACTION_SET``, ``OFPR_GROUP``,
-  ``OFPR_PACKET_OUT``.  ``NO_MATCH`` was renamed to ``OFPR_TABLE_MISS``.
-  (OFPR_ACTION_SET and OFPR_GROUP are now supported)
-
-  (EXT-136)
-
-  (required for OF1.4+)
-
 * Optical port properties
 
   (EXT-154)
@@ -358,14 +348,6 @@ definitive as OpenFlow 1.5 is not yet published.
   (EXT-379)
 
   (required for OF1.5+ if metering is supported)
-
-* Enable setting all pipeline fields in packet-out
-
-  Prototype for OVS was done during specification.
-
-  (EXT-427)
-
-  (required for OF1.5+)
 
 * Port properties for pipeline fields
 

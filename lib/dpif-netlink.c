@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2008-2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,6 +34,7 @@
 
 #include "bitmap.h"
 #include "dpif-provider.h"
+#include "dpif-netlink-rtnl.h"
 #include "openvswitch/dynamic-string.h"
 #include "flow.h"
 #include "fat-rwlock.h"
@@ -55,14 +56,12 @@
 #include "unaligned.h"
 #include "util.h"
 #include "openvswitch/vlog.h"
+#include "openvswitch/flow.h"
 
 VLOG_DEFINE_THIS_MODULE(dpif_netlink);
 #ifdef _WIN32
 #include "wmi.h"
 enum { WINDOWS = 1 };
-static int dpif_netlink_port_query__(const struct dpif_netlink *dpif,
-                                     odp_port_t port_no, const char *port_name,
-                                     struct dpif_port *dpif_port);
 #else
 enum { WINDOWS = 0 };
 #endif
@@ -213,6 +212,12 @@ static int ovs_packet_family;
  * Initialized by dpif_netlink_init(). */
 static unsigned int ovs_vport_mcgroup;
 
+/* If true, tunnel devices are created using OVS compat/genetlink.
+ * If false, tunnel devices are created with rtnetlink and using light weight
+ * tunnels. If we fail to create the tunnel the rtnetlink+LWT, then we fallback
+ * to using the compat interface. */
+static bool ovs_tunnels_out_of_tree = true;
+
 static int dpif_netlink_init(void);
 static int open_dpif(const struct dpif_netlink_dp *, struct dpif **);
 static uint32_t dpif_netlink_port_get_pid(const struct dpif *,
@@ -224,6 +229,9 @@ static void dpif_netlink_vport_to_ofpbuf(const struct dpif_netlink_vport *,
                                          struct ofpbuf *);
 static int dpif_netlink_vport_from_ofpbuf(struct dpif_netlink_vport *,
                                           const struct ofpbuf *);
+static int dpif_netlink_port_query__(const struct dpif_netlink *dpif,
+                                     odp_port_t port_no, const char *port_name,
+                                     struct dpif_port *dpif_port);
 
 static struct dpif_netlink *
 dpif_netlink_cast(const struct dpif *dpif)
@@ -783,11 +791,9 @@ get_vport_type(const struct dpif_netlink_vport *vport)
     return "unknown";
 }
 
-static enum ovs_vport_type
-netdev_to_ovs_vport_type(const struct netdev *netdev)
+enum ovs_vport_type
+netdev_to_ovs_vport_type(const char *type)
 {
-    const char *type = netdev_get_type(netdev);
-
     if (!strcmp(type, "tap") || !strcmp(type, "system")) {
         return OVS_VPORT_TYPE_NETDEV;
     } else if (!strcmp(type, "internal")) {
@@ -808,19 +814,14 @@ netdev_to_ovs_vport_type(const struct netdev *netdev)
 }
 
 static int
-dpif_netlink_port_add__(struct dpif_netlink *dpif, struct netdev *netdev,
+dpif_netlink_port_add__(struct dpif_netlink *dpif, const char *name,
+                        enum ovs_vport_type type,
+                        struct ofpbuf *options,
                         odp_port_t *port_nop)
     OVS_REQ_WRLOCK(dpif->upcall_lock)
 {
-    const struct netdev_tunnel_config *tnl_cfg;
-    char namebuf[NETDEV_VPORT_NAME_BUFSIZE];
-    const char *name = netdev_vport_get_dpif_port(netdev,
-                                                  namebuf, sizeof namebuf);
-    const char *type = netdev_get_type(netdev);
     struct dpif_netlink_vport request, reply;
     struct ofpbuf *buf;
-    uint64_t options_stub[64 / 8];
-    struct ofpbuf options;
     struct nl_sock **socksp = NULL;
     uint32_t *upcall_pids;
     int error = 0;
@@ -835,61 +836,18 @@ dpif_netlink_port_add__(struct dpif_netlink *dpif, struct netdev *netdev,
     dpif_netlink_vport_init(&request);
     request.cmd = OVS_VPORT_CMD_NEW;
     request.dp_ifindex = dpif->dp_ifindex;
-    request.type = netdev_to_ovs_vport_type(netdev);
-    if (request.type == OVS_VPORT_TYPE_UNSPEC) {
-        VLOG_WARN_RL(&error_rl, "%s: cannot create port `%s' because it has "
-                     "unsupported type `%s'",
-                     dpif_name(&dpif->dpif), name, type);
-        vport_del_socksp(dpif, socksp);
-        return EINVAL;
-    }
+    request.type = type;
     request.name = name;
-
-    if (request.type == OVS_VPORT_TYPE_NETDEV) {
-#ifdef _WIN32
-        /* XXX : Map appropiate Windows handle */
-#else
-        netdev_linux_ethtool_set_flag(netdev, ETH_FLAG_LRO, "LRO", false);
-#endif
-    }
-
-#ifdef _WIN32
-    if (request.type == OVS_VPORT_TYPE_INTERNAL) {
-        if (!create_wmi_port(name)){
-            VLOG_ERR("Could not create wmi internal port with name:%s", name);
-            vport_del_socksp(dpif, socksp);
-            return EINVAL;
-        };
-    }
-#endif
-
-    tnl_cfg = netdev_get_tunnel_config(netdev);
-    if (tnl_cfg && (tnl_cfg->dst_port != 0 || tnl_cfg->exts)) {
-        ofpbuf_use_stack(&options, options_stub, sizeof options_stub);
-        if (tnl_cfg->dst_port) {
-            nl_msg_put_u16(&options, OVS_TUNNEL_ATTR_DST_PORT,
-                           ntohs(tnl_cfg->dst_port));
-        }
-        if (tnl_cfg->exts) {
-            size_t ext_ofs;
-            int i;
-
-            ext_ofs = nl_msg_start_nested(&options, OVS_TUNNEL_ATTR_EXTENSION);
-            for (i = 0; i < 32; i++) {
-                if (tnl_cfg->exts & (1 << i)) {
-                    nl_msg_put_flag(&options, i);
-                }
-            }
-            nl_msg_end_nested(&options, ext_ofs);
-        }
-        request.options = options.data;
-        request.options_len = options.size;
-    }
 
     request.port_no = *port_nop;
     upcall_pids = vport_socksp_to_pids(socksp, dpif->n_handlers);
     request.n_upcall_pids = socksp ? dpif->n_handlers : 1;
     request.upcall_pids = upcall_pids;
+
+    if (options) {
+        request.options = options->data;
+        request.options_len = options->size;
+    }
 
     error = dpif_netlink_vport_transact(&request, &reply, &buf);
     if (!error) {
@@ -930,14 +888,115 @@ exit:
 }
 
 static int
+dpif_netlink_port_add_compat(struct dpif_netlink *dpif, struct netdev *netdev,
+                             odp_port_t *port_nop)
+    OVS_REQ_WRLOCK(dpif->upcall_lock)
+{
+    const struct netdev_tunnel_config *tnl_cfg;
+    char namebuf[NETDEV_VPORT_NAME_BUFSIZE];
+    const char *type = netdev_get_type(netdev);
+    uint64_t options_stub[64 / 8];
+    enum ovs_vport_type ovs_type;
+    struct ofpbuf options;
+    const char *name;
+
+    name = netdev_vport_get_dpif_port(netdev, namebuf, sizeof namebuf);
+
+    ovs_type = netdev_to_ovs_vport_type(netdev_get_type(netdev));
+    if (ovs_type == OVS_VPORT_TYPE_UNSPEC) {
+        VLOG_WARN_RL(&error_rl, "%s: cannot create port `%s' because it has "
+                     "unsupported type `%s'",
+                     dpif_name(&dpif->dpif), name, type);
+        return EINVAL;
+    }
+
+    if (ovs_type == OVS_VPORT_TYPE_NETDEV) {
+#ifdef _WIN32
+        /* XXX : Map appropiate Windows handle */
+#else
+        netdev_linux_ethtool_set_flag(netdev, ETH_FLAG_LRO, "LRO", false);
+#endif
+    }
+
+#ifdef _WIN32
+    if (ovs_type == OVS_VPORT_TYPE_INTERNAL) {
+        if (!create_wmi_port(name)){
+            VLOG_ERR("Could not create wmi internal port with name:%s", name);
+            return EINVAL;
+        };
+    }
+#endif
+
+    tnl_cfg = netdev_get_tunnel_config(netdev);
+    if (tnl_cfg && (tnl_cfg->dst_port != 0 || tnl_cfg->exts)) {
+        ofpbuf_use_stack(&options, options_stub, sizeof options_stub);
+        if (tnl_cfg->dst_port) {
+            nl_msg_put_u16(&options, OVS_TUNNEL_ATTR_DST_PORT,
+                           ntohs(tnl_cfg->dst_port));
+        }
+        if (tnl_cfg->exts) {
+            size_t ext_ofs;
+            int i;
+
+            ext_ofs = nl_msg_start_nested(&options, OVS_TUNNEL_ATTR_EXTENSION);
+            for (i = 0; i < 32; i++) {
+                if (tnl_cfg->exts & (1 << i)) {
+                    nl_msg_put_flag(&options, i);
+                }
+            }
+            nl_msg_end_nested(&options, ext_ofs);
+        }
+        return dpif_netlink_port_add__(dpif, name, ovs_type, &options,
+                                       port_nop);
+    } else {
+        return dpif_netlink_port_add__(dpif, name, ovs_type, NULL, port_nop);
+    }
+
+}
+
+static int
+dpif_netlink_rtnl_port_create_and_add(struct dpif_netlink *dpif,
+                                      struct netdev *netdev,
+                                      odp_port_t *port_nop)
+    OVS_REQ_WRLOCK(dpif->upcall_lock)
+{
+    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
+    char namebuf[NETDEV_VPORT_NAME_BUFSIZE];
+    const char *name;
+    int error;
+
+    error = dpif_netlink_rtnl_port_create(netdev);
+    if (error) {
+        if (error != EOPNOTSUPP) {
+            VLOG_INFO_RL(&rl, "Failed to create %s with rtnetlink: %s",
+                         netdev_get_name(netdev), ovs_strerror(error));
+        }
+        return error;
+    }
+
+    name = netdev_vport_get_dpif_port(netdev, namebuf, sizeof namebuf);
+    error = dpif_netlink_port_add__(dpif, name, OVS_VPORT_TYPE_NETDEV, NULL,
+                                    port_nop);
+    if (error) {
+        dpif_netlink_rtnl_port_destroy(name, netdev_get_type(netdev));
+    }
+    return error;
+}
+
+static int
 dpif_netlink_port_add(struct dpif *dpif_, struct netdev *netdev,
                       odp_port_t *port_nop)
 {
     struct dpif_netlink *dpif = dpif_netlink_cast(dpif_);
-    int error;
+    int error = EOPNOTSUPP;
 
     fat_rwlock_wrlock(&dpif->upcall_lock);
-    error = dpif_netlink_port_add__(dpif, netdev, port_nop);
+    if (!ovs_tunnels_out_of_tree) {
+        error = dpif_netlink_rtnl_port_create_and_add(dpif, netdev, port_nop);
+    }
+    if (error) {
+        error = dpif_netlink_port_add_compat(dpif, netdev, port_nop);
+    }
     fat_rwlock_unlock(&dpif->upcall_lock);
 
     return error;
@@ -948,30 +1007,38 @@ dpif_netlink_port_del__(struct dpif_netlink *dpif, odp_port_t port_no)
     OVS_REQ_WRLOCK(dpif->upcall_lock)
 {
     struct dpif_netlink_vport vport;
+    struct dpif_port dpif_port;
     int error;
+
+    error = dpif_netlink_port_query__(dpif, port_no, NULL, &dpif_port);
+    if (error) {
+        return error;
+    }
 
     dpif_netlink_vport_init(&vport);
     vport.cmd = OVS_VPORT_CMD_DEL;
     vport.dp_ifindex = dpif->dp_ifindex;
     vport.port_no = port_no;
 #ifdef _WIN32
-    struct dpif_port temp_dpif_port;
-
-    error = dpif_netlink_port_query__(dpif, port_no, NULL, &temp_dpif_port);
-    if (error) {
-        return error;
-    }
-    if (!strcmp(temp_dpif_port.type, "internal")) {
-        if (!delete_wmi_port(temp_dpif_port.name)){
+    if (!strcmp(dpif_port.type, "internal")) {
+        if (!delete_wmi_port(dpif_port.name)) {
             VLOG_ERR("Could not delete wmi port with name: %s",
-                     temp_dpif_port.name);
+                     dpif_port.name);
         };
     }
-    dpif_port_destroy(&temp_dpif_port);
 #endif
     error = dpif_netlink_vport_transact(&vport, NULL, NULL);
 
     vport_del_channels(dpif, port_no);
+
+    if (!error && !ovs_tunnels_out_of_tree) {
+        error = dpif_netlink_rtnl_port_destroy(dpif_port.name, dpif_port.type);
+        if (error == EOPNOTSUPP) {
+            error = 0;
+        }
+    }
+
+    dpif_port_destroy(&dpif_port);
 
     return error;
 }
@@ -1569,7 +1636,7 @@ dpif_netlink_encode_execute(int dp_ifindex, const struct dpif_execute *d_exec,
                       dp_packet_size(d_exec->packet));
 
     key_ofs = nl_msg_start_nested(buf, OVS_PACKET_ATTR_KEY);
-    odp_key_from_pkt_metadata(buf, &d_exec->packet->md);
+    odp_key_from_dp_packet(buf, d_exec->packet);
     nl_msg_end_nested(buf, key_ofs);
 
     nl_msg_put_unspec(buf, OVS_PACKET_ATTR_ACTIONS,
@@ -1817,10 +1884,9 @@ dpif_netlink_refresh_channels(struct dpif_netlink *dpif, uint32_t n_handlers)
             error = dpif_netlink_handler_init(handler);
             if (error) {
                 size_t j;
-                struct dpif_handler *tmp = &dpif->handlers[i];
-
 
                 for (j = 0; j < i; j++) {
+                    struct dpif_handler *tmp = &dpif->handlers[j];
                     dpif_netlink_handler_uninit(tmp);
                 }
                 free(dpif->handlers);
@@ -2041,6 +2107,23 @@ parse_odp_packet(const struct dpif_netlink *dpif, struct ofpbuf *buf,
     dp_packet_set_data(&upcall->packet,
                     (char *)dp_packet_data(&upcall->packet) + sizeof(struct nlattr));
     dp_packet_set_size(&upcall->packet, nl_attr_get_size(a[OVS_PACKET_ATTR_PACKET]));
+
+    if (nl_attr_find__(upcall->key, upcall->key_len, OVS_KEY_ATTR_ETHERNET)) {
+        /* Ethernet frame */
+        upcall->packet.packet_type = htonl(PT_ETH);
+    } else {
+        /* Non-Ethernet packet. Get the Ethertype from the NL attributes */
+        ovs_be16 ethertype = 0;
+        const struct nlattr *et_nla = nl_attr_find__(upcall->key,
+                                                     upcall->key_len,
+                                                     OVS_KEY_ATTR_ETHERTYPE);
+        if (et_nla) {
+            ethertype = nl_attr_get_be16(et_nla);
+        }
+        upcall->packet.packet_type = PACKET_TYPE_BE(OFPHTN_ETHERTYPE,
+                                                    ntohs(ethertype));
+        dp_packet_set_l3(&upcall->packet, dp_packet_data(&upcall->packet));
+    }
 
     *dp_ifindex = ovs_header->dp_ifindex;
 
@@ -2484,6 +2567,8 @@ dpif_netlink_init(void)
                                            &ovs_vport_mcgroup);
         }
 
+        ovs_tunnels_out_of_tree = dpif_netlink_rtnl_probe_oot_tunnels();
+
         ovsthread_once_done(&once);
     }
 
@@ -2899,6 +2984,38 @@ dpif_netlink_flow_from_ofpbuf(struct dpif_netlink_flow *flow,
     return 0;
 }
 
+
+/*
+ * If PACKET_TYPE attribute is present in 'data', it filters PACKET_TYPE out,
+ * then puts 'data' to 'buf'.
+ */
+static void
+put_exclude_packet_type(struct ofpbuf *buf, uint16_t type,
+                        const struct nlattr *data, uint16_t data_len)
+{
+    const struct nlattr *packet_type;
+
+    packet_type = nl_attr_find__(data, data_len, OVS_KEY_ATTR_PACKET_TYPE);
+
+    if (packet_type) {
+        /* exclude PACKET_TYPE Netlink attribute. */
+        ovs_assert(NLA_ALIGN(packet_type->nla_len) == NL_A_U32_SIZE);
+        size_t packet_type_len = NL_A_U32_SIZE;
+        size_t first_chunk_size = (uint8_t *)packet_type - (uint8_t *)data;
+        size_t second_chunk_size = data_len - first_chunk_size
+                                   - packet_type_len;
+        uint8_t *first_attr = NULL;
+        struct nlattr *next_attr = nl_attr_next(packet_type);
+
+        first_attr = nl_msg_put_unspec_uninit(buf, type,
+                                              data_len - packet_type_len);
+        memcpy(first_attr, data, first_chunk_size);
+        memcpy(first_attr + first_chunk_size, next_attr, second_chunk_size);
+    } else {
+        nl_msg_put_unspec(buf, type, data, data_len);
+    }
+}
+
 /* Appends to 'buf' (which must initially be empty) a "struct ovs_header"
  * followed by Netlink attributes corresponding to 'flow'. */
 static void
@@ -2925,13 +3042,12 @@ dpif_netlink_flow_to_ofpbuf(const struct dpif_netlink_flow *flow,
     }
     if (!flow->ufid_terse || !flow->ufid_present) {
         if (flow->key_len) {
-            nl_msg_put_unspec(buf, OVS_FLOW_ATTR_KEY,
-                              flow->key, flow->key_len);
+            put_exclude_packet_type(buf, OVS_FLOW_ATTR_KEY, flow->key,
+                                           flow->key_len);
         }
-
         if (flow->mask_len) {
-            nl_msg_put_unspec(buf, OVS_FLOW_ATTR_MASK,
-                              flow->mask, flow->mask_len);
+            put_exclude_packet_type(buf, OVS_FLOW_ATTR_MASK, flow->mask,
+                                           flow->mask_len);
         }
         if (flow->actions || flow->actions_len) {
             nl_msg_put_unspec(buf, OVS_FLOW_ATTR_ACTIONS,

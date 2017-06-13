@@ -114,6 +114,16 @@ parent_pid () {
         ps -o ppid= -p $1
     fi
 }
+
+# Normalize the output of 'wc' to match POSIX.
+# POSIX says 'wc' should print "%d %d %d", but GNU prints "%7d %7d %7d".
+# POSIX says 'wc -l' should print "%d %s", but BSD prints "%8d".
+#
+# This fixes all of those (it will screw up filenames that contain
+# multiple sequential spaces, but that doesn't really matter).
+wc () {
+   command wc "$@" | tr -s ' ' ' ' | sed 's/^ *//'
+}
 ]
 m4_divert_pop([PREPARE_TESTS])
 
@@ -152,7 +162,9 @@ dnl to exit.
 m4_define([OVS_APP_EXIT_AND_WAIT],
   [AT_CHECK([test -e $OVS_RUNDIR/$1.pid])
    TMPPID=$(cat $OVS_RUNDIR/$1.pid)
-   AT_CHECK([ovs-appctl -t $1 exit])
+   AT_CHECK(m4_if([$1],[ovs-vswitchd],
+                  [ovs-appctl -t $1 exit --cleanup],
+                  [ovs-appctl -t $1 exit]))
    OVS_WAIT_WHILE([kill -0 $TMPPID 2>/dev/null])])
 
 dnl OVS_APP_EXIT_AND_WAIT_BY_TARGET(TARGET, PIDFILE)

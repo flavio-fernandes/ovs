@@ -134,10 +134,10 @@ AC_DEFUN([OVS_CHECK_LINUX], [
     AC_MSG_RESULT([$kversion])
 
     if test "$version" -ge 4; then
-       if test "$version" = 4 && test "$patchlevel" -le 10; then
+       if test "$version" = 4 && test "$patchlevel" -le 11; then
           : # Linux 4.x
        else
-          AC_ERROR([Linux kernel in $KBUILD is version $kversion, but version newer than 4.10.x is not supported (please refer to the FAQ for advice)])
+          AC_ERROR([Linux kernel in $KBUILD is version $kversion, but version newer than 4.11.x is not supported (please refer to the FAQ for advice)])
        fi
     elif test "$version" = 3 && test "$patchlevel" -ge 10; then
        : # Linux 3.x
@@ -153,6 +153,32 @@ AC_DEFUN([OVS_CHECK_LINUX], [
     OVS_CHECK_LINUX_COMPAT
   fi
   AM_CONDITIONAL(LINUX_ENABLED, test -n "$KBUILD")
+])
+
+dnl OVS_CHECK_LINUX_TC
+dnl
+dnl Configure Linux tc compat.
+AC_DEFUN([OVS_CHECK_LINUX_TC], [
+  AC_COMPILE_IFELSE([
+    AC_LANG_PROGRAM([#include <linux/pkt_cls.h>], [
+        int x = TCA_ACT_COOKIE;
+    ])],
+    [AC_DEFINE([HAVE_TCA_ACT_COOKIE], [1],
+               [Define to 1 if TCA_ACT_COOKIE is avaiable.])])
+
+  AC_COMPILE_IFELSE([
+    AC_LANG_PROGRAM([#include <linux/tc_act/tc_vlan.h>], [
+        int x = TCA_VLAN_PUSH_VLAN_PRIORITY;
+    ])],
+    [AC_DEFINE([HAVE_TCA_VLAN_PUSH_VLAN_PRIORITY], [1],
+               [Define to 1 if TCA_VLAN_PUSH_VLAN_PRIORITY is avaiable.])])
+
+  AC_COMPILE_IFELSE([
+    AC_LANG_PROGRAM([#include <linux/tc_act/tc_tunnel_key.h>], [
+        int x = TCA_TUNNEL_KEY_ENC_DST_PORT;
+    ])],
+    [AC_DEFINE([HAVE_TCA_TUNNEL_KEY_ENC_DST_PORT], [1],
+               [Define to 1 if TCA_TUNNEL_KEY_ENC_DST_PORT is avaiable.])])
 ])
 
 dnl OVS_CHECK_DPDK
@@ -479,6 +505,8 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
                         [OVS_GREP_IFELSE([$KSRC/include/net/dst_cache.h], [dst_cache],
                                          [OVS_DEFINE([USE_UPSTREAM_TUNNEL])])])])
 
+  OVS_GREP_IFELSE([$KSRC/include/net/mpls.h], [mpls_hdr],
+                  [OVS_DEFINE([MPLS_HEADER_IS_L3])])
   OVS_GREP_IFELSE([$KSRC/include/linux/net.h], [sock_create_kern.*net],
                   [OVS_DEFINE([HAVE_SOCK_CREATE_KERN_NET])])
   OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [ndo_fill_metadata_dst])
@@ -539,6 +567,8 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
                   [OVS_DEFINE([HAVE_NF_CT_GET_TUPLEPR_TAKES_STRUCT_NET])])
   OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_conntrack.h],
                   [nf_ct_set])
+  OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_conntrack.h],
+                  [nf_ct_is_untracked])
   OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_conntrack_zones.h],
                   [nf_ct_zone_init])
   OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_conntrack_labels.h],
@@ -548,10 +578,6 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
                   [OVS_DEFINE([HAVE_NF_CONNLABELS_GET_TAKES_BIT])])
   OVS_FIND_FIELD_IFELSE([$KSRC/include/net/netfilter/nf_conntrack_labels.h],
                         [nf_conn_labels], [words])
-  OVS_GREP_IFELSE([$KSRC/include/net/netfilter/ipv6/nf_defrag_ipv6.h],
-                  [nf_ct_frag6_consume_orig])
-  OVS_GREP_IFELSE([$KSRC/include/net/netfilter/ipv6/nf_defrag_ipv6.h],
-                  [nf_ct_frag6_output])
   OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_nat.h], [nf_ct_nat_ext_add])
   OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_nat.h], [nf_nat_alloc_null_binding])
   OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_conntrack_seqadj.h], [nf_ct_seq_adjust])
@@ -667,6 +693,9 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/include/net/netlink.h], [nla_is_last])
   OVS_GREP_IFELSE([$KSRC/include/linux/netlink.h], [void.*netlink_set_err],
                   [OVS_DEFINE([HAVE_VOID_NETLINK_SET_ERR])])
+  OVS_FIND_PARAM_IFELSE([$KSRC/include/net/netlink.h],
+                        [nla_parse], [netlink_ext_ack],
+                        [OVS_DEFINE([HAVE_NETLINK_EXT_ACK])])
 
   OVS_GREP_IFELSE([$KSRC/include/net/sctp/checksum.h], [sctp_compute_cksum])
 
@@ -704,7 +733,9 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_FIND_PARAM_IFELSE([$KSRC/include/net/protocol.h],
                         [udp_add_offload], [net],
                         [OVS_DEFINE([HAVE_UDP_ADD_OFFLOAD_TAKES_NET])])
-
+  OVS_FIND_PARAM_IFELSE([$KSRC/include/net/netfilter/ipv6/nf_defrag_ipv6.h],
+                        [nf_defrag_ipv6_enable], [net],
+                        [OVS_DEFINE([HAVE_DEFRAG_ENABLE_TAKES_NET])])
 
   if cmp -s datapath/linux/kcompat.h.new \
             datapath/linux/kcompat.h >/dev/null 2>&1; then
