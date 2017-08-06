@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2014, 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,10 +17,12 @@
 #include <config.h>
 #include "dpdk.h"
 
+#include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <getopt.h>
 
+#include <rte_log.h>
 #include <rte_memzone.h>
 #ifdef DPDK_PDUMP
 #include <rte_mempool.h>
@@ -36,10 +38,12 @@
 
 VLOG_DEFINE_THIS_MODULE(dpdk);
 
+static FILE *log_stream = NULL;       /* Stream for DPDK log redirection */
+
 static char *vhost_sock_dir = NULL;   /* Location of vhost-user sockets */
 
 static int
-process_vhost_flags(char *flag, char *default_val, int size,
+process_vhost_flags(char *flag, const char *default_val, int size,
                     const struct smap *ovs_other_config,
                     char **new_val)
 {
@@ -57,7 +61,7 @@ process_vhost_flags(char *flag, char *default_val, int size,
         VLOG_INFO("User-provided %s in use: %s", flag, *new_val);
     } else {
         VLOG_INFO("No %s provided - defaulting to %s", flag, default_val);
-        *new_val = default_val;
+        *new_val = xstrdup(default_val);
     }
 
     return changed;
@@ -250,24 +254,58 @@ get_dpdk_args(const struct smap *ovs_other_config, char ***argv,
     return i + extra_argc;
 }
 
-static char **dpdk_argv;
-static int dpdk_argc;
-
 static void
-deferred_argv_release(void)
+argv_release(char **dpdk_argv, char **dpdk_argv_release, size_t dpdk_argc)
 {
     int result;
     for (result = 0; result < dpdk_argc; ++result) {
-        free(dpdk_argv[result]);
+        free(dpdk_argv_release[result]);
     }
 
+    free(dpdk_argv_release);
     free(dpdk_argv);
 }
+
+static ssize_t
+dpdk_log_write(void *c OVS_UNUSED, const char *buf, size_t size)
+{
+    char *str = xmemdup0(buf, size);
+
+    switch (rte_log_cur_msg_loglevel()) {
+        case RTE_LOG_DEBUG:
+            VLOG_DBG("%s", str);
+            break;
+        case RTE_LOG_INFO:
+        case RTE_LOG_NOTICE:
+            VLOG_INFO("%s", str);
+            break;
+        case RTE_LOG_WARNING:
+            VLOG_WARN("%s", str);
+            break;
+        case RTE_LOG_ERR:
+            VLOG_ERR("%s", str);
+            break;
+        case RTE_LOG_CRIT:
+        case RTE_LOG_ALERT:
+        case RTE_LOG_EMERG:
+            VLOG_EMER("%s", str);
+            break;
+        default:
+            OVS_NOT_REACHED();
+    }
+
+    free(str);
+    return size;
+}
+
+static cookie_io_functions_t dpdk_log_func = {
+    .write = dpdk_log_write,
+};
 
 static void
 dpdk_init__(const struct smap *ovs_other_config)
 {
-    char **argv = NULL;
+    char **argv = NULL, **argv_to_release = NULL;
     int result;
     int argc, argc_tmp;
     bool auto_determine = true;
@@ -275,13 +313,15 @@ dpdk_init__(const struct smap *ovs_other_config)
     cpu_set_t cpuset;
     char *sock_dir_subcomponent;
 
-    if (!smap_get_bool(ovs_other_config, "dpdk-init", false)) {
-        VLOG_INFO("DPDK Disabled - to change this requires a restart.\n");
-        return;
+    log_stream = fopencookie(NULL, "w+", dpdk_log_func);
+    if (log_stream == NULL) {
+        VLOG_ERR("Can't redirect DPDK log: %s.", ovs_strerror(errno));
+    } else {
+        setbuf(log_stream, NULL);
+        rte_openlog_stream(log_stream);
     }
 
-    VLOG_INFO("DPDK Enabled, initializing");
-    if (process_vhost_flags("vhost-sock-dir", xstrdup(ovs_rundir()),
+    if (process_vhost_flags("vhost-sock-dir", ovs_rundir(),
                             NAME_MAX, ovs_other_config,
                             &sock_dir_subcomponent)) {
         struct stat s;
@@ -366,11 +406,17 @@ dpdk_init__(const struct smap *ovs_other_config)
         ds_destroy(&eal_args);
     }
 
+    argv_to_release = grow_argv(&argv_to_release, 0, argc);
+    for (argc_tmp = 0; argc_tmp < argc; ++argc_tmp) {
+        argv_to_release[argc_tmp] = argv[argc_tmp];
+    }
+
     /* Make sure things are initialized ... */
     result = rte_eal_init(argc, argv);
     if (result < 0) {
         ovs_abort(result, "Cannot init EAL");
     }
+    argv_release(argv, argv_to_release, argc);
 
     /* Set the main thread affinity back to pre rte_eal_init() value */
     if (auto_determine && !err) {
@@ -380,11 +426,6 @@ dpdk_init__(const struct smap *ovs_other_config)
             VLOG_ERR("Thread setaffinity error %d", err);
         }
     }
-
-    dpdk_argv = argv;
-    dpdk_argc = argc;
-
-    atexit(deferred_argv_release);
 
     rte_memzone_dump(stdout);
 
@@ -414,11 +455,24 @@ dpdk_init__(const struct smap *ovs_other_config)
 void
 dpdk_init(const struct smap *ovs_other_config)
 {
-    static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
+    static bool enabled = false;
 
-    if (ovs_other_config && ovsthread_once_start(&once)) {
-        dpdk_init__(ovs_other_config);
-        ovsthread_once_done(&once);
+    if (enabled || !ovs_other_config) {
+        return;
+    }
+
+    if (smap_get_bool(ovs_other_config, "dpdk-init", false)) {
+        static struct ovsthread_once once_enable = OVSTHREAD_ONCE_INITIALIZER;
+
+        if (ovsthread_once_start(&once_enable)) {
+            VLOG_INFO("DPDK Enabled - initializing...");
+            dpdk_init__(ovs_other_config);
+            enabled = true;
+            VLOG_INFO("DPDK Enabled - initialized");
+            ovsthread_once_done(&once_enable);
+        }
+    } else {
+        VLOG_INFO_ONCE("DPDK Disabled - Use other_config:dpdk-init to enable");
     }
 }
 

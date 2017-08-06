@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import six
 import sys
 
 import ovs.util
+
+import six
 
 commands = {}
 strtypes = six.string_types
@@ -85,5 +86,6 @@ def socket_name_from_target(target):
         return 0, "%s/%s.ctl" % (ovs.dirs.RUNDIR, target)
     else:
         return 0, "%s/%s.%d.ctl" % (ovs.dirs.RUNDIR, target, pid)
+
 
 command_register("help", "", 0, 0, _unixctl_help, None)

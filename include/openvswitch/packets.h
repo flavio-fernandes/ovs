@@ -20,6 +20,10 @@
 #include <netinet/in.h>
 #include "openvswitch/tun-metadata.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Tunnel information used in flow key and metadata. */
 struct flow_tnl {
     ovs_be32 ip_dst;
@@ -60,5 +64,17 @@ union flow_in_port {
     odp_port_t odp_port;
     ofp_port_t ofp_port;
 };
+
+union flow_vlan_hdr {
+    ovs_be32 qtag;
+    struct {
+        ovs_be16 tpid;  /* ETH_TYPE_VLAN_DOT1Q or ETH_TYPE_DOT1AD */
+        ovs_be16 tci;
+    };
+};
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* packets.h */

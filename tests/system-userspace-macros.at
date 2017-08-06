@@ -55,7 +55,7 @@ $1";/netdev_linux.*obtaining netdev stats via vport failed/d
 # This is a workaround, and should be removed when offloads are properly
 # supported in netdev-linux.
 m4_define([CONFIGURE_VETH_OFFLOADS],
-    [AT_CHECK([ethtool -K $1 tx off], [0], [ignore])]
+    [AT_CHECK([ethtool -K $1 tx off], [0], [ignore], [ignore])]
 )
 
 # CHECK_CONNTRACK()
@@ -99,9 +99,6 @@ m4_define([CHECK_CONNTRACK_LOCAL_STACK],
 # CHECK_CONNTRACK_NAT()
 #
 # Perform requirements checks for running conntrack NAT tests. The userspace
-# doesn't support NATs yet, so skip the tests
+# datapath supports NAT.
 #
-m4_define([CHECK_CONNTRACK_NAT],
-[
-    AT_SKIP_IF([:])
-])
+m4_define([CHECK_CONNTRACK_NAT])

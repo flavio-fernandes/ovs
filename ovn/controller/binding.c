@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2016 Nicira, Inc.
+/* Copyright (c) 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 
 #include <config.h>
 #include "binding.h"
+#include "gchassis.h"
 #include "lflow.h"
 #include "lport.h"
 
@@ -26,6 +27,7 @@
 #include "lib/vswitch-idl.h"
 #include "openvswitch/hmap.h"
 #include "openvswitch/vlog.h"
+#include "ovn/lib/chassis-index.h"
 #include "ovn/lib/ovn-sb-idl.h"
 #include "ovn-controller.h"
 
@@ -58,6 +60,8 @@ binding_register_ovs_idl(struct ovsdb_idl *ovs_idl)
     ovsdb_idl_add_table(ovs_idl, &ovsrec_table_interface);
     ovsdb_idl_add_column(ovs_idl, &ovsrec_interface_col_name);
     ovsdb_idl_add_column(ovs_idl, &ovsrec_interface_col_external_ids);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_interface_col_bfd);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_interface_col_bfd_status);
     ovsdb_idl_add_column(ovs_idl, &ovsrec_interface_col_status);
 
     ovsdb_idl_add_table(ovs_idl, &ovsrec_table_qos);
@@ -67,7 +71,7 @@ binding_register_ovs_idl(struct ovsdb_idl *ovs_idl)
 static void
 get_local_iface_ids(const struct ovsrec_bridge *br_int,
                     struct shash *lport_to_iface,
-                    struct sset *all_lports,
+                    struct sset *local_lports,
                     struct sset *egress_ifaces)
 {
     int i;
@@ -86,10 +90,11 @@ get_local_iface_ids(const struct ovsrec_bridge *br_int,
 
             iface_rec = port_rec->interfaces[j];
             iface_id = smap_get(&iface_rec->external_ids, "iface-id");
+            int64_t ofport = iface_rec->n_ofport ? *iface_rec->ofport : 0;
 
-            if (iface_id) {
+            if (iface_id && ofport > 0) {
                 shash_add(lport_to_iface, iface_id, iface_rec);
-                sset_add(all_lports, iface_id);
+                sset_add(local_lports, iface_id);
             }
 
             /* Check if this is a tunnel interface. */
@@ -105,19 +110,74 @@ get_local_iface_ids(const struct ovsrec_bridge *br_int,
 }
 
 static void
-add_local_datapath(struct hmap *local_datapaths,
-        const struct sbrec_port_binding *binding_rec)
+add_local_datapath__(struct controller_ctx *ctx,
+                     const struct sbrec_datapath_binding *datapath,
+                     bool has_local_l3gateway, int depth,
+                     struct hmap *local_datapaths)
 {
-    if (get_local_datapath(local_datapaths,
-                           binding_rec->datapath->tunnel_key)) {
+    uint32_t dp_key = datapath->tunnel_key;
+    const struct sbrec_port_binding *pb;
+    struct ovsdb_idl_index_cursor cursor;
+    struct sbrec_port_binding *lpval;
+
+    struct local_datapath *ld = get_local_datapath(local_datapaths, dp_key);
+    if (ld) {
+        if (has_local_l3gateway) {
+            ld->has_local_l3gateway = true;
+        }
         return;
     }
 
-    struct local_datapath *ld = xzalloc(sizeof *ld);
-    ld->logical_port = xstrdup(binding_rec->logical_port);
-    memcpy(&ld->uuid, &binding_rec->header_.uuid, sizeof ld->uuid);
-    hmap_insert(local_datapaths, &ld->hmap_node,
-                binding_rec->datapath->tunnel_key);
+    ld = xzalloc(sizeof *ld);
+    hmap_insert(local_datapaths, &ld->hmap_node, dp_key);
+    ld->datapath = datapath;
+    ld->localnet_port = NULL;
+    ld->has_local_l3gateway = has_local_l3gateway;
+
+    if (depth >= 100) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_WARN_RL(&rl, "datapaths nested too deep");
+        return;
+    }
+
+    /* Recursively add logical datapaths to which this one patches. */
+    lpval = sbrec_port_binding_index_init_row(ctx->ovnsb_idl,
+                                              &sbrec_table_port_binding);
+    sbrec_port_binding_index_set_datapath(lpval, datapath);
+    ovsdb_idl_initialize_cursor(ctx->ovnsb_idl, &sbrec_table_port_binding,
+                                "lport-by-datapath", &cursor);
+
+    SBREC_PORT_BINDING_FOR_EACH_EQUAL (pb, &cursor, lpval) {
+        if (!strcmp(pb->type, "patch")) {
+            const char *peer_name = smap_get(&pb->options, "peer");
+            if (peer_name) {
+                const struct sbrec_port_binding *peer;
+
+                peer = lport_lookup_by_name( ctx->ovnsb_idl, peer_name);
+
+                if (peer && peer->datapath) {
+                    add_local_datapath__(ctx, peer->datapath,
+                                         false, depth + 1, local_datapaths);
+                    ld->n_peer_dps++;
+                    ld->peer_dps = xrealloc(
+                            ld->peer_dps,
+                            ld->n_peer_dps * sizeof *ld->peer_dps);
+                    ld->peer_dps[ld->n_peer_dps - 1] = datapath_lookup_by_key(
+                        ctx->ovnsb_idl, peer->datapath->tunnel_key);
+                }
+            }
+        }
+    }
+    sbrec_port_binding_index_destroy_row(lpval);
+}
+
+static void
+add_local_datapath(struct controller_ctx *ctx,
+                   const struct sbrec_datapath_binding *datapath,
+                   bool has_local_l3gateway, struct hmap *local_datapaths)
+{
+    add_local_datapath__(ctx, datapath, has_local_l3gateway, 0,
+                         local_datapaths);
 }
 
 static void
@@ -185,6 +245,17 @@ set_noop_qos(struct controller_ctx *ctx, struct sset *egress_ifaces)
 }
 
 static void
+set_qos_type(struct netdev *netdev, const char *type)
+{
+    int error = netdev_set_qos(netdev, type, NULL);
+    if (error) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_WARN_RL(&rl, "%s: could not set qdisc type \"%s\" (%s)",
+                     netdev_get_name(netdev), type, ovs_strerror(error));
+    }
+}
+
+static void
 setup_qos(const char *egress_iface, struct hmap *queue_map)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 5);
@@ -202,22 +273,45 @@ setup_qos(const char *egress_iface, struct hmap *queue_map)
         return;
     }
 
-    /* Check and configure qdisc. */
+    /* Check current qdisc. */
     const char *qdisc_type;
     struct smap qdisc_details;
 
     smap_init(&qdisc_details);
     if (netdev_get_qos(netdev_phy, &qdisc_type, &qdisc_details) != 0 ||
         qdisc_type[0] == '\0') {
+        smap_destroy(&qdisc_details);
+        netdev_close(netdev_phy);
         /* Qos is not supported. */
         return;
     }
-    if (strcmp(qdisc_type, OVN_QOS_TYPE)) {
-        error = netdev_set_qos(netdev_phy, OVN_QOS_TYPE, &qdisc_details);
-        if (error) {
-            VLOG_WARN_RL(&rl, "%s: could not configure QoS (%s)",
-                         egress_iface, ovs_strerror(error));
+    smap_destroy(&qdisc_details);
+
+    /* If we're not actually being requested to do any QoS:
+     *
+     *     - If the current qdisc type is OVN_QOS_TYPE, then we clear the qdisc
+     *       type to "".  Otherwise, it's possible that our own leftover qdisc
+     *       settings could cause strange behavior on egress.  Also, QoS is
+     *       expensive and may waste CPU time even if it's not really in use.
+     *
+     *       OVN isn't the only software that can configure qdiscs, and
+     *       physical interfaces are shared resources, so there is some risk in
+     *       this strategy: we could disrupt some other program's QoS.
+     *       Probably, to entirely avoid this possibility we would need to add
+     *       a configuration setting.
+     *
+     *     - Otherwise leave the qdisc alone. */
+    if (hmap_is_empty(queue_map)) {
+        if (!strcmp(qdisc_type, OVN_QOS_TYPE)) {
+            set_qos_type(netdev_phy, "");
         }
+        netdev_close(netdev_phy);
+        return;
+    }
+
+    /* Configure qdisc. */
+    if (strcmp(qdisc_type, OVN_QOS_TYPE)) {
+        set_qos_type(netdev_phy, OVN_QOS_TYPE);
     }
 
     /* Check and delete if needed. */
@@ -278,111 +372,142 @@ setup_qos(const char *egress_iface, struct hmap *queue_map)
 
 static void
 consider_local_datapath(struct controller_ctx *ctx,
+                        const struct chassis_index *chassis_index,
+                        struct sset *active_tunnels,
                         const struct sbrec_chassis *chassis_rec,
                         const struct sbrec_port_binding *binding_rec,
                         struct hmap *qos_map,
                         struct hmap *local_datapaths,
                         struct shash *lport_to_iface,
-                        struct sset *all_lports)
+                        struct sset *local_lports)
 {
     const struct ovsrec_interface *iface_rec
         = shash_find_data(lport_to_iface, binding_rec->logical_port);
+    struct ovs_list *gateway_chassis = NULL;
 
+    bool our_chassis = false;
     if (iface_rec
         || (binding_rec->parent_port && binding_rec->parent_port[0] &&
-            sset_contains(all_lports, binding_rec->parent_port))) {
+            sset_contains(local_lports, binding_rec->parent_port))) {
         if (binding_rec->parent_port && binding_rec->parent_port[0]) {
             /* Add child logical port to the set of all local ports. */
-            sset_add(all_lports, binding_rec->logical_port);
+            sset_add(local_lports, binding_rec->logical_port);
         }
-        add_local_datapath(local_datapaths, binding_rec);
+        add_local_datapath(ctx, binding_rec->datapath,
+                           false, local_datapaths);
         if (iface_rec && qos_map && ctx->ovs_idl_txn) {
             get_qos_params(binding_rec, qos_map);
         }
-        if (binding_rec->chassis == chassis_rec) {
-            return;
-        }
-        if (ctx->ovnsb_idl_txn) {
-            if (binding_rec->chassis) {
-                VLOG_INFO("Changing chassis for lport %s from %s to %s.",
-                          binding_rec->logical_port,
-                          binding_rec->chassis->name,
-                          chassis_rec->name);
-            } else {
-                VLOG_INFO("Claiming lport %s for this chassis.",
-                          binding_rec->logical_port);
-                for (int i = 0; i < binding_rec->n_mac; i++) {
-                    VLOG_INFO("Claiming %s", binding_rec->mac[i]);
-                }
-            }
-            sbrec_port_binding_set_chassis(binding_rec, chassis_rec);
+        /* This port is in our chassis unless it is a localport. */
+       if (strcmp(binding_rec->type, "localport")) {
+            our_chassis = true;
         }
     } else if (!strcmp(binding_rec->type, "l2gateway")) {
         const char *chassis_id = smap_get(&binding_rec->options,
                                           "l2gateway-chassis");
-        if (!chassis_id || strcmp(chassis_id, chassis_rec->name)) {
-            if (binding_rec->chassis == chassis_rec && ctx->ovnsb_idl_txn) {
-                VLOG_INFO("Releasing l2gateway port %s from this chassis.",
-                          binding_rec->logical_port);
-                sbrec_port_binding_set_chassis(binding_rec, NULL);
-            }
-            return;
+        our_chassis = chassis_id && !strcmp(chassis_id, chassis_rec->name);
+        if (our_chassis) {
+            sset_add(local_lports, binding_rec->logical_port);
+            add_local_datapath(ctx, binding_rec->datapath,
+                               false, local_datapaths);
         }
+    } else if (!strcmp(binding_rec->type, "chassisredirect")) {
+        gateway_chassis = gateway_chassis_get_ordered(binding_rec,
+                                                       chassis_index);
+        if (gateway_chassis &&
+            gateway_chassis_contains(gateway_chassis, chassis_rec)) {
 
-        sset_add(all_lports, binding_rec->logical_port);
-        add_local_datapath(local_datapaths, binding_rec);
-        if (binding_rec->chassis == chassis_rec) {
-            return;
-        }
+            our_chassis = gateway_chassis_is_active(
+                gateway_chassis, chassis_rec, active_tunnels);
 
-        if (!strcmp(chassis_id, chassis_rec->name) && ctx->ovnsb_idl_txn) {
-            VLOG_INFO("Claiming l2gateway port %s for this chassis.",
-                      binding_rec->logical_port);
-            sbrec_port_binding_set_chassis(binding_rec, chassis_rec);
+            add_local_datapath(ctx, binding_rec->datapath,
+                               false, local_datapaths);
         }
+        gateway_chassis_destroy(gateway_chassis);
     } else if (!strcmp(binding_rec->type, "l3gateway")) {
-        const char *chassis = smap_get(&binding_rec->options,
-                                       "l3gateway-chassis");
-        if (!strcmp(chassis, chassis_rec->name) && ctx->ovnsb_idl_txn) {
-            add_local_datapath(local_datapaths, binding_rec);
+        const char *chassis_id = smap_get(&binding_rec->options,
+                                          "l3gateway-chassis");
+        our_chassis = chassis_id && !strcmp(chassis_id, chassis_rec->name);
+        if (our_chassis) {
+            add_local_datapath(ctx, binding_rec->datapath,
+                               true, local_datapaths);
         }
-    } else if (chassis_rec && binding_rec->chassis == chassis_rec) {
-        if (ctx->ovnsb_idl_txn) {
+    } else if (!strcmp(binding_rec->type, "localnet")) {
+        /* Add all localnet ports to local_lports so that we allocate ct zones
+         * for them. */
+        sset_add(local_lports, binding_rec->logical_port);
+        our_chassis = false;
+    }
+
+    if (ctx->ovnsb_idl_txn) {
+        if (our_chassis) {
+            if (binding_rec->chassis != chassis_rec) {
+                if (binding_rec->chassis) {
+                    VLOG_INFO("Changing chassis for lport %s from %s to %s.",
+                              binding_rec->logical_port,
+                              binding_rec->chassis->name,
+                              chassis_rec->name);
+                } else {
+                    VLOG_INFO("Claiming lport %s for this chassis.",
+                              binding_rec->logical_port);
+                }
+                for (int i = 0; i < binding_rec->n_mac; i++) {
+                    VLOG_INFO("%s: Claiming %s",
+                              binding_rec->logical_port, binding_rec->mac[i]);
+                }
+                sbrec_port_binding_set_chassis(binding_rec, chassis_rec);
+            }
+        } else if (binding_rec->chassis == chassis_rec) {
             VLOG_INFO("Releasing lport %s from this chassis.",
                       binding_rec->logical_port);
-            for (int i = 0; i < binding_rec->n_mac; i++) {
-                VLOG_INFO("Releasing %s", binding_rec->mac[i]);
-            }
             sbrec_port_binding_set_chassis(binding_rec, NULL);
-            sset_find_and_delete(all_lports, binding_rec->logical_port);
         }
-    } else if (!binding_rec->chassis
-               && !strcmp(binding_rec->type, "localnet")) {
-        /* Add all localnet ports to all_lports so that we allocate ct zones
-         * for them. */
-        sset_add(all_lports, binding_rec->logical_port);
     }
+}
+
+static void
+consider_localnet_port(const struct sbrec_port_binding *binding_rec,
+                       struct hmap *local_datapaths)
+{
+    struct local_datapath *ld
+        = get_local_datapath(local_datapaths,
+                             binding_rec->datapath->tunnel_key);
+    if (!ld) {
+        return;
+    }
+
+    if (ld->localnet_port && strcmp(ld->localnet_port->logical_port,
+                                    binding_rec->logical_port)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+        VLOG_WARN_RL(&rl, "localnet port '%s' already set for datapath "
+                     "'%"PRId64"', skipping the new port '%s'.",
+                     ld->localnet_port->logical_port,
+                     binding_rec->datapath->tunnel_key,
+                     binding_rec->logical_port);
+        return;
+    }
+    ld->localnet_port = binding_rec;
 }
 
 void
 binding_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int,
-            const char *chassis_id, struct hmap *local_datapaths,
-            struct sset *all_lports)
+            const struct sbrec_chassis *chassis_rec,
+            const struct chassis_index *chassis_index,
+            struct sset *active_tunnels,
+            struct hmap *local_datapaths, struct sset *local_lports)
 {
-    const struct sbrec_chassis *chassis_rec;
+    if (!chassis_rec) {
+        return;
+    }
+
     const struct sbrec_port_binding *binding_rec;
     struct shash lport_to_iface = SHASH_INITIALIZER(&lport_to_iface);
     struct sset egress_ifaces = SSET_INITIALIZER(&egress_ifaces);
     struct hmap qos_map;
 
-    chassis_rec = get_chassis(ctx->ovnsb_idl, chassis_id);
-    if (!chassis_rec) {
-        return;
-    }
-
     hmap_init(&qos_map);
     if (br_int) {
-        get_local_iface_ids(br_int, &lport_to_iface, all_lports,
+        get_local_iface_ids(br_int, &lport_to_iface, local_lports,
                             &egress_ifaces);
     }
 
@@ -390,11 +515,21 @@ binding_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int,
      * chassis and update the binding accordingly.  This includes both
      * directly connected logical ports and children of those ports. */
     SBREC_PORT_BINDING_FOR_EACH(binding_rec, ctx->ovnsb_idl) {
-        consider_local_datapath(ctx, chassis_rec, binding_rec,
+        consider_local_datapath(ctx, chassis_index,
+                                active_tunnels, chassis_rec, binding_rec,
                                 sset_is_empty(&egress_ifaces) ? NULL :
                                 &qos_map, local_datapaths, &lport_to_iface,
-                                all_lports);
+                                local_lports);
 
+    }
+
+    /* Run through each binding record to see if it is a localnet port
+     * on local datapaths discovered from above loop, and update the
+     * corresponding local datapath accordingly. */
+    SBREC_PORT_BINDING_FOR_EACH (binding_rec, ctx->ovnsb_idl) {
+        if (!strcmp(binding_rec->type, "localnet")) {
+            consider_localnet_port(binding_rec, local_datapaths);
+        }
     }
 
     if (!sset_is_empty(&egress_ifaces)
@@ -413,25 +548,20 @@ binding_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int,
 /* Returns true if the database is all cleaned up, false if more work is
  * required. */
 bool
-binding_cleanup(struct controller_ctx *ctx, const char *chassis_id)
+binding_cleanup(struct controller_ctx *ctx,
+                const struct sbrec_chassis *chassis_rec)
 {
     if (!ctx->ovnsb_idl_txn) {
         return false;
     }
-
-    if (!chassis_id) {
-        return true;
-    }
-
-    const struct sbrec_chassis *chassis_rec
-        = get_chassis(ctx->ovnsb_idl, chassis_id);
     if (!chassis_rec) {
         return true;
     }
 
     ovsdb_idl_txn_add_comment(
         ctx->ovnsb_idl_txn,
-        "ovn-controller: removing all port bindings for '%s'", chassis_id);
+        "ovn-controller: removing all port bindings for '%s'",
+        chassis_rec->name);
 
     const struct sbrec_port_binding *binding_rec;
     bool any_changes = false;

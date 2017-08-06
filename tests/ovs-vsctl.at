@@ -204,6 +204,9 @@ AT_CHECK([RUN_OVS_VSCTL([add-br a])], [0], [], [], [OVS_VSCTL_CLEANUP])
 AT_CHECK([RUN_OVS_VSCTL([add-br a])], [1], [],
   [ovs-vsctl: cannot create a bridge named a because a bridge named a already exists
 ], [OVS_VSCTL_CLEANUP])
+AT_CHECK([RUN_OVS_VSCTL([add-br ''])], [1], [],
+  [ovs-vsctl: bridge name must not be empty string
+], [OVS_VSCTL_CLEANUP])
 OVS_VSCTL_CLEANUP
 AT_CLEANUP
 
@@ -278,6 +281,9 @@ AT_CHECK([RUN_OVS_VSCTL(
 AT_CHECK([RUN_OVS_VSCTL([add-port a a1])], [1], [],
   [ovs-vsctl: cannot create a port named a1 because a port named a1 already exists on bridge a
 ], [OVS_VSCTL_CLEANUP])
+AT_CHECK([RUN_OVS_VSCTL([add-port a ''])], [1], [],
+  [ovs-vsctl: port name must not be empty string
+], [OVS_VSCTL_CLEANUP])
 OVS_VSCTL_CLEANUP
 AT_CLEANUP
 
@@ -315,6 +321,12 @@ AT_CHECK([RUN_OVS_VSCTL([--may-exist add-bond a bond0 a2 a1])], [1], [],
   [ovs-vsctl: "--may-exist add-bond a bond0 a2 a1" but bond0 actually has interface(s) a1, a2, a3
 ],
   [OVS_VSCTL_CLEANUP])
+AT_CHECK([RUN_OVS_VSCTL([add-bond a '' x y z])], [1], [],
+  [ovs-vsctl: port name must not be empty string
+], [OVS_VSCTL_CLEANUP])
+AT_CHECK([RUN_OVS_VSCTL([add-bond a x '' y z])], [1], [],
+  [ovs-vsctl: interface name must not be empty string
+], [OVS_VSCTL_CLEANUP])
 CHECK_BRIDGES([a, a, 0])
 CHECK_PORTS([a], [bond0])
 CHECK_IFACES([a], [a1], [a2], [a3])
@@ -763,6 +775,9 @@ AT_CHECK([RUN_OVS_VSCTL([add-br br1])],
   [0], [ignore], [], [OVS_VSCTL_CLEANUP])
 AT_CHECK([RUN_OVS_VSCTL([set-controller br1 tcp:127.0.0.1])],
   [0], [ignore], [], [OVS_VSCTL_CLEANUP])
+AT_CHECK([RUN_OVS_VSCTL([list netflow br0])], [1], [],
+  [ovs-vsctl: no row "br0" in table NetFlow
+], [OVS_VSCTL_CLEANUP])
 AT_CHECK([
     RUN_OVS_VSCTL_TOGETHER([--id=@n create netflow targets='"1.2.3.4:567"'],
                            [set bridge br0 netflow=@n])],
@@ -860,7 +875,7 @@ AT_CHECK([RUN_OVS_VSCTL([remove bridge br0 name br1])],
   [1], [], [ovs-vsctl: cannot modify read-only column name in table Bridge
 ], [OVS_VSCTL_CLEANUP])
 AT_CHECK([RUN_OVS_VSCTL([remove bridge br1 flood-vlans true])],
-  [1], [], [ovs-vsctl: "true" is not a valid integer
+  [1], [], [ovs-vsctl: "true" is not a valid integer or range
 ], [OVS_VSCTL_CLEANUP])
 AT_CHECK([RUN_OVS_VSCTL([clear bridge br1 name])],
   [1], [], [ovs-vsctl: cannot modify read-only column name in table Bridge
@@ -1238,9 +1253,11 @@ m4_foreach(
 [vxlan_sys]],
 [
 # Try creating the port
-AT_CHECK([ovs-vsctl add-port br0 reserved_name], [0], [], [dnl
+cat >experr <<EOF
 ovs-vsctl: Error detected while setting up 'reserved_name'.  See ovs-vswitchd log for details.
-])
+ovs-vsctl: The default log directory is "$OVS_RUNDIR".
+EOF
+AT_CHECK([ovs-vsctl add-port br0 reserved_name], [0], [], [experr])
 # Prevent race.
 OVS_WAIT_UNTIL([test `grep -- "|WARN|" ovs-vswitchd.log | wc -l` -ge 1])
 # Detect the warning log message
@@ -1274,9 +1291,11 @@ m4_foreach(
 [vxlan_sys]],
 [
 # Try creating the port
-AT_CHECK([ovs-vsctl add-port br0 reserved_name], [0], [], [dnl
+cat >experr <<EOF
 ovs-vsctl: Error detected while setting up 'reserved_name'.  See ovs-vswitchd log for details.
-])
+ovs-vsctl: The default log directory is "$OVS_RUNDIR".
+EOF
+AT_CHECK([ovs-vsctl add-port br0 reserved_name], [0], [], [experr])
 # Prevent race.
 OVS_WAIT_UNTIL([test `grep -- "|WARN|" ovs-vswitchd.log | wc -l` -ge 1])
 # Detect the warning log message

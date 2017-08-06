@@ -1,4 +1,4 @@
-# Copyright (C) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+# Copyright (C) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017 Nicira, Inc.
 #
 # Copying and distribution of this file, with or without modification,
 # are permitted in any medium without royalty provided the copyright
@@ -15,7 +15,7 @@ lib_libopenvswitch_la_LIBADD += ${PTHREAD_LIBS}
 endif
 
 lib_libopenvswitch_la_LDFLAGS = \
-        -version-info $(LT_CURRENT):$(LT_REVISION):$(LT_AGE) \
+        $(OVS_LTINFO) \
         -Wl,--version-script=$(top_builddir)/lib/libopenvswitch.sym \
         $(AM_LDFLAGS)
 
@@ -149,6 +149,7 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/odp-util.c \
 	lib/odp-util.h \
 	lib/ofp-actions.c \
+	lib/ofp-ed-props.c \
 	lib/ofp-errors.c \
 	lib/ofp-msgs.c \
 	lib/ofp-parse.c \
@@ -229,6 +230,8 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/shash.c \
 	lib/simap.c \
 	lib/simap.h \
+	lib/skiplist.c \
+	lib/skiplist.h \
 	lib/smap.c \
 	lib/smap.h \
 	lib/socket-util.c \
@@ -284,6 +287,7 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/vconn-stream.c \
 	lib/vconn.c \
 	lib/versions.h \
+	lib/vl-mff-map.h \
 	lib/vlan-bitmap.c \
 	lib/vlan-bitmap.h \
 	lib/vlog.c \
@@ -328,7 +332,7 @@ CLEANFILES += $(nodist_lib_libopenvswitch_la_SOURCES)
 
 lib_LTLIBRARIES += lib/libsflow.la
 lib_libsflow_la_LDFLAGS = \
-        -version-info $(LT_CURRENT):$(LT_REVISION):$(LT_AGE) \
+        $(OVS_LTINFO) \
         -Wl,--version-script=$(top_builddir)/lib/libsflow.sym \
         $(AM_LDFLAGS)
 lib_libsflow_la_SOURCES = \
@@ -351,10 +355,14 @@ if LINUX
 lib_libopenvswitch_la_SOURCES += \
 	lib/dpif-netlink.c \
 	lib/dpif-netlink.h \
+	lib/dpif-netlink-rtnl.c \
+	lib/dpif-netlink-rtnl.h \
 	lib/if-notifier.c \
 	lib/if-notifier.h \
 	lib/netdev-linux.c \
 	lib/netdev-linux.h \
+	lib/netdev-tc-offloads.c \
+	lib/netdev-tc-offloads.h \
 	lib/netlink-conntrack.c \
 	lib/netlink-conntrack.h \
 	lib/netlink-notifier.c \
@@ -365,7 +373,9 @@ lib_libopenvswitch_la_SOURCES += \
 	lib/rtnetlink.c \
 	lib/rtnetlink.h \
 	lib/route-table.c \
-	lib/route-table.h
+	lib/route-table.h \
+	lib/tc.c \
+	lib/tc.h
 endif
 
 if DPDK_NETDEV
@@ -381,6 +391,7 @@ if WIN32
 lib_libopenvswitch_la_SOURCES += \
 	lib/dpif-netlink.c \
 	lib/dpif-netlink.h \
+	lib/dpif-netlink-rtnl.h \
 	lib/netdev-windows.c \
 	lib/netlink-conntrack.c \
 	lib/netlink-conntrack.h \
@@ -388,7 +399,9 @@ lib_libopenvswitch_la_SOURCES += \
 	lib/netlink-notifier.h \
 	lib/netlink-protocol.h \
 	lib/netlink-socket.c \
-	lib/netlink-socket.h
+	lib/netlink-socket.h \
+	lib/wmi.c \
+	lib/wmi.h
 endif
 
 if HAVE_POSIX_AIO
@@ -427,8 +440,8 @@ lib_libopenvswitch_la_SOURCES += lib/stream-nossl.c
 endif
 
 pkgconfig_DATA += \
-	$(srcdir)/lib/libopenvswitch.pc \
-	$(srcdir)/lib/libsflow.pc
+	lib/libopenvswitch.pc \
+	lib/libsflow.pc
 
 EXTRA_DIST += \
 	lib/dh1024.pem \
@@ -439,6 +452,8 @@ EXTRA_DIST += \
 	lib/dirs.c.in \
 	lib/db-ctl-base.xml \
 	lib/ssl.xml \
+	lib/ssl-bootstrap.xml \
+	lib/table.xml \
 	lib/vlog.xml
 
 MAN_FRAGMENTS += \
@@ -461,6 +476,8 @@ MAN_FRAGMENTS += \
 	lib/ssl-peer-ca-cert-syn.man \
 	lib/ssl.man \
 	lib/ssl-syn.man \
+	lib/ssl-connect.man \
+	lib/ssl-connect-syn.man \
 	lib/table.man \
 	lib/unixctl.man \
 	lib/unixctl-syn.man \
@@ -490,10 +507,12 @@ lib/dirs.c: lib/dirs.c.in Makefile
 	mv lib/dirs.c.tmp lib/dirs.c
 
 lib/meta-flow.inc: $(srcdir)/build-aux/extract-ofp-fields include/openvswitch/meta-flow.h
-	$(AM_V_GEN)$(run_python) $^ --meta-flow > $@.tmp && mv $@.tmp $@
+	$(AM_V_GEN)$(run_python) $< meta-flow $(srcdir)/include/openvswitch/meta-flow.h > $@.tmp
+	$(AM_V_at)mv $@.tmp $@
 lib/meta-flow.lo: lib/meta-flow.inc
-lib/nx-match.inc: $(srcdir)/build-aux/extract-ofp-fields include/openvswitch/meta-flow.h
-	$(AM_V_GEN)$(run_python) $^ --nx-match > $@.tmp && mv $@.tmp $@
+lib/nx-match.inc: $(srcdir)/build-aux/extract-ofp-fields include/openvswitch/meta-flow.h 
+	$(AM_V_GEN)$(run_python) $< nx-match $(srcdir)/include/openvswitch/meta-flow.h > $@.tmp
+	$(AM_V_at)mv $@.tmp $@
 lib/nx-match.lo: lib/nx-match.inc
 CLEANFILES += lib/meta-flow.inc lib/nx-match.inc
 EXTRA_DIST += build-aux/extract-ofp-fields
@@ -525,8 +544,15 @@ EXTRA_DIST += build-aux/extract-ofp-msgs
 
 INSTALL_DATA_LOCAL += lib-install-data-local
 lib-install-data-local:
-	$(MKDIR_P) $(DESTDIR)$(RUNDIR)
 	$(MKDIR_P) $(DESTDIR)$(PKIDIR)
-	$(MKDIR_P) $(DESTDIR)$(LOGDIR)
-	$(MKDIR_P) $(DESTDIR)$(DBDIR)
 	$(MKDIR_P) $(DESTDIR)$(sysconfdir)/openvswitch
+
+man_MANS += lib/ovs-fields.7
+CLEANFILES += lib/ovs-fields.7
+lib/ovs-fields.7: $(srcdir)/build-aux/extract-ofp-fields include/openvswitch/meta-flow.h lib/meta-flow.xml
+	$(AM_V_GEN)PYTHONIOENCODING=utf8 $(run_python) $< \
+            --ovs-version=$(VERSION) ovs-fields \
+	    $(srcdir)/include/openvswitch/meta-flow.h \
+            $(srcdir)/lib/meta-flow.xml > $@.tmp
+	$(AM_V_at)mv $@.tmp $@
+EXTRA_DIST += lib/meta-flow.xml

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2008-2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #include "openflow/openflow.h"
 
@@ -175,6 +179,9 @@ enum ofperr {
     /* OF1.3+(1,13).  Multipart request overflowed the assigned buffer. */
     OFPERR_OFPBRC_MULTIPART_BUFFER_OVERFLOW,
 
+    /* OF1.5+(1,17).  Match fields must include only pipeline fields. */
+    OFPERR_OFPBRC_PIPELINE_FIELDS_ONLY,
+
     /* NX1.0-1.1(1,256), NX1.2+(2).  Invalid NXM flow match. */
     OFPERR_NXBRC_NXM_INVALID,
 
@@ -268,6 +275,15 @@ enum ofperr {
      * present.  conjunction(id, k/n) must satisfy 1 <= k <= n and 2 <= n <=
      * 64. */
     OFPERR_NXBAC_BAD_CONJUNCTION,
+
+    /* NX1.3+(39).  Unsupported packet type in encap or decap. */
+    OFPERR_NXBAC_BAD_HEADER_TYPE,
+
+    /* NX1.3+(40).  Unrecognized encap or decap property. */
+    OFPERR_NXBAC_UNKNOWN_ED_PROP,
+
+    /* NX1.3+(41).  Error in encap or decap property. */
+    OFPERR_NXBAC_BAD_ED_PROP,
 
 /* ## --------------------- ## */
 /* ## OFPET_BAD_INSTRUCTION ## */
@@ -394,6 +410,10 @@ enum ofperr {
      * the "command" field of struct ofp_flow_mod, when the
      * nxt_flow_mod_table_id extension is enabled. */
     OFPERR_NXFMFC_BAD_TABLE_ID,
+
+    /* NX1.0-1.1(1,536), NX1.2+(37).  Attempted to add a flow with an invalid
+     * variable length meta-flow field. */
+    OFPERR_NXFMFC_INVALID_TLV_FIELD,
 
 /* ## ---------------------- ## */
 /* ## OFPET_GROUP_MOD_FAILED ## */
@@ -768,6 +788,10 @@ enum ofperr {
      * to be mapped is the same as one assigned to a different field. */
     OFPERR_NXTTMFC_DUP_ENTRY,
 
+    /* NX1.0-1.1(1,537), NX1.2+(38).  Attempted to delete a TLV mapping that
+     * is used by any active flow. */
+    OFPERR_NXTTMFC_INVALID_TLV_DEL,
+
 /* ## ---------- ## */
 /* ## NXT_RESUME ## */
 /* ## ---------- ## */
@@ -811,5 +835,9 @@ const char *ofperr_get_description(enum ofperr);
 
 void ofperr_format(struct ds *, enum ofperr);
 const char *ofperr_to_string(enum ofperr);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* ofp-errors.h */

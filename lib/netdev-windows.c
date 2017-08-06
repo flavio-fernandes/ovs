@@ -159,7 +159,10 @@ netdev_windows_system_construct(struct netdev *netdev_)
 
     /* Query the attributes and runtime status of the netdev. */
     ret = query_netdev(netdev_get_name(&netdev->up), &info, &buf);
-    if (ret) {
+    /* "Internal" netdevs do not exist in the kernel yet.  They need to be
+     * transformed into a netdev object and passed to dpif_port_add(), which
+     * will add them to the kernel.  */
+    if (strcmp(netdev_get_type(&netdev->up), "internal") && ret) {
         return ret;
     }
     ofpbuf_delete(buf);
@@ -295,7 +298,7 @@ query_netdev(const char *devname,
         }
     }
 
-    return 0;
+    return error;
 }
 
 static void
@@ -391,12 +394,7 @@ netdev_windows_arp_lookup(const struct netdev *netdev,
         return ENXIO;
     }
 
-    arp_table = (MIB_IPNETTABLE *) malloc(buffer_length);
-
-    if (arp_table == NULL) {
-        VLOG_ERR("Could not allocate memory for all the interfaces");
-        return ENXIO;
-    }
+    arp_table = (MIB_IPNETTABLE *) xmalloc(buffer_length);
 
     ret_val = GetIpNetTable(arp_table, &buffer_length, false);
 
@@ -425,27 +423,22 @@ netdev_windows_get_next_hop(const struct in_addr *host,
 {
     uint32_t ret_val = 0;
     /* The buffer length of all addresses */
-    uint32_t buffer_length = 1000;
+    uint32_t buffer_length = 0;
     PIP_ADAPTER_ADDRESSES all_addr = NULL;
     PIP_ADAPTER_ADDRESSES cur_addr = NULL;
 
     ret_val = GetAdaptersAddresses(AF_INET,
                                    GAA_FLAG_INCLUDE_PREFIX |
                                    GAA_FLAG_INCLUDE_GATEWAYS,
-                                   NULL, all_addr, &buffer_length);
+                                   NULL, NULL, &buffer_length);
 
-    if (ret_val != ERROR_INSUFFICIENT_BUFFER ) {
+    if (ret_val != ERROR_BUFFER_OVERFLOW ) {
         VLOG_ERR("Call to GetAdaptersAddresses failed with error: %s",
                  ovs_format_message(ret_val));
         return ENXIO;
     }
 
-    all_addr = (IP_ADAPTER_ADDRESSES *) malloc(buffer_length);
-
-    if (all_addr == NULL) {
-        VLOG_ERR("Could not allocate memory for all the interfaces");
-        return ENXIO;
-    }
+    all_addr = (IP_ADAPTER_ADDRESSES *) xmalloc(buffer_length);
 
     ret_val = GetAdaptersAddresses(AF_INET,
                                    GAA_FLAG_INCLUDE_PREFIX |

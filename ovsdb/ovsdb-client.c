@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2009-2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -175,7 +175,8 @@ parse_options(int argc, char *argv[])
         OPT_TIMESTAMP,
         VLOG_OPTION_ENUMS,
         DAEMON_OPTION_ENUMS,
-        TABLE_OPTION_ENUMS
+        TABLE_OPTION_ENUMS,
+        SSL_OPTION_ENUMS,
     };
     static const struct option long_options[] = {
         {"help", no_argument, NULL, 'h'},
@@ -191,6 +192,8 @@ parse_options(int argc, char *argv[])
         {NULL, 0, NULL, 0},
     };
     char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
+
+    table_style.format = TF_TABLE;
 
     for (;;) {
         int c;
@@ -279,13 +282,8 @@ usage(void)
            "The default DATABASE is Open_vSwitch.\n",
            program_name, program_name, ovs_rundir());
     stream_usage("SERVER", true, true, true);
-    printf("\nOutput formatting options:\n"
-           "  -f, --format=FORMAT         set output formatting to FORMAT\n"
-           "                              (\"table\", \"html\", \"csv\", "
-           "or \"json\")\n"
-           "  --no-headings               omit table heading row\n"
-           "  --pretty                    pretty-print JSON in output\n"
-           "  --timestamp                 timestamp \"monitor\" output");
+    table_usage();
+    printf("  --timestamp                 timestamp \"monitor\" output");
     daemon_usage();
     vlog_usage();
     printf("\nOther options:\n"
@@ -1293,7 +1291,7 @@ do_dump(struct jsonrpc *rpc, const char *database,
         if (!node) {
             ovs_fatal(0, "No table \"%s\" found.", argv[0]);
         }
-        tables = xmemdup(&node, sizeof(&node));
+        tables = xmemdup(&node, sizeof node);
         n_tables = 1;
         tschema = tables[0]->data;
         for (i = 1; i < argc; i++) {

@@ -53,8 +53,7 @@
         packets between tunnels and a physical Ethernet port.  This allows
         non-virtualized machines to participate in logical networks.  A gateway
         may be a physical host, a virtual machine, or an ASIC-based hardware
-        switch that supports the <code>vtep</code>(5) schema.  (Support for the
-        latter will come later in OVN implementation.)
+        switch that supports the <code>vtep</code>(5) schema.
       </p>
 
       <p>
@@ -341,8 +340,8 @@
       controller (over a Unix domain socket) instead of a remote controller.
       It's possible, however, for some other bridge in the same system to have
       an in-band remote controller, and in that case this suppresses the flows
-      that in-band control would ordinarily set up.  See <code>In-Band
-      Control</code> in <code>DESIGN.rst</code> for more information.
+      that in-band control would ordinarily set up.  Refer to the documentation
+      for more information.
     </dd>
   </dl>
 
@@ -380,6 +379,51 @@
       <dfn>Logical datapaths</dfn> are the logical version of an OpenFlow
       switch.  Logical switches and routers are both implemented as logical
       datapaths.
+    </li>
+
+    <li>
+      <p>
+        <dfn>Logical ports</dfn> represent the points of connectivity in and
+        out of logical switches and logical routers.  Some common types of
+        logical ports are:
+      </p>
+
+      <ul>
+        <li>
+          Logical ports representing VIFs.
+        </li>
+
+        <li>
+          <dfn>Localnet ports</dfn> represent the points of connectivity
+          between logical switches and the physical network.  They are
+          implemented as OVS patch ports between the integration bridge
+          and the separate Open vSwitch bridge that underlay physical
+          ports attach to.
+        </li>
+
+        <li>
+          <dfn>Logical patch ports</dfn> represent the points of
+          connectivity between logical switches and logical routers, and
+          in some cases between peer logical routers.  There is a pair of
+          logical patch ports at each such point of connectivity, one on
+          each side.
+        </li>
+        <li>
+          <dfn>Localport ports</dfn> represent the points of local
+          connectivity between logical switches and VIFs. These ports are
+          present in every chassis (not bound to any particular one) and
+          traffic from them will never go through a tunnel. A
+          <code>localport</code> is expected to only generate traffic destined
+          for a local destination, typically in response to a request it
+          received.
+          One use case is how OpenStack Neutron uses a <code>localport</code>
+          port for serving metadata to VM's residing on every hypervisor. A
+          metadata proxy process is attached to this port on every host and all
+          VM's within the same network will reach it at the same IP/MAC address
+          without any traffic being sent over a tunnel. Further details can be
+          seen at https://docs.openstack.org/developer/networking-ovn/design/metadata_api.html.
+        </li>
+      </ul>
     </li>
   </ul>
 
@@ -744,7 +788,7 @@
         VXLAN tunnels do not transmit the logical output port field.
         Since VXLAN tunnels do not carry a logical output port field in
         the tunnel key, when a packet is received from VXLAN tunnel by
-        an OVN hypervisor, the packet is resubmitted to table 16 to
+        an OVN hypervisor, the packet is resubmitted to table 8 to
         determine the output port(s);  when the packet reaches table 32,
         these packets are resubmitted to table 33 for local delivery by
         checking a MLF_RCV_FROM_VXLAN flag, which is set when the packet
@@ -763,11 +807,10 @@
       number 13.
     </dd>
 
-    <dt>conntrack zone fields for Gateway router</dt>
+    <dt>conntrack zone fields for routers</dt>
     <dd>
-      Fields that denote the connection tracking zones for Gateway routers.
-      These values only have local significance (only on chassis that have
-      Gateway routers instantiated) and is not meaningful between
+      Fields that denote the connection tracking zones for routers.  These
+      values only have local significance and are not meaningful between
       chassis.  OVN stores the zone information for DNATting in Open vSwitch
         <!-- Keep the following in sync with MFF_LOG_DNAT_ZONE and
         MFF_LOG_SNAT_ZONE in ovn/lib/logical-fields.h. -->
@@ -806,7 +849,7 @@
         the packet's ingress port.  Its actions annotate the packet with
         logical metadata, by setting the logical datapath field to identify the
         logical datapath that the packet is traversing and the logical input
-        port field to identify the ingress port.  Then it resubmits to table 16
+        port field to identify the ingress port.  Then it resubmits to table 8
         to enter the logical ingress pipeline.
       </p>
 
@@ -835,14 +878,42 @@
 
     <li>
       <p>
-        OpenFlow tables 16 through 31 execute the logical ingress pipeline from
+        OpenFlow tables 8 through 31 execute the logical ingress pipeline from
         the <code>Logical_Flow</code> table in the OVN Southbound database.
         These tables are expressed entirely in terms of logical concepts like
         logical ports and logical datapaths.  A big part of
         <code>ovn-controller</code>'s job is to translate them into equivalent
         OpenFlow (in particular it translates the table numbers:
-        <code>Logical_Flow</code> tables 0 through 15 become OpenFlow tables 16
+        <code>Logical_Flow</code> tables 0 through 23 become OpenFlow tables 8
         through 31).
+      </p>
+
+      <p>
+        Each logical flow maps to one or more OpenFlow flows.  An actual packet
+        ordinarily matches only one of these, although in some cases it can
+        match more than one of these flows (which is not a problem because all
+        of them have the same actions).  <code>ovn-controller</code> uses the
+        first 32 bits of the logical flow's UUID as the cookie for its OpenFlow
+        flow or flows.  (This is not necessarily unique, since the first 32
+        bits of a logical flow's UUID is not necessarily unique.)
+      </p>
+
+      <p>
+        Some logical flows can map to the Open vSwitch ``conjunctive match''
+        extension (see <code>ovs-fields</code>(7)).  Flows with a
+        <code>conjunction</code> action use an OpenFlow cookie of 0, because
+        they can correspond to multiple logical flows.  The OpenFlow flow for a
+        conjunctive match includes a match on <code>conj_id</code>.
+      </p>
+
+      <p>
+        Some logical flows may not be represented in the OpenFlow tables on a
+        given hypervisor, if they could not be used on that hypervisor.  For
+        example, if no VIF in a logical switch resides on a given hypervisor,
+        and the logical switch is not otherwise reachable on that hypervisor
+        (e.g. over a series of hops through logical switches and routers
+        starting from a VIF on the hypervisor), then the logical flow may not
+        be represented there.
       </p>
 
       <p>
@@ -936,14 +1007,30 @@
         hypervisor, in the same way as for unicast destinations.  If a
         multicast group includes a logical port or ports on the local
         hypervisor, then its actions also resubmit to table 33.  Table 32 also
-        includes a fallback flow that resubmits to table 33 if there is no
-        other match.  Table 32 also contains a higher priority rule to match
-        packets received from VXLAN tunnels, based on flag MLF_RCV_FROM_VXLAN
-        and resubmit these packets to table 33 for local delivery. Packets
-        received from VXLAN tunnels reach here because of a lack of logical
-        output port field in the tunnel key and thus these packets needed to
-        be submitted to table 16 to determine the output port.
+        includes:
       </p>
+
+      <ul>
+        <li>
+          A higher-priority rule to match packets received from VXLAN tunnels,
+          based on flag MLF_RCV_FROM_VXLAN, and resubmit these packets to table
+          33 for local delivery.  Packets received from VXLAN tunnels reach
+          here because of a lack of logical output port field in the tunnel key
+          and thus these packets needed to be submitted to table 8 to
+          determine the output port.
+        </li>
+        <li>
+          A higher-priority rule to match packets received from ports of type
+          <code>localport</code>, based on the logical input port, and resubmit
+          these packets to table 33 for local delivery.  Ports of type
+          <code>localport</code> exist on every hypervisor and by definition
+          their traffic should never go out through a tunnel.
+        </li>
+        <li>
+          A fallback flow that resubmits to table 33 if there is no other
+          match.
+        </li>
+      </ul>
 
       <p>
         Flows in table 33 resemble those in table 32 but for logical ports that
@@ -967,13 +1054,13 @@
       <p>
         Table 34 matches and drops packets for which the logical input and
         output ports are the same and the MLF_ALLOW_LOOPBACK flag is not
-        set.  It resubmits other packets to table 48.
+        set.  It resubmits other packets to table 40.
       </p>
     </li>
 
     <li>
       <p>
-        OpenFlow tables 48 through 63 execute the logical egress pipeline from
+        OpenFlow tables 40 through 63 execute the logical egress pipeline from
         the <code>Logical_Flow</code> table in the OVN Southbound database.
         The egress pipeline can perform a final stage of validation before
         packet delivery.  Eventually, it may execute an <code>output</code>
@@ -1012,16 +1099,268 @@
         is a container nested with a VM, then before sending the packet the
         actions push on a VLAN header with an appropriate VLAN ID.
       </p>
-
-      <p>
-        If the logical egress port is a logical patch port, then table 65
-        outputs to an OVS patch port that represents the logical patch port.
-        The packet re-enters the OpenFlow flow table from the OVS patch port's
-        peer in table 0, which identifies the logical datapath and logical
-        input port based on the OVS patch port's OpenFlow port number.
-      </p>
     </li>
   </ol>
+
+  <h2>Logical Routers and Logical Patch Ports</h2>
+
+  <p>
+    Typically logical routers and logical patch ports do not have a
+    physical location and effectively reside on every hypervisor.  This is
+    the case for logical patch ports between logical routers and logical
+    switches behind those logical routers, to which VMs (and VIFs) attach.
+  </p>
+
+  <p>
+    Consider a packet sent from one virtual machine or container to another
+    VM or container that resides on a different subnet.  The packet will
+    traverse tables 0 to 65 as described in the previous section
+    <code>Architectural Physical Life Cycle of a Packet</code>, using the
+    logical datapath representing the logical switch that the sender is
+    attached to.  At table 32, the packet will use the fallback flow that
+    resubmits locally to table 33 on the same hypervisor.  In this case,
+    all of the processing from table 0 to table 65 occurs on the hypervisor
+    where the sender resides.
+  </p>
+
+  <p>
+    When the packet reaches table 65, the logical egress port is a logical
+    patch port.  The implementation in table 65 differs depending on the OVS
+    version, although the observed behavior is meant to be the same:
+  </p>
+
+  <ul>
+    <li>
+      In OVS versions 2.6 and earlier, table 65 outputs to an OVS patch
+      port that represents the logical patch port.  The packet re-enters
+      the OpenFlow flow table from the OVS patch port's peer in table 0,
+      which identifies the logical datapath and logical input port based
+      on the OVS patch port's OpenFlow port number.
+    </li>
+
+    <li>
+      In OVS versions 2.7 and later, the packet is cloned and resubmitted
+      directly to the first OpenFlow flow table in the ingress pipeline,
+      setting the logical ingress port to the peer logical patch port, and
+      using the peer logical patch port's logical datapath (that
+      represents the logical router).
+    </li>
+  </ul>
+
+  <p>
+    The packet re-enters the ingress pipeline in order to traverse tables
+    8 to 65 again, this time using the logical datapath representing the
+    logical router.  The processing continues as described in the previous
+    section <code>Architectural Physical Life Cycle of a Packet</code>.
+    When the packet reachs table 65, the logical egress port will once
+    again be a logical patch port.  In the same manner as described above,
+    this logical patch port will cause the packet to be resubmitted to
+    OpenFlow tables 8 to 65, this time using the logical datapath
+    representing the logical switch that the destination VM or container
+    is attached to.
+  </p>
+
+  <p>
+    The packet traverses tables 8 to 65 a third and final time.  If the
+    destination VM or container resides on a remote hypervisor, then table
+    32 will send the packet on a tunnel port from the sender's hypervisor
+    to the remote hypervisor.  Finally table 65 will output the packet
+    directly to the destination VM or container.
+  </p>
+
+  <p>
+    The following sections describe two exceptions, where logical routers
+    and/or logical patch ports are associated with a physical location.
+  </p>
+
+  <h3>Gateway Routers</h3>
+
+  <p>
+    A <dfn>gateway router</dfn> is a logical router that is bound to a
+    physical location.  This includes all of the logical patch ports of
+    the logical router, as well as all of the peer logical patch ports on
+    logical switches.  In the OVN Southbound database, the
+    <code>Port_Binding</code> entries for these logical patch ports use
+    the type <code>l3gateway</code> rather than <code>patch</code>, in
+    order to distinguish that these logical patch ports are bound to a
+    chassis.
+  </p>
+
+  <p>
+    When a hypervisor processes a packet on a logical datapath
+    representing a logical switch, and the logical egress port is a
+    <code>l3gateway</code> port representing connectivity to a gateway
+    router, the packet will match a flow in table 32 that sends the
+    packet on a tunnel port to the chassis where the gateway router
+    resides.  This processing in table 32 is done in the same manner as
+    for VIFs.
+  </p>
+
+  <p>
+    Gateway routers are typically used in between distributed logical
+    routers and physical networks.  The distributed logical router and
+    the logical switches behind it, to which VMs and containers attach,
+    effectively reside on each hypervisor.  The distributed router and
+    the gateway router are connected by another logical switch, sometimes
+    referred to as a <code>join</code> logical switch.  On the other
+    side, the gateway router connects to another logical switch that has
+    a localnet port connecting to the physical network.
+  </p>
+
+  <p>
+    When using gateway routers, DNAT and SNAT rules are associated with
+    the gateway router, which provides a central location that can handle
+    one-to-many SNAT (aka IP masquerading).
+  </p>
+
+  <h3>Distributed Gateway Ports</h3>
+
+  <p>
+    <dfn>Distributed gateway ports</dfn> are logical router patch ports
+    that directly connect distributed logical routers to logical
+    switches with localnet ports.
+  </p>
+
+  <p>
+    The primary design goal of distributed gateway ports is to allow as
+    much traffic as possible to be handled locally on the hypervisor
+    where a VM or container resides.  Whenever possible, packets from
+    the VM or container to the outside world should be processed
+    completely on that VM's or container's hypervisor, eventually
+    traversing a localnet port instance on that hypervisor to the
+    physical network.  Whenever possible, packets from the outside
+    world to a VM or container should be directed through the physical
+    network directly to the VM's or container's hypervisor, where the
+    packet will enter the integration bridge through a localnet port.
+  </p>
+
+  <p>
+    In order to allow for the distributed processing of packets
+    described in the paragraph above, distributed gateway ports need to
+    be logical patch ports that effectively reside on every hypervisor,
+    rather than <code>l3gateway</code> ports that are bound to a
+    particular chassis.  However, the flows associated with distributed
+    gateway ports often need to be associated with physical locations,
+    for the following reasons:
+  </p>
+
+  <ul>
+    <li>
+      <p>
+        The physical network that the localnet port is attached to
+        typically uses L2 learning.  Any Ethernet address used over the
+        distributed gateway port must be restricted to a single physical
+        location so that upstream L2 learning is not confused.  Traffic
+        sent out the distributed gateway port towards the localnet port
+        with a specific Ethernet address must be sent out one specific
+        instance of the distributed gateway port on one specific
+        chassis.  Traffic received from the localnet port (or from a VIF
+        on the same logical switch as the localnet port) with a specific
+        Ethernet address must be directed to the logical switch's patch
+        port instance on that specific chassis.
+      </p>
+
+      <p>
+        Due to the implications of L2 learning, the Ethernet address and
+        IP address of the distributed gateway port need to be restricted
+        to a single physical location.  For this reason, the user must
+        specify one chassis associated with the distributed gateway
+        port.  Note that traffic traversing the distributed gateway port
+        using other Ethernet addresses and IP addresses (e.g. one-to-one
+        NAT) is not restricted to this chassis.
+      </p>
+
+      <p>
+        Replies to ARP and ND requests must be restricted to a single
+        physical location, where the Ethernet address in the reply
+        resides.  This includes ARP and ND replies for the IP address
+        of the distributed gateway port, which are restricted to the
+        chassis that the user associated with the distributed gateway
+        port.
+      </p>
+    </li>
+
+    <li>
+      In order to support one-to-many SNAT (aka IP masquerading), where
+      multiple logical IP addresses spread across multiple chassis are
+      mapped to a single external IP address, it will be necessary to
+      handle some of the logical router processing on a specific chassis
+      in a centralized manner.  Since the SNAT external IP address is
+      typically the distributed gateway port IP address, and for
+      simplicity, the same chassis associated with the distributed
+      gateway port is used.
+    </li>
+  </ul>
+
+  <p>
+    The details of flow restrictions to specific chassis are described
+    in the <code>ovn-northd</code> documentation.
+  </p>
+
+  <p>
+    While most of the physical location dependent aspects of distributed
+    gateway ports can be handled by restricting some flows to specific
+    chassis, one additional mechanism is required.  When a packet
+    leaves the ingress pipeline and the logical egress port is the
+    distributed gateway port, one of two different sets of actions is
+    required at table 32:
+  </p>
+
+  <ul>
+    <li>
+      If the packet can be handled locally on the sender's hypervisor
+      (e.g. one-to-one NAT traffic), then the packet should just be
+      resubmitted locally to table 33, in the normal manner for
+      distributed logical patch ports.
+    </li>
+
+    <li>
+      However, if the packet needs to be handled on the chassis
+      associated with the distributed gateway port (e.g. one-to-many
+      SNAT traffic or non-NAT traffic), then table 32 must send the
+      packet on a tunnel port to that chassis.
+    </li>
+  </ul>
+
+  <p>
+    In order to trigger the second set of actions, the
+    <code>chassisredirect</code> type of southbound
+    <code>Port_Binding</code> has been added.  Setting the logical
+    egress port to the type <code>chassisredirect</code> logical port is
+    simply a way to indicate that although the packet is destined for
+    the distributed gateway port, it needs to be redirected to a
+    different chassis.  At table 32, packets with this logical egress
+    port are sent to a specific chassis, in the same way that table 32
+    directs packets whose logical egress port is a VIF or a type
+    <code>l3gateway</code> port to different chassis.  Once the packet
+    arrives at that chassis, table 33 resets the logical egress port to
+    the value representing the distributed gateway port.  For each
+    distributed gateway port, there is one type
+    <code>chassisredirect</code> port, in addition to the distributed
+    logical patch port representing the distributed gateway port.
+  </p>
+
+  <h3>High Availability for Distributed Gateway Ports</h3>
+
+  <p>
+    OVN allows you to specify a prioritized list of chassis for a distributed
+    gateway port.  This is done by associating multiple
+    <code>Gateway_Chassis</code> rows with a <code>Logical_Router_Port</code>
+    in the <code>OVN_Northbound</code> database.
+  </p>
+
+  <p>
+    When multiple chassis have been specified for a gateway, all chassis that
+    may send packets to that gateway will enable BFD on tunnels to all
+    configured gateway chassis.  The current master chassis for the gateway
+    is the highest priority gateway chassis that is currently viewed as
+    active based on BFD status.
+  </p>
+
+  <p>
+    For more information on L3 gateway high availability, please refer to
+    http://docs.openvswitch.org/en/latest/topics/high-availability.
+  </p>
 
   <h2>Life Cycle of a VTEP gateway</h2>
 
@@ -1115,6 +1454,162 @@
       <code>Chassis</code> table entries for all registered VTEP gateways
       and their port bindings, and all <code>Ucast_Macs_Remote</code> table
       entries and the <code>Logical_Switch</code> tunnel keys.
+    </li>
+  </ol>
+
+  <h1>Security</h1>
+
+  <h2>Role-Based Access Controls for the Soutbound DB</h2>
+  <p>
+    In order to provide additional security against the possibility of an OVN
+    chassis becoming compromised in such a way as to allow rogue software to
+    make arbitrary modifications to the southbound database state and thus
+    disrupt the OVN network, role-based access controls (see
+    <code>ovsdb-server(1)</code> for additional details) are provided for the
+    southbound database.
+  </p>
+
+  <p>
+    The implementation of role-based access controls (RBAC) requires the
+    addition of two tables to an OVSDB schema: the <code>RBAC_Role</code>
+    table, which is indexed by role name and maps the the names of the various
+    tables that may be modifiable for a given role to individual rows in a
+    permissions table containing detailed permission information for that role,
+    and the permission table itself which consists of rows containing the
+    following information:
+  </p>
+  <dl>
+    <dt><code>Table Name</code></dt>
+    <dd>
+      The name of the associated table. This column exists primarily as an
+      aid for humans reading the contents of this table.
+    </dd>
+
+    <dt><code>Auth Criteria</code></dt>
+    <dd>
+      A set of strings containing the names of columns (or column:key pairs
+      for columns containing string:string maps).  The contents of at least
+      one of the columns or column:key values in a row to be modified,
+      inserted, or deleted must be equal to the ID of the client attempting
+      to act on the row in order for the authorization check to pass. If the
+      authorization criteria is empty, authorization checking is disabled and
+      all clients for the role will be treated as authorized.
+    </dd>
+
+    <dt><code>Insert/Delete</code></dt>
+    <dd>
+       Row insertion/deletion permission; boolean value indicating whether
+       insertion and deletion of rows is allowed for the associated table.
+       If true, insertion and deletion of rows is allowed for authorized
+       clients.
+    </dd>
+
+    <dt><code>Updatable Columns</code></dt>
+    <dd>
+      A set of strings containing the names of columns or column:key pairs
+      that may be updated or mutated by authorized clients. Modifications to
+      columns within a row are only permitted when the authorization check
+      for the client passes and all columns to be modified are included in
+      this set of modifiable columns.
+    </dd>
+  </dl>
+
+  <p>
+    RBAC configuration for the OVN southbound database is maintained by
+    ovn-northd. With RBAC enabled, modifications are only permitted for the
+    <code>Chassis</code>, <code>Encap</code>, <code>Port_Binding</code>, and
+    <code>MAC_Binding</code> tables, and are resstricted as follows:
+  </p>
+  <dl>
+    <dt><code>Chassis</code></dt>
+    <dd>
+      <p>
+       <code>Authorization</code>: client ID must match the chassis name.
+      </p>
+      <p>
+        <code>Insert/Delete</code>: authorized row insertion and deletion
+        are permitted.
+      </p>
+      <p>
+        <code>Update</code>: The columns <code>nb_cfg</code>,
+        <code>external_ids</code>, <code>encaps</code>, and
+        <code>vtep_logical_switches</code> may be modified when authorized.
+      </p>
+    </dd>
+
+    <dt><code>Encap</code></dt>
+    <dd>
+      <p>
+        <code>Authorization</code>: disabled (all clients are considered
+        to be authorized. Future: add a "creating chassis name" column to
+        this table and use it for authorization checking.
+      </p>
+      <p>
+        <code>Insert/Delete</code>: row insertion and row deletion
+        are permitted.
+      </p>
+      <p>
+        <code>Update</code>: The columns <code>type</code>,
+        <code>options</code>, and <code>ip</code> can be modified.
+      </p>
+    </dd>
+
+    <dt><code>Port_Binding</code></dt>
+    <dd>
+      <p>
+        <code>Authorization</code>: disabled (all clients are considered
+        authorized. A future enhancement may add columns (or keys to
+        <code>external_ids</code>) in order to control which chassis are
+        allowed to bind each port.
+      </p>
+      <p>
+        <code>Insert/Delete</code>: row insertion/deletion are not permitted
+        (ovn-northd maintains rows in this table.
+      </p>
+      <p>
+        <code>Update</code>: Only modifications to the <code>chassis</code>
+        column are permitted.
+      </p>
+    </dd>
+
+    <dt><code>MAC_Binding</code></dt>
+    <dd>
+      <p>
+        <code>Authorization</code>: disabled (all clients are considered
+        to be authorized).
+      </p>
+      <p>
+        <code>Insert/Delete</code>: row insertion/deletion are permitted.
+      </p>
+      <p>
+        <code>Update</code>: The columns <code>logical_port</code>,
+        <code>ip</code>, <code>mac</code>, and <code>datapath</code> may be
+        modified by ovn-controller.
+      </p>
+    </dd>
+  </dl>
+
+  <p>
+    Enabling RBAC for ovn-controller connections to the southbound database
+    requires the following steps:
+  </p>
+
+  <ol>
+    <li>
+      Creating SSL certificates for each chassis with the certificate CN field
+      set to the chassis name (e.g. for a chassis with
+      <code>external-ids:system-id=chassis-1</code>, via the command
+      "<code>ovs-pki -B 1024 -u req+sign chassis-1 switch</code>").
+    </li>
+    <li>
+      Configuring each ovn-controller to use SSL when connecting to the
+      southbound database (e.g. via "<code>ovs-vsctl set open .
+      external-ids:ovn-remote=ssl:x.x.x.x:6642</code>").
+    </li>
+    <li>
+      Configuring a southbound database SSL remote with "ovn-controller" role
+      (e.g. via "<code>ovn-sbctl set-connection role=ovn-controller
+      pssl:6642</code>").
     </li>
   </ol>
 

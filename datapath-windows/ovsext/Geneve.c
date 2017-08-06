@@ -72,7 +72,8 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
                            OvsIPv4TunnelKey *tunKey,
                            POVS_SWITCH_CONTEXT switchContext,
                            POVS_PACKET_HDR_INFO layers,
-                           PNET_BUFFER_LIST *newNbl)
+                           PNET_BUFFER_LIST *newNbl,
+                           POVS_FWD_INFO switchFwdInfo)
 {
     NTSTATUS status;
     OVS_FWD_INFO fwdInfo;
@@ -90,7 +91,7 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
     ULONG mss = 0;
     NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO csumInfo;
 
-    status = OvsLookupIPFwdInfo(tunKey->dst, &fwdInfo);
+    status = OvsLookupIPFwdInfo(tunKey->src, tunKey->dst, &fwdInfo);
     if (status != STATUS_SUCCESS) {
         OvsFwdIPHelperRequest(NULL, 0, tunKey, NULL, NULL, NULL);
         // return NDIS_STATUS_PENDING;
@@ -104,6 +105,8 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
         return NDIS_STATUS_FAILURE;
     }
 
+    RtlCopyMemory(switchFwdInfo->value, fwdInfo.value, sizeof fwdInfo.value);
+
     curNb = NET_BUFFER_LIST_FIRST_NB(curNbl);
     packetLength = NET_BUFFER_DATA_LENGTH(curNb);
 
@@ -115,7 +118,7 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
         if (mss) {
             OVS_LOG_TRACE("l4Offset %d", layers->l4Offset);
             *newNbl = OvsTcpSegmentNBL(switchContext, curNbl, layers,
-                                       mss, headRoom);
+                                       mss, headRoom, FALSE);
             if (*newNbl == NULL) {
                 OVS_LOG_ERROR("Unable to segment NBL");
                 return NDIS_STATUS_FAILURE;
@@ -198,7 +201,8 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
         /* UDP header */
         udpHdr = (UDPHdr *)((PCHAR)ipHdr + sizeof *ipHdr);
         udpHdr->source = htons(tunKey->flow_hash | MAXINT16);
-        udpHdr->dest = htons(vportGeneve->dstPort);
+        udpHdr->dest = tunKey->dst_port ? tunKey->dst_port :
+                                          htons(vportGeneve->dstPort);
         udpHdr->len = htons(NET_BUFFER_DATA_LENGTH(curNb) - headRoom +
                             sizeof *udpHdr + sizeof *geneveHdr +
                             tunKey->tunOptLen);

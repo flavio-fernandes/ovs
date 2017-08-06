@@ -76,14 +76,29 @@
 
     <h1>Logical Switch ACL Commands</h1>
     <dl>
-      <dt>[<code>--log</code>] <code>acl-add</code> <var>switch</var> <var>direction</var> <var>priority</var> <var>match</var> <var>action</var></dt>
+      <dt>[<code>--log</code>] [<code>--severity=</code><var>severity</var>] [<code>--name=</code><var>name</var>] [<code>--may-exist</code>] <code>acl-add</code> <var>switch</var> <var>direction</var> <var>priority</var> <var>match</var> <var>verdict</var></dt>
       <dd>
-        Adds the specified ACL to <var>switch</var>.
-        <var>direction</var> must be either <code>from-lport</code> or
-        <code>to-lport</code>.  <var>priority</var> must be between
-        <code>1</code> and <code>65534</code>, inclusive.  If
-        <code>--log</code> is specified, packet logging is enabled for the
-        ACL.  A full description of the fields are in <code>ovn-nb</code>(5).
+        <p>
+          Adds the specified ACL to <var>switch</var>.
+          <var>direction</var> must be either <code>from-lport</code> or
+          <code>to-lport</code>.  <var>priority</var> must be between
+          <code>0</code> and <code>32767</code>, inclusive.  A full
+          description of the fields are in <code>ovn-nb</code>(5).  If
+          <code>--may-exist</code> is specified, adding a duplicated ACL
+          succeeds but the ACL is not really created. Without
+          <code>--may-exist</code>, adding a duplicated ACL results in
+          error.
+        </p>
+
+        <p>
+          The <code>--log</code> option enables packet logging for the ACL.
+          The options <code>--severity</code> and <code>--name</code> specify a
+          severity and name, respectively, for log entries (and also enable
+          logging).  The severity must be one of <code>alert</code>,
+          <code>warning</code>, <code>notice</code>, <code>info</code>, or
+          <code>debug</code>.  If a severity is not specified, the default is
+          <code>info</code>.
+        </p>
       </dd>
 
       <dt><code>acl-del</code> <var>switch</var> [<var>direction</var> [<var>priority</var> <var>match</var>]]</dt>
@@ -125,7 +140,9 @@
         <p>
           Creates on <var>switch</var> a logical switch port named
           <var>port</var> that is a child of <var>parent</var> that is
-          identified with VLAN ID <var>tag_request</var>.  If
+          identified with VLAN ID <var>tag_request</var>,
+          which must be between <code>0</code> and
+          <code>4095</code>, inclusive. If
           <var>tag_request</var> is <code>0</code>, <code>ovn-northd</code>
           generates a tag that is unique in the scope of <var>parent</var>.
           This is useful in cases such as virtualized container environments
@@ -194,6 +211,15 @@
             globally unique MAC address and choose an unused IPv4 address with
             the logical port's subnet and store them in the port's
             <code>dynamic_addresses</code> column.
+          </dd>
+
+          <dt><code>router</code></dt>
+          <dd>
+            Accepted only when the <code>type</code> of the logical switch
+            port is <code>router</code>.  This indicates that the Ethernet,
+            IPv4, and IPv6 addresses for this logical switch port should be
+            obtained from the connected logical router port, as specified by
+            <code>router-port</code> in <code>lsp-set-options</code>.
           </dd>
         </dl>
 
@@ -270,6 +296,32 @@
       <dt><code>lsp-get-options</code> <var>port</var></dt>
       <dd>
         Get the type-specific options for the logical port.
+      </dd>
+
+      <dt><code>lsp-set-dhcpv4-options</code> <var>port</var>
+          <var>dhcp_options</var></dt>
+      <dd>
+        Set the DHCPv4 options for the logical port.  The
+        <var>dhcp_options</var> is a UUID referring to a set of DHCP options in
+        the <ref table="DHCP_Options" /> table.
+      </dd>
+
+      <dt><code>lsp-get-dhcpv4-optoins</code> <var>port</var></dt>
+      <dd>
+        Get the configured DHCPv4 options for the logical port.
+      </dd>
+
+      <dt><code>lsp-set-dhcpv6-options</code> <var>port</var>
+          <var>dhcp_options</var></dt>
+      <dd>
+          Set the DHCPv6 options for the logical port.  The
+          <var>dhcp_options</var> is a UUID referring to a set of DHCP options
+          in the <ref table="DHCP_Options" /> table.
+      </dd>
+
+      <dt><code>lsp-get-dhcpv6-optoins</code> <var>port</var></dt>
+      <dd>
+        Get the configured DHCPv6 options for the logical port.
       </dd>
 
     </dl>
@@ -375,6 +427,29 @@
         Prints the administrative state of <var>port</var>, either
         <code>enabled</code> or <code>disabled</code>.
       </dd>
+
+      <dt><code>lrp-set-gateway-chassis</code> <var>port</var>
+          <var>chassis</var> [<var>priority</var>]</dt>
+      <dd>
+        Set gateway chassis for <var>port</var>. <var>chassis</var>
+        is the name of the chassis. This creates a gateway chassis entry
+        in Gateway_Chassis table. It won't check if chassis really exists
+        in OVN_Southbound database. Priority will be set to 0
+        if <var>priority</var> is not provided by user. <var>priority</var>
+        must be between <code>0</code> and <code>32767</code>, inclusive.
+      </dd>
+      <dt><code>lrp-del-gateway-chassis</code> <var>port</var>
+          <var>chassis</var></dt>
+      <dd>
+        Deletes gateway chassis from <var>port</var>.  It is an error if
+        gateway chassis with <var>chassis</var> for <var>port</var> does
+        not exist.
+      </dd>
+      <dt><code>lrp-get-gateway-chassis</code> <var>port</var></dt>
+      <dd>
+        Lists all the gateway chassis with priority within <var>port</var> on
+        standard output, one per line, ordered based on priority.
+      </dd>
     </dl>
 
     <h1>Logical Router Static Route Commands</h1>
@@ -418,7 +493,7 @@
         </p>
 
         <p>
-          It is an error if <code>prefix</code> is specified and there
+          It is an error if <var>prefix</var> is specified and there
           is no matching route entry, unless <code>--if-exists</code> is
           specified.
         </p>
@@ -427,6 +502,93 @@
       <dt><code>lr-route-list</code> <var>router</var></dt>
       <dd>
         Lists the routes on <var>router</var>.
+      </dd>
+    </dl>
+
+    <h1>NAT Commands</h1>
+
+    <dl>
+      <dt>[<code>--may-exist</code>] <code>lr-nat-add</code> <var>router</var> <var>type</var> <var>external_ip</var> <var>logical_ip</var> [<var>logical_port</var> <var>external_mac</var>]</dt>
+      <dd>
+        <p>
+          Adds the specified NAT to <var>router</var>.
+          The <var>type</var> must be one of <code>snat</code>,
+          <code>dnat</code>, or <code>dnat_and_snat</code>.
+          The <var>external_ip</var> is an IPv4 address.
+          The <var>logical_ip</var> is an IPv4 network (e.g 192.168.1.0/24)
+          or an IPv4 address.
+          The <var>logical_port</var> and <var>external_mac</var> are only
+          accepted when <var>router</var> is a distributed router (rather
+          than a gateway router) and <var>type</var> is
+          <code>dnat_and_snat</code>.
+          The <var>logical_port</var> is the name of an existing logical
+          switch port where the <var>logical_ip</var> resides.
+          The <var>external_mac</var> is an Ethernet address.
+        </p>
+        <p>
+          When <var>type</var> is <code>dnat</code>, the externally
+          visible IP address <var>external_ip</var> is DNATted to the
+          IP address <var>logical_ip</var> in the logical space.
+        </p>
+        <p>
+          When <var>type</var> is <code>snat</code>, IP packets with their
+          source IP address that either matches the IP address in
+          <var>logical_ip</var> or is in the network provided by
+          <var>logical_ip</var> is SNATed into the IP address in
+          <var>external_ip</var>.
+        </p>
+        <p>
+          When <var>type</var> is <code>dnat_and_snat</code>,
+          the externally visible IP address <var>external_ip</var>
+          is DNATted to the IP address <var>logical_ip</var> in
+          the logical space.  In addition, IP packets with the source
+          IP address that matches <var>logical_ip</var> is SNATed into
+          the IP address in <var>external_ip</var>.
+        </p>
+        <p>
+          When the <var>logical_port</var> and <var>external_mac</var>
+          are specified, the NAT rule will be programmed on the chassis
+          where the <var>logical_port</var> resides.  This includes
+          ARP replies for the <var>external_ip</var>, which return the
+          value of <var>external_mac</var>.  All packets transmitted
+          with source IP address equal to <var>external_ip</var> will
+          be sent using the <var>external_mac</var>.
+        </p>
+        <p>
+          It is an error if a NAT already exists with the same values
+          of <var>router</var>, <var>type</var>, <var>external_ip</var>,
+          and <var>logical_ip</var>, unless <code>--may-exist</code> is
+          specified.  When <code>--may-exist</code>,
+          <var>logical_port</var>, and <var>external_mac</var> are all
+          specified, the existing values of <var>logical_port</var> and
+          <var>external_mac</var> are overwritten.
+        </p>
+      </dd>
+
+      <dt>[<code>--if-exists</code>] <code>lr-nat-del</code> <var>router</var> [<var>type</var> [<var>ip</var>]]</dt>
+      <dd>
+        <p>
+          Deletes NATs from <var>router</var>.  If only <var>router</var>
+          is supplied, all the NATs from the logical router are
+          deleted.  If <var>type</var> is also specified, then all the
+          NATs that match the <var>type</var> will be deleted from the logical
+          router.  If all the fields are given, then a single NAT rule
+          that matches all the fields will be deleted.  When <var>type</var>
+          is <code>snat</code>, the <var>ip</var> should be logical_ip.
+          When <var>type</var> is <code>dnat</code> or
+          <code>dnat_and_snat</code>, the <var>ip</var> shoud be external_ip.
+        </p>
+
+        <p>
+          It is an error if <var>ip</var> is specified and there
+          is no matching NAT entry, unless <code>--if-exists</code> is
+          specified.
+        </p>
+      </dd>
+
+      <dt><code>lr-nat-list</code> <var>router</var></dt>
+      <dd>
+        Lists the NATs on <var>router</var>.
       </dd>
     </dl>
 
@@ -568,12 +730,13 @@
     <h1>Database Commands</h1>
     <p>These commands query and modify the contents of <code>ovsdb</code> tables.
     They are a slight abstraction of the <code>ovsdb</code> interface and
-    as suchthey operate at a lower level than other <code>ovn-nbctl</code> commands.</p>
+    as such they operate at a lower level than other <code>ovn-nbctl</code> commands.</p>
     <p><var>Identifying Tables, Records, and Columns</var></p>
     <p>Each of these commands has a <var>table</var> parameter to identify a table
     within the database.  Many of them also take a <var>record</var> parameter
     that identifies a particular record within a table.  The <var>record</var>
-    parameter may be the UUID for a record, and many tables offer
+    parameter may be the UUID for a record, which may be abbreviated to its
+    first 4 (or more) hex digits, as long as that is unique.  Many tables offer
     additional ways to identify records.  Some commands also take
     <var>column</var> parameters that identify a particular field within the
     records in a table.</p>
@@ -636,6 +799,16 @@
 
     </dl>
 
+    <p>
+      Record names must be specified in full and with correct capitalization,
+      except that UUIDs may be abbreviated to their first 4 (or more) hex
+      digits, as long as that is unique within the table.  Names of tables and
+      columns are not case-sensitive, and <code>-</code> and <code>_</code> are
+      treated interchangeably.  Unique abbreviations of table and column names
+      are acceptable, e.g. <code>d</code> or <code>dhcp</code> is sufficient
+      to identify the <code>DHCP_Options</code> table.
+    </p>
+
     <xi:include href="lib/db-ctl-base.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
 
     <h1>Synchronization Commands</h1>
@@ -651,6 +824,44 @@
         <code>ovn-nbctl</code> waits even for earlier changes to the database
         to propagate down to the southbound database or all of the OVN chassis,
         according to the argument to <code>--wait</code>.
+      </dd>
+    </dl>
+
+    <h1>Remote Connectivity Commands</h1>
+    <dl>
+      <dt><code>get-connection</code></dt>
+      <dd>
+      Prints the configured connection(s).
+      </dd>
+
+      <dt><code>del-connection</code></dt>
+      <dd>
+      Deletes the configured connection(s).
+      </dd>
+
+      <dt><code>set-connection</code> <var>target</var>...</dt>
+      <dd>
+      Sets the configured manager target or targets.
+      </dd>
+    </dl>
+
+    <h1>SSL Configuration Commands</h1>
+    <dl>
+      <dt><code>get-ssl</code></dt>
+      <dd>
+      Prints the SSL configuration.
+      </dd>
+
+      <dt><code>del-ssl</code></dt>
+      <dd>
+      Deletes the current SSL configuration.
+      </dd>
+
+      <dt>[<code>--bootstrap</code>] <code>set-ssl</code>
+         <var>private-key</var> <var>certificate</var> <var>ca-cert</var>
+         [<var>ssl-protocol-list</var> [<var>ssl-cipher-list</var>]]</dt>
+      <dd>
+      Sets the SSL configuration.
       </dd>
     </dl>
 
@@ -702,7 +913,7 @@
     <dd>
       The OVSDB database remote to contact.  If the <env>OVN_NB_DB</env>
       environment variable is set, its value is used as the default.
-      Otherwise, the default is <code>unix:@RUNDIR@/db.sock</code>, but this
+      Otherwise, the default is <code>unix:@RUNDIR@/ovnnb_db.sock</code>, but this
       default is unlikely to be useful outside of single-machine OVN test
       environments.
     </dd>
@@ -710,12 +921,19 @@
 
     <h1>Logging options</h1>
     <xi:include href="lib/vlog.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
+
+    <h1>Table Formatting Options</h1>
+    These options control the format of output from the <code>list</code> and
+    <code>find</code> commands.
+    <xi:include href="lib/table.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
+
     <h2>PKI Options</h2>
     <p>
       PKI configuration is required to use SSL for the connection to the
       database.
     </p>
     <xi:include href="lib/ssl.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
+    <xi:include href="lib/ssl-bootstrap.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
 
     <h2>Other Options</h2>
 

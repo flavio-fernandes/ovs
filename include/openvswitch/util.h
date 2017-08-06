@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2016 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -73,11 +73,7 @@ OVS_NO_RETURN void ovs_assert_failure(const char *, const char *, const char *);
     ((void) sizeof ((int) ((POINTER) == (TYPE) (POINTER))))
 
 /* Casts 'pointer' to 'type' and issues a compiler warning if the cast changes
- * anything other than an outermost "const" or "volatile" qualifier.
- *
- * The cast to int is present only to suppress an "expression using sizeof
- * bool" warning from "sparse" (see
- * http://permalink.gmane.org/gmane.comp.parsers.sparse/2967). */
+ * anything other than an outermost "const" or "volatile" qualifier. */
 #define CONST_CAST(TYPE, POINTER)                               \
     (BUILD_ASSERT_TYPE(POINTER, TYPE),                          \
      (TYPE) (POINTER))
@@ -176,11 +172,74 @@ OVS_NO_RETURN void ovs_assert_failure(const char *, const char *, const char *);
  *         PADDED_MEMBERS(8, uint8_t x; uint8_t y;);
  *     };
  */
+#define PAD_PASTE2(x, y) x##y
+#define PAD_PASTE(x, y) PAD_PASTE2(x, y)
+#define PAD_ID PAD_PASTE(pad, __COUNTER__)
+#ifndef __cplusplus
 #define PADDED_MEMBERS(UNIT, MEMBERS)                               \
     union {                                                         \
         struct { MEMBERS };                                         \
-        uint8_t pad[ROUND_UP(sizeof(struct { MEMBERS }), UNIT)];    \
+        uint8_t PAD_ID[ROUND_UP(sizeof(struct { MEMBERS }), UNIT)]; \
     }
+#else
+/* C++ doesn't allow a type declaration within "sizeof", but it does support
+ * scoping for member names, so we can just declare a second member, with a
+ * name and the same type, and then use its size. */
+#define PADDED_MEMBERS(UNIT, MEMBERS)                           \
+    union {                                                     \
+        struct { MEMBERS };                                     \
+        struct { MEMBERS } named_member__;                      \
+        uint8_t PAD_ID[ROUND_UP(sizeof named_member__, UNIT)];  \
+    }
+#endif
+
+/* Similar to PADDED_MEMBERS with additional cacheline marker:
+ *
+ *    - OVS_CACHE_LINE_MARKER is a cacheline marker
+ *    - MEMBERS in a nested anonymous struct.
+ *    - An array as large as MEMBERS plus padding to a multiple of UNIT bytes.
+ *
+ * The effect is to add cacheline marker and pad MEMBERS to a multiple of
+ * UNIT bytes.
+ *
+ * Example:
+ *     struct padded_struct {
+ *         PADDED_MEMBERS_CACHELINE_MARKER(CACHE_LINE_SIZE, cacheline0,
+ *             uint8_t x;
+ *             uint8_t y;
+ *         );
+ *     };
+ *
+ * The PADDED_MEMBERS_CACHELINE_MARKER macro in above structure expands as:
+ *
+ *     struct padded_struct {
+ *            union {
+ *                    OVS_CACHE_LINE_MARKER cacheline0;
+ *                    struct {
+ *                            uint8_t x;
+ *                            uint8_t y;
+ *                    };
+ *                    uint8_t         pad0[64];
+ *            };
+ *            *--- cacheline 1 boundary (64 bytes) ---*
+ *     };
+ */
+#ifndef __cplusplus
+#define PADDED_MEMBERS_CACHELINE_MARKER(UNIT, CACHELINE, MEMBERS)   \
+    union {                                                         \
+        OVS_CACHE_LINE_MARKER CACHELINE;                            \
+        struct { MEMBERS };                                         \
+        uint8_t PAD_ID[ROUND_UP(sizeof(struct { MEMBERS }), UNIT)]; \
+    }
+#else
+#define PADDED_MEMBERS_CACHELINE_MARKER(UNIT, CACHELINE, MEMBERS)   \
+    union {                                                         \
+        OVS_CACHE_LINE_MARKER CACHELINE;                            \
+        struct { MEMBERS };                                         \
+        struct { MEMBERS } named_member__;                          \
+        uint8_t PAD_ID[ROUND_UP(sizeof named_member__, UNIT)];      \
+    }
+#endif
 
 static inline bool
 is_pow2(uintmax_t x)

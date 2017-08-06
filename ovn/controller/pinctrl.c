@@ -1,4 +1,5 @@
-/* Copyright (c) 2015, 2016 Red Hat, Inc.
+/* Copyright (c) 2015, 2016, 2017 Red Hat, Inc.
+ * Copyright (c) 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +23,7 @@
 #include "dirs.h"
 #include "dp-packet.h"
 #include "flow.h"
+#include "gchassis.h"
 #include "lport.h"
 #include "nx-match.h"
 #include "ovn-controller.h"
@@ -36,6 +38,8 @@
 #include "lib/dhcp.h"
 #include "ovn-controller.h"
 #include "ovn/actions.h"
+#include "ovn/lex.h"
+#include "ovn/lib/acl-log.h"
 #include "ovn/lib/logical-fields.h"
 #include "ovn/lib/ovn-dhcp.h"
 #include "ovn/lib/ovn-util.h"
@@ -59,18 +63,19 @@ static void pinctrl_handle_put_mac_binding(const struct flow *md,
                                            bool is_arp);
 static void init_put_mac_bindings(void);
 static void destroy_put_mac_bindings(void);
-static void run_put_mac_bindings(struct controller_ctx *,
-                                 const struct lport_index *lports);
+static void run_put_mac_bindings(struct controller_ctx *);
 static void wait_put_mac_bindings(struct controller_ctx *);
 static void flush_put_mac_bindings(void);
 
 static void init_send_garps(void);
 static void destroy_send_garps(void);
 static void send_garp_wait(void);
-static void send_garp_run(const struct ovsrec_bridge *,
-                          const char *chassis_id,
-                          const struct lport_index *lports,
-                          struct hmap *local_datapaths);
+static void send_garp_run(struct controller_ctx *ctx,
+                          const struct ovsrec_bridge *,
+                          const struct sbrec_chassis *,
+                          const struct chassis_index *chassis_index,
+                          struct hmap *local_datapaths,
+                          struct sset *active_tunnels);
 static void pinctrl_handle_nd_na(const struct flow *ip_flow,
                                  const struct match *md,
                                  struct ofpbuf *userdata);
@@ -141,7 +146,7 @@ pinctrl_handle_arp(const struct flow *ip_flow, const struct match *md,
     dp_packet_use_stub(&packet, packet_stub, sizeof packet_stub);
     compose_arp__(&packet);
 
-    struct eth_header *eth = dp_packet_l2(&packet);
+    struct eth_header *eth = dp_packet_eth(&packet);
     eth->eth_dst = ip_flow->dl_dst;
     eth->eth_src = ip_flow->dl_src;
 
@@ -152,8 +157,9 @@ pinctrl_handle_arp(const struct flow *ip_flow, const struct match *md,
     arp->ar_tha = eth_addr_zero;
     put_16aligned_be32(&arp->ar_tpa, ip_flow->nw_dst);
 
-    if (ip_flow->vlan_tci & htons(VLAN_CFI)) {
-        eth_push_vlan(&packet, htons(ETH_TYPE_VLAN_8021Q), ip_flow->vlan_tci);
+    if (ip_flow->vlans[0].tci & htons(VLAN_CFI)) {
+        eth_push_vlan(&packet, htons(ETH_TYPE_VLAN_8021Q),
+                      ip_flow->vlans[0].tci);
     }
 
     /* Compose actions.
@@ -166,7 +172,9 @@ pinctrl_handle_arp(const struct flow *ip_flow, const struct match *md,
     enum ofp_version version = rconn_get_version(swconn);
 
     reload_metadata(&ofpacts, md);
-    enum ofperr error = ofpacts_pull_openflow_actions(userdata, userdata->size, version, &ofpacts);
+    enum ofperr error = ofpacts_pull_openflow_actions(userdata, userdata->size,
+                                                      version, NULL, NULL,
+                                                      &ofpacts);
     if (error) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
         VLOG_WARN_RL(&rl, "failed to parse arp actions (%s)",
@@ -178,10 +186,10 @@ pinctrl_handle_arp(const struct flow *ip_flow, const struct match *md,
         .packet = dp_packet_data(&packet),
         .packet_len = dp_packet_size(&packet),
         .buffer_id = UINT32_MAX,
-        .in_port = OFPP_CONTROLLER,
         .ofpacts = ofpacts.data,
         .ofpacts_len = ofpacts.size,
     };
+    match_set_in_port(&po.flow_metadata, OFPP_CONTROLLER);
     enum ofputil_protocol proto = ofputil_protocol_from_ofp_version(version);
     queue_msg(ofputil_encode_packet_out(&po, proto));
 
@@ -202,7 +210,7 @@ pinctrl_handle_put_dhcp_opts(
 
     /* Parse result field. */
     const struct mf_field *f;
-    enum ofperr ofperr = nx_pull_header(userdata, &f, NULL);
+    enum ofperr ofperr = nx_pull_header(userdata, NULL, &f, NULL);
     if (ofperr) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
         VLOG_WARN_RL(&rl, "bad result OXM (%s)", ofperr_to_string(ofperr));
@@ -356,7 +364,7 @@ pinctrl_handle_put_dhcp_opts(
 
     /* Log the response. */
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(20, 40);
-    const struct eth_header *l2 = dp_packet_l2(&pkt_out);
+    const struct eth_header *l2 = dp_packet_eth(&pkt_out);
     VLOG_INFO_RL(&rl, "DHCP%s "ETH_ADDR_FMT" "IP_FMT"",
                  msg_type == DHCP_MSG_OFFER ? "OFFER" : "ACK",
                  ETH_ADDR_ARGS(l2->eth_src), IP_ARGS(*offer_ip));
@@ -385,13 +393,13 @@ compose_out_dhcpv6_opts(struct ofpbuf *userdata,
             return false;
         }
 
-        uint8_t *userdata_opt_data = ofpbuf_try_pull(userdata,
-                                                     userdata_opt->len);
+        size_t size = ntohs(userdata_opt->size);
+        uint8_t *userdata_opt_data = ofpbuf_try_pull(userdata, size);
         if (!userdata_opt_data) {
             return false;
         }
 
-        switch (userdata_opt->code) {
+        switch (ntohs(userdata_opt->opt_code)) {
         case DHCPV6_OPT_SERVER_ID_CODE:
         {
             /* The Server Identifier option carries a DUID
@@ -405,7 +413,7 @@ compose_out_dhcpv6_opts(struct ofpbuf *userdata,
                 out_dhcpv6_opts, sizeof *opt_server_id);
 
             opt_server_id->opt.code = htons(DHCPV6_OPT_SERVER_ID_CODE);
-            opt_server_id->opt.len = htons(userdata_opt->len + 4);
+            opt_server_id->opt.len = htons(size + 4);
             opt_server_id->duid_type = htons(DHCPV6_DUID_LL);
             opt_server_id->hw_type = htons(DHCPV6_HW_TYPE_ETH);
             memcpy(&opt_server_id->mac, userdata_opt_data,
@@ -415,7 +423,7 @@ compose_out_dhcpv6_opts(struct ofpbuf *userdata,
 
         case DHCPV6_OPT_IA_ADDR_CODE:
         {
-            if (userdata_opt->len != sizeof(struct in6_addr)) {
+            if (size != sizeof(struct in6_addr)) {
                 return false;
             }
 
@@ -444,9 +452,8 @@ compose_out_dhcpv6_opts(struct ofpbuf *userdata,
             struct dhcpv6_opt_ia_addr *opt_ia_addr = ofpbuf_put_zeros(
                 out_dhcpv6_opts, sizeof *opt_ia_addr);
             opt_ia_addr->opt.code = htons(DHCPV6_OPT_IA_ADDR_CODE);
-            opt_ia_addr->opt.len = htons(userdata_opt->len + 8);
-            memcpy(opt_ia_addr->ipv6.s6_addr, userdata_opt_data,
-                   userdata_opt->len);
+            opt_ia_addr->opt.len = htons(size + 8);
+            memcpy(opt_ia_addr->ipv6.s6_addr, userdata_opt_data, size);
             opt_ia_addr->t1 = OVS_BE32_MAX;
             opt_ia_addr->t2 = OVS_BE32_MAX;
             break;
@@ -457,8 +464,8 @@ compose_out_dhcpv6_opts(struct ofpbuf *userdata,
             struct dhcpv6_opt_header *opt_dns = ofpbuf_put_zeros(
                 out_dhcpv6_opts, sizeof *opt_dns);
             opt_dns->code = htons(DHCPV6_OPT_DNS_SERVER_CODE);
-            opt_dns->len = htons(userdata_opt->len);
-            ofpbuf_put(out_dhcpv6_opts, userdata_opt_data, userdata_opt->len);
+            opt_dns->len = htons(size);
+            ofpbuf_put(out_dhcpv6_opts, userdata_opt_data, size);
             break;
         }
 
@@ -467,11 +474,10 @@ compose_out_dhcpv6_opts(struct ofpbuf *userdata,
             struct dhcpv6_opt_header *opt_dsl = ofpbuf_put_zeros(
                 out_dhcpv6_opts, sizeof *opt_dsl);
             opt_dsl->code = htons(DHCPV6_OPT_DOMAIN_SEARCH_CODE);
-            opt_dsl->len = htons(userdata_opt->len + 2);
-            uint8_t *data = ofpbuf_put_zeros(out_dhcpv6_opts,
-                                              userdata_opt->len + 2);
-            *data = userdata_opt->len;
-            memcpy(data + 1, userdata_opt_data, userdata_opt->len);
+            opt_dsl->len = htons(size + 2);
+            uint8_t *data = ofpbuf_put_zeros(out_dhcpv6_opts, size + 2);
+            *data = size;
+            memcpy(data + 1, userdata_opt_data, size);
             break;
         }
 
@@ -495,7 +501,7 @@ pinctrl_handle_put_dhcpv6_opts(
 
     /* Parse result field. */
     const struct mf_field *f;
-    enum ofperr ofperr = nx_pull_header(userdata, &f, NULL);
+    enum ofperr ofperr = nx_pull_header(userdata, NULL, &f, NULL);
     if (ofperr) {
        VLOG_WARN_RL(&rl, "bad result OXM (%s)", ofperr_to_string(ofperr));
        goto exit;
@@ -523,6 +529,11 @@ pinctrl_handle_put_dhcpv6_opts(
 
     struct udp_header *in_udp = dp_packet_l4(pkt_in);
     const uint8_t *in_dhcpv6_data = dp_packet_get_udp_payload(pkt_in);
+    if (!in_udp || !in_dhcpv6_data) {
+        VLOG_WARN_RL(&rl, "truncated dhcpv6 packet");
+        goto exit;
+    }
+
     uint8_t out_dhcpv6_msg_type;
     switch(*in_dhcpv6_data) {
     case DHCPV6_MSG_TYPE_SOLICIT:
@@ -638,7 +649,7 @@ pinctrl_handle_put_dhcpv6_opts(
     csum = packet_csum_pseudoheader6(dp_packet_l3(&pkt_out));
     csum = csum_continue(csum, out_udp, dp_packet_size(&pkt_out) -
                          ((const unsigned char *)out_udp -
-                         (const unsigned char *)dp_packet_l2(&pkt_out)));
+                         (const unsigned char *)dp_packet_eth(&pkt_out)));
     out_udp->udp_csum = csum_finish(csum);
     if (!out_udp->udp_csum) {
         out_udp->udp_csum = htons(0xffff);
@@ -659,13 +670,261 @@ exit:
 }
 
 static void
-process_packet_in(const struct ofp_header *msg)
+put_be16(struct ofpbuf *buf, ovs_be16 x)
+{
+    ofpbuf_put(buf, &x, sizeof x);
+}
+
+static void
+put_be32(struct ofpbuf *buf, ovs_be32 x)
+{
+    ofpbuf_put(buf, &x, sizeof x);
+}
+
+static void
+pinctrl_handle_dns_lookup(
+    struct dp_packet *pkt_in, struct ofputil_packet_in *pin,
+    struct ofpbuf *userdata, struct ofpbuf *continuation,
+    struct controller_ctx *ctx)
+{
+    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+    enum ofp_version version = rconn_get_version(swconn);
+    enum ofputil_protocol proto = ofputil_protocol_from_ofp_version(version);
+    struct dp_packet *pkt_out_ptr = NULL;
+    uint32_t success = 0;
+
+    /* Parse result field. */
+    const struct mf_field *f;
+    enum ofperr ofperr = nx_pull_header(userdata, NULL, &f, NULL);
+    if (ofperr) {
+       VLOG_WARN_RL(&rl, "bad result OXM (%s)", ofperr_to_string(ofperr));
+       goto exit;
+    }
+
+    /* Parse result offset. */
+    ovs_be32 *ofsp = ofpbuf_try_pull(userdata, sizeof *ofsp);
+    if (!ofsp) {
+        VLOG_WARN_RL(&rl, "offset not present in the userdata");
+        goto exit;
+    }
+
+    /* Check that the result is valid and writable. */
+    struct mf_subfield dst = { .field = f, .ofs = ntohl(*ofsp), .n_bits = 1 };
+    ofperr = mf_check_dst(&dst, NULL);
+    if (ofperr) {
+        VLOG_WARN_RL(&rl, "bad result bit (%s)", ofperr_to_string(ofperr));
+        goto exit;
+    }
+
+    /* Extract the DNS header */
+    struct dns_header const *in_dns_header = dp_packet_get_udp_payload(pkt_in);
+    if (!in_dns_header) {
+        VLOG_WARN_RL(&rl, "truncated dns packet");
+        goto exit;
+    }
+
+    /* Check if it is DNS request or not */
+    if (in_dns_header->lo_flag & 0x80) {
+        /* It's a DNS response packet which we are not interested in */
+        goto exit;
+    }
+
+    /* Check if at least one query request is present */
+    if (!in_dns_header->qdcount) {
+        goto exit;
+    }
+
+    struct udp_header *in_udp = dp_packet_l4(pkt_in);
+    size_t udp_len = ntohs(in_udp->udp_len);
+    size_t l4_len = dp_packet_l4_size(pkt_in);
+    uint8_t *end = (uint8_t *)in_udp + MIN(udp_len, l4_len);
+    uint8_t *in_dns_data = (uint8_t *)(in_dns_header + 1);
+    uint8_t *in_queryname = in_dns_data;
+    uint8_t idx = 0;
+    struct ds query_name;
+    ds_init(&query_name);
+    /* Extract the query_name. If the query name is - 'www.ovn.org' it would be
+     * encoded as (in hex) - 03 77 77 77 03 6f 76 63 03 6f 72 67 00.
+     */
+    while ((in_dns_data + idx) < end && in_dns_data[idx]) {
+        uint8_t label_len = in_dns_data[idx++];
+        if (in_dns_data + idx + label_len > end) {
+            ds_destroy(&query_name);
+            goto exit;
+        }
+        ds_put_buffer(&query_name, (const char *) in_dns_data + idx, label_len);
+        idx += label_len;
+        ds_put_char(&query_name, '.');
+    }
+
+    idx++;
+    ds_chomp(&query_name, '.');
+    in_dns_data += idx;
+
+    /* Query should have TYPE and CLASS fields */
+    if (in_dns_data + (2 * sizeof(ovs_be16)) > end) {
+        ds_destroy(&query_name);
+        goto exit;
+    }
+
+    uint16_t query_type = ntohs(*ALIGNED_CAST(const ovs_be16 *, in_dns_data));
+    /* Supported query types - A, AAAA and ANY */
+    if (!(query_type == DNS_QUERY_TYPE_A || query_type == DNS_QUERY_TYPE_AAAA
+          || query_type == DNS_QUERY_TYPE_ANY)) {
+        ds_destroy(&query_name);
+        goto exit;
+    }
+
+    uint64_t dp_key = ntohll(pin->flow_metadata.flow.metadata);
+    const struct sbrec_dns *sbrec_dns;
+    const char *answer_ips = NULL;
+    SBREC_DNS_FOR_EACH(sbrec_dns, ctx->ovnsb_idl) {
+        for (size_t i = 0; i < sbrec_dns->n_datapaths; i++) {
+            if (sbrec_dns->datapaths[i]->tunnel_key == dp_key) {
+                answer_ips = smap_get(&sbrec_dns->records,
+                                      ds_cstr(&query_name));
+                if (answer_ips) {
+                    break;
+                }
+            }
+        }
+
+        if (answer_ips) {
+            break;
+        }
+    }
+
+    ds_destroy(&query_name);
+    if (!answer_ips) {
+        goto exit;
+    }
+
+    struct lport_addresses ip_addrs;
+    if (!extract_ip_addresses(answer_ips, &ip_addrs)) {
+        goto exit;
+    }
+
+    uint16_t ancount = 0;
+    uint64_t dns_ans_stub[128 / 8];
+    struct ofpbuf dns_answer = OFPBUF_STUB_INITIALIZER(dns_ans_stub);
+
+    if (query_type == DNS_QUERY_TYPE_A || query_type == DNS_QUERY_TYPE_ANY) {
+        for (size_t i = 0; i < ip_addrs.n_ipv4_addrs; i++) {
+            /* Copy the answer section */
+            /* Format of the answer section is
+             *  - NAME     -> The domain name
+             *  - TYPE     -> 2 octets containing one of the RR type codes
+             *  - CLASS    -> 2 octets which specify the class of the data
+             *                in the RDATA field.
+             *  - TTL      -> 32 bit unsigned int specifying the time
+             *                interval (in secs) that the resource record
+             *                 may be cached before it should be discarded.
+             *  - RDLENGTH -> 16 bit integer specifying the length of the
+             *                RDATA field.
+             *  - RDATA    -> a variable length string of octets that
+             *                describes the resource. In our case it will
+             *                be IP address of the domain name.
+             */
+            ofpbuf_put(&dns_answer, in_queryname, idx);
+            put_be16(&dns_answer, htons(DNS_QUERY_TYPE_A));
+            put_be16(&dns_answer, htons(DNS_CLASS_IN));
+            put_be32(&dns_answer, htonl(DNS_DEFAULT_RR_TTL));
+            put_be16(&dns_answer, htons(sizeof(ovs_be32)));
+            put_be32(&dns_answer, ip_addrs.ipv4_addrs[i].addr);
+            ancount++;
+        }
+    }
+
+    if (query_type == DNS_QUERY_TYPE_AAAA ||
+        query_type == DNS_QUERY_TYPE_ANY) {
+        for (size_t i = 0; i < ip_addrs.n_ipv6_addrs; i++) {
+            ofpbuf_put(&dns_answer, in_queryname, idx);
+            put_be16(&dns_answer, htons(DNS_QUERY_TYPE_AAAA));
+            put_be16(&dns_answer, htons(DNS_CLASS_IN));
+            put_be32(&dns_answer, htonl(DNS_DEFAULT_RR_TTL));
+            const struct in6_addr *ip6 = &ip_addrs.ipv6_addrs[i].addr;
+            put_be16(&dns_answer, htons(sizeof *ip6));
+            ofpbuf_put(&dns_answer, ip6, sizeof *ip6);
+            ancount++;
+        }
+    }
+
+    destroy_lport_addresses(&ip_addrs);
+
+    if (!ancount) {
+        ofpbuf_uninit(&dns_answer);
+        goto exit;
+    }
+
+    uint16_t new_l4_size = ntohs(in_udp->udp_len) +  dns_answer.size;
+    size_t new_packet_size = pkt_in->l4_ofs + new_l4_size;
+    struct dp_packet pkt_out;
+    dp_packet_init(&pkt_out, new_packet_size);
+    dp_packet_clear(&pkt_out);
+    dp_packet_prealloc_tailroom(&pkt_out, new_packet_size);
+    pkt_out_ptr = &pkt_out;
+
+    /* Copy the L2 and L3 headers from the pkt_in as they would remain same.*/
+    dp_packet_put(
+        &pkt_out, dp_packet_pull(pkt_in, pkt_in->l4_ofs), pkt_in->l4_ofs);
+
+    pkt_out.l2_5_ofs = pkt_in->l2_5_ofs;
+    pkt_out.l2_pad_size = pkt_in->l2_pad_size;
+    pkt_out.l3_ofs = pkt_in->l3_ofs;
+    pkt_out.l4_ofs = pkt_in->l4_ofs;
+
+    struct udp_header *out_udp = dp_packet_put(
+        &pkt_out, dp_packet_pull(pkt_in, UDP_HEADER_LEN), UDP_HEADER_LEN);
+
+    /* Copy the DNS header. */
+    struct dns_header *out_dns_header = dp_packet_put(
+        &pkt_out, dp_packet_pull(pkt_in, sizeof *out_dns_header),
+        sizeof *out_dns_header);
+
+    /* Set the response bit to 1 in the flags. */
+    out_dns_header->lo_flag |= 0x80;
+
+    /* Set the answer RR. */
+    out_dns_header->ancount = htons(ancount);
+
+    /* Copy the Query section. */
+    dp_packet_put(&pkt_out, dp_packet_data(pkt_in), dp_packet_size(pkt_in));
+
+    /* Copy the answer sections. */
+    dp_packet_put(&pkt_out, dns_answer.data, dns_answer.size);
+    ofpbuf_uninit(&dns_answer);
+
+    out_udp->udp_len = htons(new_l4_size);
+    out_udp->udp_csum = 0;
+
+    struct ip_header *out_ip = dp_packet_l3(&pkt_out);
+    out_ip->ip_tot_len = htons(pkt_out.l4_ofs - pkt_out.l3_ofs + new_l4_size);
+    /* Checksum needs to be initialized to zero. */
+    out_ip->ip_csum = 0;
+    out_ip->ip_csum = csum(out_ip, sizeof *out_ip);
+
+    pin->packet = dp_packet_data(&pkt_out);
+    pin->packet_len = dp_packet_size(&pkt_out);
+
+    success = 1;
+exit:
+    if (!ofperr) {
+        union mf_subvalue sv;
+        sv.u8_val = success;
+        mf_write_subfield(&dst, &sv, &pin->flow_metadata);
+    }
+    queue_msg(ofputil_encode_resume(pin, continuation, proto));
+    dp_packet_uninit(pkt_out_ptr);
+}
+
+static void
+process_packet_in(const struct ofp_header *msg, struct controller_ctx *ctx)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
 
     struct ofputil_packet_in pin;
     struct ofpbuf continuation;
-    enum ofperr error = ofputil_decode_packet_in(msg, true, NULL, &pin,
+    enum ofperr error = ofputil_decode_packet_in(msg, true, NULL, NULL, &pin,
                                                  NULL, NULL, &continuation);
 
     if (error) {
@@ -718,6 +977,14 @@ process_packet_in(const struct ofp_header *msg)
                                        &continuation);
         break;
 
+    case ACTION_OPCODE_DNS_LOOKUP:
+        pinctrl_handle_dns_lookup(&packet, &pin, &userdata, &continuation, ctx);
+        break;
+
+    case ACTION_OPCODE_LOG:
+        handle_acl_log(&headers, &userdata);
+        break;
+
     default:
         VLOG_WARN_RL(&rl, "unrecognized packet-in opcode %"PRIu32,
                      ntohl(ah->opcode));
@@ -726,25 +993,25 @@ process_packet_in(const struct ofp_header *msg)
 }
 
 static void
-pinctrl_recv(const struct ofp_header *oh, enum ofptype type)
+pinctrl_recv(const struct ofp_header *oh, enum ofptype type,
+             struct controller_ctx *ctx)
 {
     if (type == OFPTYPE_ECHO_REQUEST) {
         queue_msg(make_echo_reply(oh));
     } else if (type == OFPTYPE_GET_CONFIG_REPLY) {
-        /* Enable asynchronous messages (see "Asynchronous Messages" in
-         * DESIGN.rst for more information). */
+        /* Enable asynchronous messages */
         struct ofputil_switch_config config;
 
         ofputil_decode_get_config_reply(oh, &config);
         config.miss_send_len = UINT16_MAX;
         set_switch_config(swconn, &config);
     } else if (type == OFPTYPE_PACKET_IN) {
-        process_packet_in(oh);
-    } else if (type != OFPTYPE_ECHO_REPLY && type != OFPTYPE_BARRIER_REPLY) {
+        process_packet_in(oh, ctx);
+    } else {
         if (VLOG_IS_DBG_ENABLED()) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(30, 300);
 
-            char *s = ofp_to_string(oh, ntohs(oh->length), 2);
+            char *s = ofp_to_string(oh, ntohs(oh->length), NULL, 2);
 
             VLOG_DBG_RL(&rl, "OpenFlow packet ignored: %s", s);
             free(s);
@@ -753,10 +1020,12 @@ pinctrl_recv(const struct ofp_header *oh, enum ofptype type)
 }
 
 void
-pinctrl_run(struct controller_ctx *ctx, const struct lport_index *lports,
+pinctrl_run(struct controller_ctx *ctx,
             const struct ovsrec_bridge *br_int,
-            const char *chassis_id,
-            struct hmap *local_datapaths)
+            const struct sbrec_chassis *chassis,
+            const struct chassis_index *chassis_index,
+            struct hmap *local_datapaths,
+            struct sset *active_tunnels)
 {
     char *target = xasprintf("unix:%s/%s.mgmt", ovs_rundir(), br_int->name);
     if (strcmp(target, rconn_get_target(swconn))) {
@@ -785,13 +1054,14 @@ pinctrl_run(struct controller_ctx *ctx, const struct lport_index *lports,
             enum ofptype type;
 
             ofptype_decode(&type, oh);
-            pinctrl_recv(oh, type);
+            pinctrl_recv(oh, type, ctx);
             ofpbuf_delete(msg);
         }
     }
 
-    run_put_mac_bindings(ctx, lports);
-    send_garp_run(br_int, chassis_id, lports, local_datapaths);
+    run_put_mac_bindings(ctx);
+    send_garp_run(ctx, br_int, chassis, chassis_index, local_datapaths,
+                  active_tunnels);
 }
 
 void
@@ -896,7 +1166,7 @@ pinctrl_handle_put_mac_binding(const struct flow *md,
         hmap_insert(&put_mac_bindings, &pmb->hmap_node, hash);
         pmb->dp_key = dp_key;
         pmb->port_key = port_key;
-        ovs_strlcpy(pmb->ip_s, ip_s, sizeof pmb->ip_s);
+        ovs_strlcpy_arrays(pmb->ip_s, ip_s);
     }
     pmb->timestamp = time_msec();
     pmb->mac = headers->dl_src;
@@ -904,7 +1174,6 @@ pinctrl_handle_put_mac_binding(const struct flow *md,
 
 static void
 run_put_mac_binding(struct controller_ctx *ctx,
-                    const struct lport_index *lports,
                     const struct put_mac_binding *pmb)
 {
     if (time_msec() > pmb->timestamp + 1000) {
@@ -913,7 +1182,7 @@ run_put_mac_binding(struct controller_ctx *ctx,
 
     /* Convert logical datapath and logical port key into lport. */
     const struct sbrec_port_binding *pb
-        = lport_lookup_by_key(lports, pmb->dp_key, pmb->port_key);
+        = lport_lookup_by_key(ctx->ovnsb_idl, pmb->dp_key, pmb->port_key);
     if (!pb) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
 
@@ -951,8 +1220,7 @@ run_put_mac_binding(struct controller_ctx *ctx,
 }
 
 static void
-run_put_mac_bindings(struct controller_ctx *ctx,
-                     const struct lport_index *lports)
+run_put_mac_bindings(struct controller_ctx *ctx)
 {
     if (!ctx->ovnsb_idl_txn) {
         return;
@@ -960,7 +1228,7 @@ run_put_mac_bindings(struct controller_ctx *ctx,
 
     const struct put_mac_binding *pmb;
     HMAP_FOR_EACH (pmb, hmap_node, &put_mac_bindings) {
-        run_put_mac_binding(ctx, lports, pmb);
+        run_put_mac_binding(ctx, pmb);
     }
     flush_put_mac_bindings();
 }
@@ -1047,24 +1315,30 @@ send_garp_update(const struct sbrec_port_binding *binding_rec,
                                              ld->localnet_port->logical_port));
 
     volatile struct garp_data *garp = NULL;
-    /* Update GARP for NAT IP if it exists. */
-    if (!strcmp(binding_rec->type, "l3gateway")) {
+    /* Update GARP for NAT IP if it exists.  Consider port bindings with type
+     * "l3gateway" for logical switch ports attached to gateway routers, and
+     * port bindings with type "patch" for logical switch ports attached to
+     * distributed gateway ports. */
+    if (!strcmp(binding_rec->type, "l3gateway")
+        || !strcmp(binding_rec->type, "patch")) {
         struct lport_addresses *laddrs = NULL;
-        laddrs = shash_find_data(nat_addresses, binding_rec->logical_port);
-        if (!laddrs) {
-            return;
-        }
-        int i;
-        for (i = 0; i < laddrs->n_ipv4_addrs; i++) {
-            char *name = xasprintf("%s-%s", binding_rec->logical_port,
-                                            laddrs->ipv4_addrs[i].addr_s);
-            garp = shash_find_data(&send_garp_data, name);
-            if (garp) {
-                garp->ofport = ofport;
-            } else {
-                add_garp(name, ofport, laddrs->ea, laddrs->ipv4_addrs[i].addr);
+        while ((laddrs = shash_find_and_delete(nat_addresses,
+                                               binding_rec->logical_port))) {
+            int i;
+            for (i = 0; i < laddrs->n_ipv4_addrs; i++) {
+                char *name = xasprintf("%s-%s", binding_rec->logical_port,
+                                                laddrs->ipv4_addrs[i].addr_s);
+                garp = shash_find_data(&send_garp_data, name);
+                if (garp) {
+                    garp->ofport = ofport;
+                } else {
+                    add_garp(name, ofport, laddrs->ea,
+                             laddrs->ipv4_addrs[i].addr);
+                }
+                free(name);
             }
-            free(name);
+            destroy_lport_addresses(laddrs);
+            free(laddrs);
         }
         return;
     }
@@ -1125,10 +1399,10 @@ send_garp(struct garp_data *garp, long long int current_time)
         .packet = dp_packet_data(&packet),
         .packet_len = dp_packet_size(&packet),
         .buffer_id = UINT32_MAX,
-        .in_port = OFPP_CONTROLLER,
         .ofpacts = ofpacts.data,
         .ofpacts_len = ofpacts.size,
     };
+    match_set_in_port(&po.flow_metadata, OFPP_CONTROLLER);
     enum ofputil_protocol proto = ofputil_protocol_from_ofp_version(version);
     queue_msg(ofputil_encode_packet_out(&po, proto));
     dp_packet_uninit(&packet);
@@ -1147,9 +1421,9 @@ send_garp(struct garp_data *garp, long long int current_time)
 
 /* Get localnet vifs, local l3gw ports and ofport for localnet patch ports. */
 static void
-get_localnet_vifs_l3gwports(const struct ovsrec_bridge *br_int,
-                  const char *this_chassis_id,
-                  const struct lport_index *lports,
+get_localnet_vifs_l3gwports(struct controller_ctx *ctx,
+                  const struct ovsrec_bridge *br_int,
+                  const struct sbrec_chassis *chassis,
                   struct hmap *local_datapaths,
                   struct sset *localnet_vifs,
                   struct simap *localnet_ofports,
@@ -1162,18 +1436,17 @@ get_localnet_vifs_l3gwports(const struct ovsrec_bridge *br_int,
         }
         const char *chassis_id = smap_get(&port_rec->external_ids,
                                           "ovn-chassis-id");
-        if (chassis_id && !strcmp(chassis_id, this_chassis_id)) {
+        if (chassis_id && !strcmp(chassis_id, chassis->name)) {
             continue;
         }
         const char *localnet = smap_get(&port_rec->external_ids,
                                         "ovn-localnet-port");
-        const char *l3_gateway_port = smap_get(&port_rec->external_ids,
-                                               "ovn-l3gateway-port");
         for (int j = 0; j < port_rec->n_interfaces; j++) {
             const struct ovsrec_interface *iface_rec = port_rec->interfaces[j];
             if (!iface_rec->n_ofport) {
                 continue;
             }
+            /* Get localnet port with its ofport. */
             if (localnet) {
                 int64_t ofport = iface_rec->ofport[0];
                 if (ofport < 1 || ofport > ofp_to_u16(OFPP_MAX)) {
@@ -1182,17 +1455,14 @@ get_localnet_vifs_l3gwports(const struct ovsrec_bridge *br_int,
                 simap_put(localnet_ofports, localnet, ofport);
                 continue;
             }
-            if (l3_gateway_port) {
-                sset_add(local_l3gw_ports, l3_gateway_port);
-                continue;
-            }
+            /* Get localnet vif. */
             const char *iface_id = smap_get(&iface_rec->external_ids,
                                             "iface-id");
             if (!iface_id) {
                 continue;
             }
             const struct sbrec_port_binding *pb
-                = lport_lookup_by_name(lports, iface_id);
+                = lport_lookup_by_name(ctx->ovnsb_idl, iface_id);
             if (!pb) {
                 continue;
             }
@@ -1204,40 +1474,199 @@ get_localnet_vifs_l3gwports(const struct ovsrec_bridge *br_int,
             }
         }
     }
+
+    const struct local_datapath *ld;
+    struct ovsdb_idl_index_cursor cursor;
+    struct sbrec_port_binding *lpval;
+    lpval = sbrec_port_binding_index_init_row(ctx->ovnsb_idl,
+                                              &sbrec_table_port_binding);
+    ovsdb_idl_initialize_cursor(ctx->ovnsb_idl, &sbrec_table_port_binding,
+                                "lport-by-datapath", &cursor);
+    HMAP_FOR_EACH (ld, hmap_node, local_datapaths) {
+        const struct sbrec_port_binding *pb;
+
+        if (!ld->localnet_port) {
+            continue;
+        }
+
+        /* Get l3gw ports.  Consider port bindings with type "l3gateway"
+         * that connect to gateway routers (if local), and consider port
+         * bindings of type "patch" since they might connect to
+         * distributed gateway ports with NAT addresses. */
+
+        sbrec_port_binding_index_set_datapath(lpval, ld->datapath);
+
+        SBREC_PORT_BINDING_FOR_EACH_EQUAL (pb, &cursor, lpval) {
+            if ((ld->has_local_l3gateway && !strcmp(pb->type, "l3gateway"))
+                || !strcmp(pb->type, "patch")) {
+                sset_add(local_l3gw_ports, pb->logical_port);
+            }
+        }
+    }
+    sbrec_port_binding_index_destroy_row(lpval);
+}
+
+static bool
+pinctrl_is_chassis_resident(struct controller_ctx *ctx,
+                            const struct sbrec_chassis *chassis,
+                            const struct chassis_index *chassis_index,
+                            struct sset *active_tunnels,
+                            const char *port_name)
+{
+    const struct sbrec_port_binding *pb
+        = lport_lookup_by_name(ctx->ovnsb_idl, port_name);
+    if (!pb || !pb->chassis) {
+        return false;
+    }
+    if (strcmp(pb->type, "chassisredirect")) {
+        return pb->chassis == chassis;
+    } else {
+        struct ovs_list *gateway_chassis =
+            gateway_chassis_get_ordered(pb, chassis_index);
+        bool active = gateway_chassis_is_active(gateway_chassis,
+                                                chassis,
+                                                active_tunnels);
+        gateway_chassis_destroy(gateway_chassis);
+        return active;
+    }
+}
+
+/* Extracts the mac, IPv4 and IPv6 addresses, and logical port from
+ * 'addresses' which should be of the format 'MAC [IP1 IP2 ..]
+ * [is_chassis_resident("LPORT_NAME")]', where IPn should be a valid IPv4
+ * or IPv6 address, and stores them in the 'ipv4_addrs' and 'ipv6_addrs'
+ * fields of 'laddrs'.  The logical port name is stored in 'lport'.
+ *
+ * Returns true if at least 'MAC' is found in 'address', false otherwise.
+ *
+ * The caller must call destroy_lport_addresses() and free(*lport). */
+static bool
+extract_addresses_with_port(const char *addresses,
+                            struct lport_addresses *laddrs,
+                            char **lport)
+{
+    int ofs;
+    if (!extract_addresses(addresses, laddrs, &ofs)) {
+        return false;
+    } else if (ofs >= strlen(addresses)) {
+        return true;
+    }
+
+    struct lexer lexer;
+    lexer_init(&lexer, addresses + ofs);
+    lexer_get(&lexer);
+
+    if (lexer.error || lexer.token.type != LEX_T_ID
+        || !lexer_match_id(&lexer, "is_chassis_resident")) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_INFO_RL(&rl, "invalid syntax '%s' in address", addresses);
+        lexer_destroy(&lexer);
+        return true;
+    }
+
+    if (!lexer_match(&lexer, LEX_T_LPAREN)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_INFO_RL(&rl, "Syntax error: expecting '(' after "
+                          "'is_chassis_resident' in address '%s'", addresses);
+        lexer_destroy(&lexer);
+        return false;
+    }
+
+    if (lexer.token.type != LEX_T_STRING) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_INFO_RL(&rl,
+                    "Syntax error: expecting quoted string after"
+                    " 'is_chassis_resident' in address '%s'", addresses);
+        lexer_destroy(&lexer);
+        return false;
+    }
+
+    *lport = xstrdup(lexer.token.s);
+
+    lexer_get(&lexer);
+    if (!lexer_match(&lexer, LEX_T_RPAREN)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_INFO_RL(&rl, "Syntax error: expecting ')' after quoted string in "
+                          "'is_chassis_resident()' in address '%s'",
+                          addresses);
+        lexer_destroy(&lexer);
+        return false;
+    }
+
+    lexer_destroy(&lexer);
+    return true;
 }
 
 static void
-get_nat_addresses_and_keys(struct sset *nat_address_keys,
+consider_nat_address(struct controller_ctx *ctx,
+                     const char *nat_address,
+                     const struct sbrec_port_binding *pb,
+                     struct sset *nat_address_keys,
+                     const struct sbrec_chassis *chassis,
+                     const struct chassis_index *chassis_index,
+                     struct sset *active_tunnels,
+                     struct shash *nat_addresses)
+{
+    struct lport_addresses *laddrs = xmalloc(sizeof *laddrs);
+    char *lport = NULL;
+    if (!extract_addresses_with_port(nat_address, laddrs, &lport)
+        || (!lport && !strcmp(pb->type, "patch"))
+        || (lport && !pinctrl_is_chassis_resident(
+            ctx, chassis, chassis_index, active_tunnels, lport))) {
+        destroy_lport_addresses(laddrs);
+        free(laddrs);
+        free(lport);
+        return;
+    }
+    free(lport);
+
+    int i;
+    for (i = 0; i < laddrs->n_ipv4_addrs; i++) {
+        char *name = xasprintf("%s-%s", pb->logical_port,
+                                        laddrs->ipv4_addrs[i].addr_s);
+        sset_add(nat_address_keys, name);
+        free(name);
+    }
+    shash_add(nat_addresses, pb->logical_port, laddrs);
+}
+
+static void
+get_nat_addresses_and_keys(struct controller_ctx *ctx,
+                           struct sset *nat_address_keys,
                            struct sset *local_l3gw_ports,
-                           const struct lport_index *lports,
+                           const struct sbrec_chassis *chassis,
+                           const struct chassis_index *chassis_index,
+                           struct sset *active_tunnels,
                            struct shash *nat_addresses)
 {
     const char *gw_port;
     SSET_FOR_EACH(gw_port, local_l3gw_ports) {
-        const struct sbrec_port_binding *pb = lport_lookup_by_name(lports,
-                                                                   gw_port);
+        const struct sbrec_port_binding *pb;
+
+        pb = lport_lookup_by_name(ctx->ovnsb_idl, gw_port);
         if (!pb) {
             continue;
         }
-        const char *nat_addresses_options = smap_get(&pb->options,
-                                                     "nat-addresses");
-        if (!nat_addresses_options) {
-            continue;
-        }
 
-        struct lport_addresses *laddrs = xmalloc(sizeof *laddrs);
-        if (!extract_lsp_addresses(nat_addresses_options, laddrs)) {
-            free(laddrs);
-            continue;
+        if (pb->n_nat_addresses) {
+            for (int i = 0; i < pb->n_nat_addresses; i++) {
+                consider_nat_address(ctx, pb->nat_addresses[i], pb,
+                                     nat_address_keys, chassis,
+                                     chassis_index, active_tunnels,
+                                     nat_addresses);
+            }
+        } else {
+            /* Continue to support options:nat-addresses for version
+             * upgrade. */
+            const char *nat_addresses_options = smap_get(&pb->options,
+                                                         "nat-addresses");
+            if (nat_addresses_options) {
+                consider_nat_address(ctx, nat_addresses_options, pb,
+                                     nat_address_keys, chassis,
+                                     chassis_index, active_tunnels,
+                                     nat_addresses);
+            }
         }
-        int i;
-        for (i = 0; i < laddrs->n_ipv4_addrs; i++) {
-            char *name = xasprintf("%s-%s", pb->logical_port,
-                                            laddrs->ipv4_addrs[i].addr_s);
-            sset_add(nat_address_keys, name);
-            free(name);
-        }
-        shash_add(nat_addresses, pb->logical_port, laddrs);
     }
 }
 
@@ -1248,9 +1677,12 @@ send_garp_wait(void)
 }
 
 static void
-send_garp_run(const struct ovsrec_bridge *br_int, const char *chassis_id,
-              const struct lport_index *lports,
-              struct hmap *local_datapaths)
+send_garp_run(struct controller_ctx *ctx,
+              const struct ovsrec_bridge *br_int,
+              const struct sbrec_chassis *chassis,
+              const struct chassis_index *chassis_index,
+              struct hmap *local_datapaths,
+              struct sset *active_tunnels)
 {
     struct sset localnet_vifs = SSET_INITIALIZER(&localnet_vifs);
     struct sset local_l3gw_ports = SSET_INITIALIZER(&local_l3gw_ports);
@@ -1260,10 +1692,11 @@ send_garp_run(const struct ovsrec_bridge *br_int, const char *chassis_id,
 
     shash_init(&nat_addresses);
 
-    get_localnet_vifs_l3gwports(br_int, chassis_id, lports, local_datapaths,
+    get_localnet_vifs_l3gwports(ctx, br_int, chassis, local_datapaths,
                       &localnet_vifs, &localnet_ofports, &local_l3gw_ports);
 
-    get_nat_addresses_and_keys(&nat_ip_keys, &local_l3gw_ports, lports,
+    get_nat_addresses_and_keys(ctx, &nat_ip_keys, &local_l3gw_ports,
+                               chassis, chassis_index, active_tunnels,
                                &nat_addresses);
     /* For deleted ports and deleted nat ips, remove from send_garp_data. */
     struct shash_node *iter, *next;
@@ -1277,8 +1710,9 @@ send_garp_run(const struct ovsrec_bridge *br_int, const char *chassis_id,
     /* Update send_garp_data. */
     const char *iface_id;
     SSET_FOR_EACH (iface_id, &localnet_vifs) {
-        const struct sbrec_port_binding *pb = lport_lookup_by_name(lports,
-                                                                   iface_id);
+        const struct sbrec_port_binding *pb;
+
+        pb = lport_lookup_by_name(ctx->ovnsb_idl, iface_id);
         if (pb) {
             send_garp_update(pb, &localnet_ofports, local_datapaths,
                              &nat_addresses);
@@ -1288,8 +1722,9 @@ send_garp_run(const struct ovsrec_bridge *br_int, const char *chassis_id,
     /* Update send_garp_data for nat-addresses. */
     const char *gw_port;
     SSET_FOR_EACH (gw_port, &local_l3gw_ports) {
-        const struct sbrec_port_binding *pb = lport_lookup_by_name(lports,
-                                                                gw_port);
+        const struct sbrec_port_binding *pb;
+
+        pb = lport_lookup_by_name(ctx->ovnsb_idl, gw_port);
         if (pb) {
             send_garp_update(pb, &localnet_ofports, local_datapaths,
                              &nat_addresses);
@@ -1389,7 +1824,8 @@ pinctrl_handle_nd_na(const struct flow *ip_flow, const struct match *md,
     reload_metadata(&ofpacts, md);
 
     enum ofperr error = ofpacts_pull_openflow_actions(userdata, userdata->size,
-                                                      version, &ofpacts);
+                                                      version, NULL, NULL,
+                                                      &ofpacts);
     if (error) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
         VLOG_WARN_RL(&rl, "failed to parse actions for 'na' (%s)",
@@ -1401,10 +1837,10 @@ pinctrl_handle_nd_na(const struct flow *ip_flow, const struct match *md,
         .packet = dp_packet_data(&packet),
         .packet_len = dp_packet_size(&packet),
         .buffer_id = UINT32_MAX,
-        .in_port = OFPP_CONTROLLER,
         .ofpacts = ofpacts.data,
         .ofpacts_len = ofpacts.size,
     };
+    match_set_in_port(&po.flow_metadata, OFPP_CONTROLLER);
 
     queue_msg(ofputil_encode_packet_out(&po, proto));
 

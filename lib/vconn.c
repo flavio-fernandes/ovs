@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2008-2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -495,7 +495,7 @@ vcs_recv_hello(struct vconn *vconn)
             ofpbuf_delete(b);
             return;
         } else {
-            char *s = ofp_to_string(b->data, b->size, 1);
+            char *s = ofp_to_string(b->data, b->size, NULL, 1);
             VLOG_WARN_RL(&bad_ofmsg_rl,
                          "%s: received message while expecting hello: %s",
                          vconn->name, s);
@@ -641,7 +641,7 @@ do_recv(struct vconn *vconn, struct ofpbuf **msgp)
     if (!retval) {
         COVERAGE_INC(vconn_received);
         if (VLOG_IS_DBG_ENABLED()) {
-            char *s = ofp_to_string((*msgp)->data, (*msgp)->size, 1);
+            char *s = ofp_to_string((*msgp)->data, (*msgp)->size, NULL, 1);
             VLOG_DBG_RL(&ofmsg_rl, "%s: received: %s", vconn->name, s);
             free(s);
         }
@@ -681,7 +681,7 @@ do_send(struct vconn *vconn, struct ofpbuf *msg)
         COVERAGE_INC(vconn_sent);
         retval = (vconn->vclass->send)(vconn, msg);
     } else {
-        char *s = ofp_to_string(msg->data, msg->size, 1);
+        char *s = ofp_to_string(msg->data, msg->size, NULL, 1);
         retval = (vconn->vclass->send)(vconn, msg);
         if (retval != EAGAIN) {
             VLOG_DBG_RL(&ofmsg_rl, "%s: sent (%s): %s",
@@ -744,18 +744,6 @@ vconn_recv_block(struct vconn *vconn, struct ofpbuf **msgp)
     return retval;
 }
 
-static void
-vconn_add_bundle_error(const struct ofp_header *oh, struct ovs_list *errors)
-{
-    if (errors) {
-        struct vconn_bundle_error *err = xmalloc(sizeof *err);
-        size_t len = ntohs(oh->length);
-
-        memcpy(err->ofp_msg_data, oh, MIN(len, sizeof err->ofp_msg_data));
-        ovs_list_push_back(errors, &err->list_node);
-    }
-}
-
 static int
 vconn_recv_xid__(struct vconn *vconn, ovs_be32 xid, struct ofpbuf **replyp,
                  struct ovs_list *errors)
@@ -781,13 +769,13 @@ vconn_recv_xid__(struct vconn *vconn, ovs_be32 xid, struct ofpbuf **replyp,
 
         error = ofptype_decode(&type, oh);
         if (!error && type == OFPTYPE_ERROR) {
-            vconn_add_bundle_error(oh, errors);
+            ovs_list_push_back(errors, &reply->list_node);
         } else {
             VLOG_DBG_RL(&bad_ofmsg_rl, "%s: received reply with xid %08"PRIx32
                         " != expected %08"PRIx32,
                         vconn->name, ntohl(recv_xid), ntohl(xid));
+            ofpbuf_delete(reply);
         }
-        ofpbuf_delete(reply);
     }
 }
 
@@ -889,7 +877,6 @@ vconn_transact_noreply(struct vconn *vconn, struct ofpbuf *request,
     for (;;) {
         struct ofpbuf *msg;
         ovs_be32 msg_xid;
-        int error;
 
         error = vconn_recv_block(vconn, &msg);
         if (error) {
@@ -943,6 +930,124 @@ vconn_transact_multiple_noreply(struct vconn *vconn, struct ovs_list *requests,
     return 0;
 }
 
+static int
+recv_flow_stats_reply(struct vconn *vconn, ovs_be32 send_xid,
+                      struct ofpbuf **replyp,
+                      struct ofputil_flow_stats *fs, struct ofpbuf *ofpacts)
+{
+    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 5);
+    struct ofpbuf *reply = *replyp;
+
+    for (;;) {
+        int retval;
+        bool more;
+
+        /* Get a flow stats reply message, if we don't already have one. */
+        if (!reply) {
+            enum ofptype type;
+            enum ofperr error;
+
+            do {
+                error = vconn_recv_block(vconn, &reply);
+                if (error) {
+                    return error;
+                }
+            } while (((struct ofp_header *) reply->data)->xid != send_xid);
+
+            error = ofptype_decode(&type, reply->data);
+            if (error || type != OFPTYPE_FLOW_STATS_REPLY) {
+                VLOG_WARN_RL(&rl, "received bad reply: %s",
+                             ofp_to_string(reply->data, reply->size, NULL, 1));
+                return EPROTO;
+            }
+        }
+
+        /* Pull an individual flow stats reply out of the message. */
+        retval = ofputil_decode_flow_stats_reply(fs, reply, false, ofpacts);
+        switch (retval) {
+        case 0:
+            *replyp = reply;
+            return 0;
+
+        case EOF:
+            more = ofpmp_more(reply->header);
+            ofpbuf_delete(reply);
+            reply = NULL;
+            if (!more) {
+                *replyp = NULL;
+                return EOF;
+            }
+            break;
+
+        default:
+            VLOG_WARN_RL(&rl, "parse error in reply (%s)",
+                         ofperr_to_string(retval));
+            return EPROTO;
+        }
+    }
+}
+
+/* Sends 'fsr' to 'vconn', encoding it with the given 'protocol', and then
+ * waits for, parses, and accumulates all of the replies into '*fsesp' and
+ * '*n_fsesp'.  The caller is responsible for freeing all of the flows.
+ * Returns 0 if successful, otherwise a positive errno value. */
+int
+vconn_dump_flows(struct vconn *vconn,
+                 const struct ofputil_flow_stats_request *fsr,
+                 enum ofputil_protocol protocol,
+                 struct ofputil_flow_stats **fsesp, size_t *n_fsesp)
+{
+    struct ofputil_flow_stats *fses = NULL;
+    size_t n_fses = 0;
+    size_t allocated_fses = 0;
+
+    struct ofpbuf *request = ofputil_encode_flow_stats_request(fsr, protocol);
+    const struct ofp_header *oh = request->data;
+    ovs_be32 send_xid = oh->xid;
+    int error = vconn_send_block(vconn, request);
+    if (error) {
+        goto exit;
+    }
+
+    struct ofpbuf *reply = NULL;
+    struct ofpbuf ofpacts;
+    ofpbuf_init(&ofpacts, 0);
+    for (;;) {
+        if (n_fses >= allocated_fses) {
+            fses = x2nrealloc(fses, &allocated_fses, sizeof *fses);
+        }
+
+        struct ofputil_flow_stats *fs = &fses[n_fses];
+        error = recv_flow_stats_reply(vconn, send_xid, &reply, fs, &ofpacts);
+        if (error) {
+            if (error == EOF) {
+                error = 0;
+            }
+            break;
+        }
+        fs->ofpacts = xmemdup(fs->ofpacts, fs->ofpacts_len);
+        n_fses++;
+    }
+    ofpbuf_uninit(&ofpacts);
+    ofpbuf_delete(reply);
+
+    if (error) {
+        for (size_t i = 0; i < n_fses; i++) {
+            free(CONST_CAST(struct ofpact *, fses[i].ofpacts));
+        }
+        free(fses);
+
+        fses = NULL;
+        n_fses = 0;
+    }
+
+exit:
+    *fsesp = fses;
+    *n_fsesp = n_fses;
+    return error;
+}
+
+
 static enum ofperr
 vconn_bundle_reply_validate(struct ofpbuf *reply,
                             struct ofputil_bundle_ctrl_msg *request,
@@ -960,7 +1065,8 @@ vconn_bundle_reply_validate(struct ofpbuf *reply,
     }
 
     if (type == OFPTYPE_ERROR) {
-        vconn_add_bundle_error(oh, errors);
+        struct ofpbuf *copy = ofpbuf_clone(reply);
+        ovs_list_push_back(errors, &copy->list_node);
         return ofperr_decode_msg(oh, NULL);
     }
     if (type != OFPTYPE_BUNDLE_CONTROL) {
@@ -1032,13 +1138,13 @@ vconn_recv_error(struct vconn *vconn, struct ovs_list *errors)
             oh = reply->data;
             ofperr = ofptype_decode(&type, oh);
             if (!ofperr && type == OFPTYPE_ERROR) {
-                vconn_add_bundle_error(oh, errors);
+                ovs_list_push_back(errors, &reply->list_node);
             } else {
                 VLOG_DBG_RL(&bad_ofmsg_rl,
                             "%s: received unexpected reply with xid %08"PRIx32,
                             vconn->name, ntohl(oh->xid));
+                ofpbuf_delete(reply);
             }
-            ofpbuf_delete(reply);
         }
     } while (!error);
 }
@@ -1091,6 +1197,8 @@ vconn_bundle_add_msg(struct vconn *vconn, struct ofputil_bundle_ctrl_msg *bc,
     return error;
 }
 
+/* Appends ofpbufs for received errors, if any, to 'errors'.  The caller must
+ * free the received errors. */
 int
 vconn_bundle_transact(struct vconn *vconn, struct ovs_list *requests,
                       uint16_t flags, struct ovs_list *errors)

@@ -337,7 +337,7 @@ lacp_process_packet(struct lacp *lacp, const void *slave_,
 
     pdu = parse_lacp_packet(packet);
     if (!pdu) {
-	slave->count_rx_pdus_bad++;
+        slave->count_rx_pdus_bad++;
         VLOG_WARN_RL(&rl, "%s: received an unparsable LACP PDU.", lacp->name);
         goto out;
     }
@@ -536,6 +536,7 @@ lacp_run(struct lacp *lacp, lacp_send_pdu *send_pdu) OVS_EXCLUDED(mutex)
 
     if (lacp->update) {
         lacp_update_attached(lacp);
+        seq_change(connectivity_seq_get());
     }
 
     HMAP_FOR_EACH (slave, node, &lacp->slaves) {
@@ -555,7 +556,7 @@ lacp_run(struct lacp *lacp, lacp_send_pdu *send_pdu) OVS_EXCLUDED(mutex)
             slave->ntt_actor = actor;
             compose_lacp_pdu(&actor, &slave->partner, &pdu);
             send_pdu(slave->aux, &pdu, sizeof pdu);
-	    slave->count_tx_pdus++;
+            slave->count_tx_pdus++;
 
             duration = (slave->partner.state & LACP_STATE_TIME
                         ? LACP_FAST_TIME_TX
@@ -596,11 +597,13 @@ lacp_update_attached(struct lacp *lacp) OVS_REQUIRES(mutex)
 {
     struct slave *lead, *slave;
     struct lacp_info lead_pri;
+    bool lead_enable;
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 10);
 
     lacp->update = false;
 
     lead = NULL;
+    lead_enable = false;
     HMAP_FOR_EACH (slave, node, &lacp->slaves) {
         struct lacp_info pri;
 
@@ -623,9 +626,14 @@ lacp_update_attached(struct lacp *lacp) OVS_REQUIRES(mutex)
 
         slave->attached = true;
         slave_get_priority(slave, &pri);
+        bool enable = slave_may_enable__(slave);
 
-        if (!lead || memcmp(&pri, &lead_pri, sizeof pri) < 0) {
+        if (!lead
+            || enable > lead_enable
+            || (enable == lead_enable
+                && memcmp(&pri, &lead_pri, sizeof pri) < 0)) {
             lead = slave;
+            lead_enable = enable;
             lead_pri = pri;
         }
     }

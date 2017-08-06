@@ -107,13 +107,14 @@ OvsEncapStt(POVS_VPORT_ENTRY vport,
             OvsIPv4TunnelKey *tunKey,
             POVS_SWITCH_CONTEXT switchContext,
             POVS_PACKET_HDR_INFO layers,
-            PNET_BUFFER_LIST *newNbl)
+            PNET_BUFFER_LIST *newNbl,
+            POVS_FWD_INFO switchFwdInfo)
 {
     OVS_FWD_INFO fwdInfo;
     NDIS_STATUS status;
 
     UNREFERENCED_PARAMETER(switchContext);
-    status = OvsLookupIPFwdInfo(tunKey->dst, &fwdInfo);
+    status = OvsLookupIPFwdInfo(tunKey->src, tunKey->dst, &fwdInfo);
     if (status != STATUS_SUCCESS) {
         OvsFwdIPHelperRequest(NULL, 0, tunKey, NULL, NULL, NULL);
         /*
@@ -122,6 +123,8 @@ OvsEncapStt(POVS_VPORT_ENTRY vport,
          */
         return NDIS_STATUS_FAILURE;
     }
+
+    RtlCopyMemory(switchFwdInfo->value, fwdInfo.value, sizeof fwdInfo.value);
 
     status = OvsDoEncapStt(vport, curNbl, tunKey, &fwdInfo, layers,
                            switchContext, newNbl);
@@ -182,7 +185,7 @@ OvsDoEncapStt(POVS_VPORT_ENTRY vport,
         if ((innerFrameLen > OVS_MAX_STT_PACKET_LENGTH) ||
             (layers->l4Offset > OVS_MAX_STT_L4_OFFSET_LENGTH)) {
             *newNbl = OvsTcpSegmentNBL(switchContext, curNbl, layers,
-                mss - headRoom, headRoom);
+                                       mss - headRoom, headRoom, FALSE);
             if (*newNbl == NULL) {
                 OVS_LOG_ERROR("Unable to segment NBL");
                 return NDIS_STATUS_FAILURE;
@@ -305,7 +308,8 @@ OvsDoEncapStt(POVS_VPORT_ENTRY vport,
         /* L4 header */
         RtlZeroMemory(outerTcpHdr, sizeof *outerTcpHdr);
         outerTcpHdr->source = htons(tunKey->flow_hash | 32768);
-        outerTcpHdr->dest = htons(vportStt->dstPort);
+        outerTcpHdr->dest = tunKey->dst_port ? tunKey->dst_port:
+                                               htons(vportStt->dstPort);
         outerTcpHdr->seq = htonl((STT_HDR_LEN + innerFrameLen) <<
                                  STT_SEQ_LEN_SHIFT);
         outerTcpHdr->ack_seq = htonl(atomic_inc64(&vportStt->ackNo));
@@ -691,6 +695,7 @@ OvsSttReassemble(POVS_SWITCH_CONTEXT switchContext,
         entry->timeout = currentTime + STT_ENTRY_TIMEOUT;
 
         if (segOffset == 0) {
+            ASSERT(sttHdr);
             entry->sttHdr = *sttHdr;
         }
 
@@ -718,6 +723,7 @@ OvsSttReassemble(POVS_SWITCH_CONTEXT switchContext,
         }
 
         if (segOffset == 0) {
+            ASSERT(sttHdr);
             pktFragEntry->sttHdr = *sttHdr;
         }
         if (ipHdr->ecn == IP_ECN_CE) {
@@ -851,8 +857,8 @@ OvsDecapSetOffloads(PNET_BUFFER_LIST *curNbl,
             tcpHdr = (TCPHdr *)(buf + layers->l4Offset);
 
             tcpHdr->check = IPPseudoChecksum(&ipHdr->saddr,
-                                                (uint32 *)&ipHdr->daddr,
-                                                IPPROTO_TCP, 0);
+                                             (uint32 *)&ipHdr->daddr,
+                                             IPPROTO_TCP, 0);
         } else {
             IPv6Hdr *ipHdr;
             TCPHdr *tcpHdr;
@@ -1015,7 +1021,7 @@ OvsDecapStt(POVS_SWITCH_CONTEXT switchContext,
                 innerIpHdr->check = IPChecksum((UINT8 *)innerIpHdr,
                                                 innerIpHdr->ihl * 4, 0);
             } else {
-                status = NDIS_STATUS_RESOURCES;
+                status = NDIS_STATUS_INVALID_PACKET;
                 goto dropNbl;
             }
         } else if (layers.isIPv6) {

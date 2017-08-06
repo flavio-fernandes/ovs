@@ -89,7 +89,7 @@ xlate_cache_netdev(struct xc_entry *entry, const struct dpif_flow_stats *stats)
 /* Push stats and perform side effects of flow translation. */
 void
 xlate_push_stats_entry(struct xc_entry *entry,
-                       const struct dpif_flow_stats *stats)
+                       struct dpif_flow_stats *stats)
 {
     struct eth_addr dmac;
 
@@ -123,7 +123,8 @@ xlate_push_stats_entry(struct xc_entry *entry,
         break;
     case XC_LEARN: {
         enum ofperr error;
-        error = ofproto_flow_mod_learn(entry->learn.ofm, true);
+        error = ofproto_flow_mod_learn(entry->learn.ofm, true,
+                                       entry->learn.limit, NULL);
         if (error) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
             VLOG_WARN_RL(&rl, "xcache LEARN action execution failed.");
@@ -139,8 +140,8 @@ xlate_push_stats_entry(struct xc_entry *entry,
         break;
     case XC_FIN_TIMEOUT:
         if (stats->tcp_flags & (TCP_FIN | TCP_RST)) {
-            rule_dpif_reduce_timeouts(entry->fin.rule, entry->fin.idle,
-                                      entry->fin.hard);
+            ofproto_rule_reduce_timeouts(&entry->fin.rule->up, entry->fin.idle,
+                                         entry->fin.hard);
         }
         break;
     case XC_GROUP:
@@ -159,6 +160,14 @@ xlate_push_stats_entry(struct xc_entry *entry,
             entry->controller.am = NULL; /* One time only. */
         }
         break;
+    case XC_TUNNEL_HEADER:
+        if (entry->tunnel_hdr.operation == ADD) {
+            stats->n_bytes += stats->n_packets * entry->tunnel_hdr.hdr_size;
+        } else {
+            stats->n_bytes -= stats->n_packets * entry->tunnel_hdr.hdr_size;
+        }
+
+        break;
     default:
         OVS_NOT_REACHED();
     }
@@ -166,7 +175,7 @@ xlate_push_stats_entry(struct xc_entry *entry,
 
 void
 xlate_push_stats(struct xlate_cache *xcache,
-                 const struct dpif_flow_stats *stats)
+                 struct dpif_flow_stats *stats)
 {
     if (!stats->n_packets) {
         return;
@@ -208,7 +217,7 @@ xlate_cache_clear_entry(struct xc_entry *entry)
     case XC_TABLE:
         break;
     case XC_RULE:
-        rule_dpif_unref(entry->rule);
+        ofproto_rule_unref(&entry->rule->up);
         break;
     case XC_BOND:
         free(entry->bond.flow);
@@ -234,7 +243,7 @@ xlate_cache_clear_entry(struct xc_entry *entry)
          * has already released it's reference above. */
         break;
     case XC_GROUP:
-        group_dpif_unref(entry->group.group);
+        ofproto_group_unref(&entry->group.group->up);
         break;
     case XC_TNL_NEIGH:
         break;
@@ -243,6 +252,8 @@ xlate_cache_clear_entry(struct xc_entry *entry)
             ofproto_async_msg_free(entry->controller.am);
             entry->controller.am = NULL;
         }
+        break;
+    case XC_TUNNEL_HEADER:
         break;
     default:
         OVS_NOT_REACHED();
@@ -277,4 +288,23 @@ xlate_cache_delete(struct xlate_cache *xcache)
 {
     xlate_cache_uninit(xcache);
     free(xcache);
+}
+
+/* Append all the entries in src into dst and remove them from src.
+ * The caller must own both xc-caches to use this function.
+ * The 'src' entries are not freed in this function as its owned by caller.
+ */
+void
+xlate_cache_steal_entries(struct xlate_cache *dst, struct xlate_cache *src)
+{
+    if (!dst || !src) {
+        return;
+    }
+    struct ofpbuf *src_entries = &src->entries;
+    struct ofpbuf *dst_entries = &dst->entries;
+    void *p;
+
+    p = ofpbuf_put_uninit(dst_entries, src_entries->size);
+    memcpy(p, src_entries->data, src_entries->size);
+    ofpbuf_clear(src_entries);
 }

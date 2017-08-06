@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2014, 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -165,7 +165,8 @@ parse_options(int argc, char *argv[], struct shash *local_options)
         OPT_PEER_CA_CERT,
         OPT_LOCAL,
         VLOG_OPTION_ENUMS,
-        TABLE_OPTION_ENUMS
+        TABLE_OPTION_ENUMS,
+        SSL_OPTION_ENUMS,
     };
     static const struct option global_long_options[] = {
         {"db", required_argument, NULL, OPT_DB},
@@ -201,7 +202,6 @@ parse_options(int argc, char *argv[], struct shash *local_options)
     allocated_options = ARRAY_SIZE(global_long_options);
     n_options = n_global_long_options;
     ctl_add_cmd_options(&options, &n_options, &allocated_options, OPT_LOCAL);
-    table_style.format = TF_LIST;
 
     for (;;) {
         int idx;
@@ -366,6 +366,7 @@ Options:\n\
   --dry-run                   do not commit changes to database\n\
   --oneline                   print exactly one line of output per command\n",
            program_name, program_name, ctl_get_db_cmd_usage(), ctl_default_db());
+    table_usage();
     vlog_usage();
     printf("\
   --no-syslog                 equivalent to --verbose=vtep_ctl:syslog:warn\n");
@@ -541,6 +542,7 @@ del_cached_port(struct vtep_ctl_context *vtepctl_ctx,
     ovs_list_remove(&port->ports_node);
     shash_find_and_delete(&vtepctl_ctx->ports, cache_name);
     vteprec_physical_port_delete(port->port_cfg);
+    shash_destroy(&port->bindings);
     free(cache_name);
     free(port);
 }
@@ -1084,7 +1086,6 @@ vtep_ctl_context_populate_cache(struct ctl_context *ctx)
             port = add_port_to_cache(vtepctl_ctx, ps, port_cfg);
 
             for (k = 0; k < port_cfg->n_vlan_bindings; k++) {
-                struct vteprec_logical_switch *ls_cfg;
                 struct vtep_ctl_lswitch *ls;
                 char *vlan;
 
@@ -2175,72 +2176,21 @@ cmd_set_manager(struct ctl_context *ctx)
 }
 
 /* Parameter commands. */
-static const struct ctl_table_class tables[] = {
-    {&vteprec_table_global,
-     {{&vteprec_table_global, NULL, NULL},
-      {NULL, NULL, NULL}}},
+static const struct ctl_table_class tables[VTEPREC_N_TABLES] = {
+    [VTEPREC_TABLE_LOGICAL_SWITCH].row_ids[0]
+    = {&vteprec_logical_switch_col_name, NULL, NULL},
 
-    {&vteprec_table_logical_binding_stats,
-     {{NULL, NULL, NULL},
-      {NULL, NULL, NULL}}},
+    [VTEPREC_TABLE_MANAGER].row_ids[0]
+    = {&vteprec_manager_col_target, NULL, NULL},
 
-    {&vteprec_table_logical_switch,
-     {{&vteprec_table_logical_switch, &vteprec_logical_switch_col_name, NULL},
-      {NULL, NULL, NULL}}},
+    [VTEPREC_TABLE_PHYSICAL_PORT].row_ids[0]
+    = {&vteprec_physical_port_col_name, NULL, NULL},
 
-    {&vteprec_table_ucast_macs_local,
-     {{NULL, NULL, NULL},
-      {NULL, NULL, NULL}}},
+    [VTEPREC_TABLE_PHYSICAL_SWITCH].row_ids[0]
+    = {&vteprec_physical_switch_col_name, NULL, NULL},
 
-    {&vteprec_table_ucast_macs_remote,
-     {{NULL, NULL, NULL},
-      {NULL, NULL, NULL}}},
-
-    {&vteprec_table_mcast_macs_local,
-     {{NULL, NULL, NULL},
-      {NULL, NULL, NULL}}},
-
-    {&vteprec_table_mcast_macs_remote,
-     {{NULL, NULL, NULL},
-      {NULL, NULL, NULL}}},
-
-    {&vteprec_table_manager,
-     {{&vteprec_table_manager, &vteprec_manager_col_target, NULL},
-      {NULL, NULL, NULL}}},
-
-    {&vteprec_table_physical_locator,
-     {{NULL, NULL, NULL},
-      {NULL, NULL, NULL}}},
-
-    {&vteprec_table_physical_locator_set,
-     {{NULL, NULL, NULL},
-      {NULL, NULL, NULL}}},
-
-    {&vteprec_table_physical_port,
-     {{&vteprec_table_physical_port, &vteprec_physical_port_col_name, NULL},
-      {NULL, NULL, NULL}}},
-
-    {&vteprec_table_physical_switch,
-     {{&vteprec_table_physical_switch, &vteprec_physical_switch_col_name, NULL},
-      {NULL, NULL, NULL}}},
-
-    {&vteprec_table_tunnel,
-     {{NULL, NULL, NULL},
-      {NULL, NULL, NULL}}},
-
-    {&vteprec_table_logical_router,
-     {{&vteprec_table_logical_router, &vteprec_logical_router_col_name, NULL},
-      {NULL, NULL, NULL}}},
-
-    {&vteprec_table_arp_sources_local,
-     {{NULL, NULL, NULL},
-      {NULL, NULL, NULL}}},
-
-    {&vteprec_table_arp_sources_remote,
-     {{NULL, NULL, NULL},
-      {NULL, NULL, NULL}}},
-
-    {NULL, {{NULL, NULL, NULL}, {NULL, NULL, NULL}}}
+    [VTEPREC_TABLE_LOGICAL_ROUTER].row_ids[0]
+    = {&vteprec_logical_router_col_name, NULL, NULL},
 };
 
 
@@ -2545,6 +2495,6 @@ static const struct ctl_command_syntax vtep_commands[] = {
 static void
 vtep_ctl_cmd_init(void)
 {
-    ctl_init(tables, cmd_show_tables, vtep_ctl_exit);
+    ctl_init(vteprec_table_classes, tables, cmd_show_tables, vtep_ctl_exit);
     ctl_register_commands(vtep_commands);
 }

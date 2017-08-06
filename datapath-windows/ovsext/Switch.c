@@ -27,6 +27,7 @@
 #include "Flow.h"
 #include "IpHelper.h"
 #include "Oid.h"
+#include "IpFragment.h"
 
 #ifdef OVS_DBG_MOD
 #undef OVS_DBG_MOD
@@ -142,7 +143,7 @@ OvsExtAttach(NDIS_HANDLE ndisFilterHandle,
     KeMemoryBarrier();
 
 cleanup:
-    gOvsInAttach = FALSE;
+    InterlockedExchange(&gOvsInAttach, 0);
     if (status != NDIS_STATUS_SUCCESS) {
         if (switchContext != NULL) {
             OvsDeleteSwitch(switchContext);
@@ -225,6 +226,19 @@ OvsCreateSwitch(NDIS_HANDLE ndisFilterHandle,
         goto create_switch_done;
     }
 
+    status = OvsInitCtRelated(switchContext);
+    if (status != STATUS_SUCCESS) {
+        OvsUninitSwitchContext(switchContext);
+        OVS_LOG_ERROR("Exit: Failed to initialize Connection tracking");
+    }
+
+    status = OvsInitIpFragment(switchContext);
+    if (status != STATUS_SUCCESS) {
+        OvsUninitSwitchContext(switchContext);
+        OVS_LOG_ERROR("Exit: Failed to initialize Ip Fragment");
+        goto create_switch_done;
+    }
+
     *switchContextOut = switchContext;
 
 create_switch_done:
@@ -239,7 +253,6 @@ create_switch_done:
  *  Implements filter driver's FilterDetach function.
  * --------------------------------------------------------------------------
  */
-_Use_decl_annotations_
 VOID
 OvsExtDetach(NDIS_HANDLE filterModuleContext)
 {
@@ -257,6 +270,9 @@ OvsExtDetach(NDIS_HANDLE filterModuleContext)
     OvsCleanupIpHelper();
     OvsCleanupSttDefragmentation();
     OvsCleanupConntrack();
+    OvsCleanupCtRelated();
+    OvsCleanupIpFragment();
+
     /* This completes the cleanup, and a new attach can be handled now. */
 
     OVS_LOG_TRACE("Exit: OvsDetach Successfully");
@@ -292,7 +308,6 @@ OvsDeleteSwitch(POVS_SWITCH_CONTEXT switchContext)
  *  Implements filter driver's FilterRestart function.
  * --------------------------------------------------------------------------
  */
-_Use_decl_annotations_
 NDIS_STATUS
 OvsExtRestart(NDIS_HANDLE filterModuleContext,
               PNDIS_FILTER_RESTART_PARAMETERS filterRestartParameters)
@@ -501,7 +516,7 @@ OvsReleaseSwitchContext(POVS_SWITCH_CONTEXT switchContext)
     LONG icxRef = 0;
 
     do {
-        ref = gOvsSwitchContextRefCount;
+        ref = InterlockedAdd(&gOvsSwitchContextRefCount, 0);
         newRef = (0 == ref) ? 0 : ref - 1;
         icxRef = InterlockedCompareExchange(&gOvsSwitchContextRefCount,
                                             newRef,
@@ -523,7 +538,7 @@ OvsAcquireSwitchContext(VOID)
     BOOLEAN ret = FALSE;
 
     do {
-        ref = gOvsSwitchContextRefCount;
+        ref = InterlockedAdd(&gOvsSwitchContextRefCount, 0);
         newRef = (0 == ref) ? 0 : ref + 1;
         icxRef = InterlockedCompareExchange(&gOvsSwitchContextRefCount,
                                             newRef,
@@ -553,6 +568,8 @@ OvsActivateSwitch(POVS_SWITCH_CONTEXT switchContext)
 
     ASSERT(!switchContext->isActivated);
 
+    switchContext->isActivated = TRUE;
+
     OVS_LOG_TRACE("Enter: activate switch %p, dpNo: %ld",
                   switchContext, switchContext->dpNo);
 
@@ -571,9 +588,11 @@ OvsActivateSwitch(POVS_SWITCH_CONTEXT switchContext)
         goto cleanup;
     }
 
-    switchContext->isActivated = TRUE;
-
 cleanup:
+    if (status != NDIS_STATUS_SUCCESS) {
+        switchContext->isActivated = FALSE;
+    }
+
     OVS_LOG_TRACE("Exit: activate switch:%p, isActivated: %s, status = %lx",
                   switchContext,
                   (switchContext->isActivated ? "TRUE" : "FALSE"), status);
@@ -596,8 +615,8 @@ OvsExtNetPnPEvent(NDIS_HANDLE filterModuleContext,
     OVS_LOG_TRACE("Enter: filterModuleContext: %p, NetEvent: %d",
                   filterModuleContext, (netPnPEvent->NetPnPEvent).NetEvent);
     /*
-     * The only interesting event is the NetEventSwitchActivate. It provides
-     * an asynchronous notification of the switch completing activation.
+     * NetEventSwitchActivate provides an asynchronous notification of
+     * the switch completing activation.
      */
     if (netPnPEvent->NetPnPEvent.NetEvent == NetEventSwitchActivate) {
         ASSERT(switchContext->isActivated == FALSE);
@@ -607,9 +626,7 @@ OvsExtNetPnPEvent(NDIS_HANDLE filterModuleContext,
                           "status: %s", switchContext,
                           status ? "TRUE" : "FALSE");
         }
-    }
-
-    if (netPnPEvent->NetPnPEvent.NetEvent == NetEventFilterPreDetach) {
+    } else if (netPnPEvent->NetPnPEvent.NetEvent == NetEventFilterPreDetach) {
         switchContext->dataFlowState = OvsSwitchPaused;
         KeMemoryBarrier();
     }

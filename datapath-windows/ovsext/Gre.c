@@ -96,16 +96,19 @@ OvsEncapGre(POVS_VPORT_ENTRY vport,
             OvsIPv4TunnelKey *tunKey,
             POVS_SWITCH_CONTEXT switchContext,
             POVS_PACKET_HDR_INFO layers,
-            PNET_BUFFER_LIST *newNbl)
+            PNET_BUFFER_LIST *newNbl,
+            POVS_FWD_INFO switchFwdInfo)
 {
     OVS_FWD_INFO fwdInfo;
     NDIS_STATUS status;
 
-    status = OvsLookupIPFwdInfo(tunKey->dst, &fwdInfo);
+    status = OvsLookupIPFwdInfo(tunKey->src, tunKey->dst, &fwdInfo);
     if (status != STATUS_SUCCESS) {
         OvsFwdIPHelperRequest(NULL, 0, tunKey, NULL, NULL, NULL);
         return NDIS_STATUS_FAILURE;
     }
+
+    RtlCopyMemory(switchFwdInfo->value, fwdInfo.value, sizeof fwdInfo.value);
 
     status = OvsDoEncapGre(vport, curNbl, tunKey, &fwdInfo, layers,
                            switchContext, newNbl);
@@ -155,7 +158,7 @@ OvsDoEncapGre(POVS_VPORT_ENTRY vport,
         if (mss) {
             OVS_LOG_TRACE("l4Offset %d", layers->l4Offset);
             *newNbl = OvsTcpSegmentNBL(switchContext, curNbl, layers,
-                                       mss, headRoom);
+                                       mss, headRoom, FALSE);
             if (*newNbl == NULL) {
                 OVS_LOG_ERROR("Unable to segment NBL");
                 return NDIS_STATUS_FAILURE;

@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2016 Nicira, Inc.
+/* Copyright (c) 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bfd.h"
 #include "binding.h"
 #include "chassis.h"
 #include "command-line.h"
@@ -40,6 +41,7 @@
 #include "openvswitch/vconn.h"
 #include "openvswitch/vlog.h"
 #include "ovn/actions.h"
+#include "ovn/lib/chassis-index.h"
 #include "ovn/lib/ovn-sb-idl.h"
 #include "ovn/lib/ovn-util.h"
 #include "patch.h"
@@ -59,13 +61,22 @@ VLOG_DEFINE_THIS_MODULE(main);
 
 static unixctl_cb_func ovn_controller_exit;
 static unixctl_cb_func ct_zone_list;
+static unixctl_cb_func inject_pkt;
 
 #define DEFAULT_BRIDGE_NAME "br-int"
 #define DEFAULT_PROBE_INTERVAL_MSEC 5000
 
-static void update_probe_interval(struct controller_ctx *);
+static void update_probe_interval(struct controller_ctx *,
+                                  const char *ovnsb_remote);
 static void parse_options(int argc, char *argv[]);
 OVS_NO_RETURN static void usage(void);
+
+/* Pending packet to be injected into connected OVS. */
+struct pending_pkt {
+    /* Setting 'conn' indicates that a request is pending. */
+    struct unixctl_conn *conn;
+    char *flow_s;
+};
 
 static char *ovs_remote;
 
@@ -75,16 +86,6 @@ get_local_datapath(const struct hmap *local_datapaths, uint32_t tunnel_key)
     struct hmap_node *node = hmap_first_with_hash(local_datapaths, tunnel_key);
     return (node
             ? CONTAINER_OF(node, struct local_datapath, hmap_node)
-            : NULL);
-}
-
-struct patched_datapath *
-get_patched_datapath(const struct hmap *patched_datapaths, uint32_t tunnel_key)
-{
-    struct hmap_node *node = hmap_first_with_hash(patched_datapaths,
-                                                  tunnel_key);
-    return (node
-            ? CONTAINER_OF(node, struct patched_datapath, hmap_node)
             : NULL);
 }
 
@@ -128,6 +129,81 @@ get_bridge(struct ovsdb_idl *ovs_idl, const char *br_name)
     return NULL;
 }
 
+static void
+update_sb_monitors(struct ovsdb_idl *ovnsb_idl,
+                   const struct sbrec_chassis *chassis,
+                   const struct sset *local_ifaces,
+                   struct hmap *local_datapaths)
+{
+    /* Monitor Port_Bindings rows for local interfaces and local datapaths.
+     *
+     * Monitor Logical_Flow, MAC_Binding, Multicast_Group, and DNS tables for
+     * local datapaths.
+     *
+     * We always monitor patch ports because they allow us to see the linkages
+     * between related logical datapaths.  That way, when we know that we have
+     * a VIF on a particular logical switch, we immediately know to monitor all
+     * the connected logical routers and logical switches. */
+    struct ovsdb_idl_condition pb = OVSDB_IDL_CONDITION_INIT(&pb);
+    struct ovsdb_idl_condition lf = OVSDB_IDL_CONDITION_INIT(&lf);
+    struct ovsdb_idl_condition mb = OVSDB_IDL_CONDITION_INIT(&mb);
+    struct ovsdb_idl_condition mg = OVSDB_IDL_CONDITION_INIT(&mg);
+    struct ovsdb_idl_condition dns = OVSDB_IDL_CONDITION_INIT(&dns);
+    sbrec_port_binding_add_clause_type(&pb, OVSDB_F_EQ, "patch");
+    /* XXX: We can optimize this, if we find a way to only monitor
+     * ports that have a Gateway_Chassis that point's to our own
+     * chassis */
+    sbrec_port_binding_add_clause_type(&pb, OVSDB_F_EQ, "chassisredirect");
+    if (chassis) {
+        /* This should be mostly redundant with the other clauses for port
+         * bindings, but it allows us to catch any ports that are assigned to
+         * us but should not be.  That way, we can clear their chassis
+         * assignments. */
+        sbrec_port_binding_add_clause_chassis(&pb, OVSDB_F_EQ,
+                                              &chassis->header_.uuid);
+
+        /* Ensure that we find out about l2gateway and l3gateway ports that
+         * should be present on this chassis.  Otherwise, we might never find
+         * out about those ports, if their datapaths don't otherwise have a VIF
+         * in this chassis. */
+        const char *id = chassis->name;
+        const struct smap l2 = SMAP_CONST1(&l2, "l2gateway-chassis", id);
+        sbrec_port_binding_add_clause_options(&pb, OVSDB_F_INCLUDES, &l2);
+        const struct smap l3 = SMAP_CONST1(&l3, "l3gateway-chassis", id);
+        sbrec_port_binding_add_clause_options(&pb, OVSDB_F_INCLUDES, &l3);
+    }
+    if (local_ifaces) {
+        const char *name;
+        SSET_FOR_EACH (name, local_ifaces) {
+            sbrec_port_binding_add_clause_logical_port(&pb, OVSDB_F_EQ, name);
+            sbrec_port_binding_add_clause_parent_port(&pb, OVSDB_F_EQ, name);
+        }
+    }
+    if (local_datapaths) {
+        const struct local_datapath *ld;
+        HMAP_FOR_EACH (ld, hmap_node, local_datapaths) {
+            struct uuid *uuid = CONST_CAST(struct uuid *,
+                                           &ld->datapath->header_.uuid);
+            sbrec_port_binding_add_clause_datapath(&pb, OVSDB_F_EQ, uuid);
+            sbrec_logical_flow_add_clause_logical_datapath(&lf, OVSDB_F_EQ,
+                                                           uuid);
+            sbrec_mac_binding_add_clause_datapath(&mb, OVSDB_F_EQ, uuid);
+            sbrec_multicast_group_add_clause_datapath(&mg, OVSDB_F_EQ, uuid);
+            sbrec_dns_add_clause_datapaths(&dns, OVSDB_F_INCLUDES, &uuid, 1);
+        }
+    }
+    sbrec_port_binding_set_condition(ovnsb_idl, &pb);
+    sbrec_logical_flow_set_condition(ovnsb_idl, &lf);
+    sbrec_mac_binding_set_condition(ovnsb_idl, &mb);
+    sbrec_multicast_group_set_condition(ovnsb_idl, &mg);
+    sbrec_dns_set_condition(ovnsb_idl, &dns);
+    ovsdb_idl_condition_destroy(&pb);
+    ovsdb_idl_condition_destroy(&lf);
+    ovsdb_idl_condition_destroy(&mb);
+    ovsdb_idl_condition_destroy(&mg);
+    ovsdb_idl_condition_destroy(&dns);
+}
+
 static const struct ovsrec_bridge *
 create_br_int(struct controller_ctx *ctx,
               const struct ovsrec_open_vswitch *cfg,
@@ -165,6 +241,7 @@ create_br_int(struct controller_ctx *ctx,
     bridges[cfg->n_bridges] = bridge;
     ovsrec_open_vswitch_verify_bridges(cfg);
     ovsrec_open_vswitch_set_bridges(cfg, bridges, cfg->n_bridges + 1);
+    free(bridges);
 
     return bridge;
 }
@@ -203,11 +280,32 @@ get_chassis_id(const struct ovsdb_idl *ovs_idl)
     return chassis_id;
 }
 
+/* Iterate address sets in the southbound database.  Create and update the
+ * corresponding symtab entries as necessary. */
+static void
+addr_sets_init(struct controller_ctx *ctx, struct shash *addr_sets)
+{
+    const struct sbrec_address_set *as;
+    SBREC_ADDRESS_SET_FOR_EACH (as, ctx->ovnsb_idl) {
+        expr_addr_sets_add(addr_sets, as->name,
+                           (const char *const *) as->addresses,
+                           as->n_addresses);
+    }
+}
+
+static void
+update_ssl_config(const struct ovsdb_idl *ovs_idl)
+{
+    const struct ovsrec_ssl *ssl = ovsrec_ssl_first(ovs_idl);
+
+    if (ssl) {
+        stream_ssl_set_key_and_cert(ssl->private_key, ssl->certificate);
+        stream_ssl_set_ca_cert_file(ssl->ca_cert, ssl->bootstrap_ca_cert);
+    }
+}
+
 /* Retrieves the OVN Southbound remote location from the
- * "external-ids:ovn-remote" key in 'ovs_idl' and returns a copy of it.
- *
- * XXX ovn-controller does not support this changing mid-run, but that should
- * be addressed later. */
+ * "external-ids:ovn-remote" key in 'ovs_idl' and returns a copy of it. */
 static char *
 get_ovnsb_remote(struct ovsdb_idl *ovs_idl)
 {
@@ -219,6 +317,7 @@ get_ovnsb_remote(struct ovsdb_idl *ovs_idl)
         if (cfg) {
             const char *remote = smap_get(&cfg->external_ids, "ovn-remote");
             if (remote) {
+                update_ssl_config(ovs_idl);
                 return xstrdup(remote);
             }
         }
@@ -230,13 +329,12 @@ get_ovnsb_remote(struct ovsdb_idl *ovs_idl)
 }
 
 static void
-update_ct_zones(struct sset *lports, struct hmap *patched_datapaths,
+update_ct_zones(struct sset *lports, const struct hmap *local_datapaths,
                 struct simap *ct_zones, unsigned long *ct_zone_bitmap,
                 struct shash *pending_ct_zones)
 {
     struct simap_node *ct_zone, *ct_zone_next;
     int scan_start = 1;
-    struct patched_datapath *pd;
     const char *user;
     struct sset all_users = SSET_INITIALIZER(&all_users);
 
@@ -245,13 +343,12 @@ update_ct_zones(struct sset *lports, struct hmap *patched_datapaths,
     }
 
     /* Local patched datapath (gateway routers) need zones assigned. */
-    HMAP_FOR_EACH(pd, hmap_node, patched_datapaths) {
-        if (!pd->local) {
-            continue;
-        }
-
-        char *dnat = alloc_nat_zone_key(&pd->key, "dnat");
-        char *snat = alloc_nat_zone_key(&pd->key, "snat");
+    const struct local_datapath *ld;
+    HMAP_FOR_EACH (ld, hmap_node, local_datapaths) {
+        /* XXX Add method to limit zone assignment to logical router
+         * datapaths with NAT */
+        char *dnat = alloc_nat_zone_key(&ld->datapath->header_.uuid, "dnat");
+        char *snat = alloc_nat_zone_key(&ld->datapath->header_.uuid, "snat");
         sset_add(&all_users, dnat);
         sset_add(&all_users, snat);
         free(dnat);
@@ -397,6 +494,83 @@ get_nb_cfg(struct ovsdb_idl *idl)
     return sb ? sb->nb_cfg : 0;
 }
 
+static void
+ctrl_register_ovs_idl(struct ovsdb_idl *ovs_idl)
+{
+    /* We do not monitor all tables by default, so modules must register
+     * their interest explicitly. */
+    ovsdb_idl_add_table(ovs_idl, &ovsrec_table_open_vswitch);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_open_vswitch_col_external_ids);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_open_vswitch_col_bridges);
+    ovsdb_idl_add_table(ovs_idl, &ovsrec_table_interface);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_interface_col_name);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_interface_col_bfd);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_interface_col_bfd_status);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_interface_col_type);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_interface_col_options);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_interface_col_ofport);
+    ovsdb_idl_add_table(ovs_idl, &ovsrec_table_port);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_port_col_name);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_port_col_interfaces);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_port_col_external_ids);
+    ovsdb_idl_add_table(ovs_idl, &ovsrec_table_bridge);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_bridge_col_ports);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_bridge_col_name);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_bridge_col_fail_mode);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_bridge_col_other_config);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_bridge_col_external_ids);
+    ovsdb_idl_add_table(ovs_idl, &ovsrec_table_ssl);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_ssl_col_bootstrap_ca_cert);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_ssl_col_ca_cert);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_ssl_col_certificate);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_ssl_col_private_key);
+    chassis_register_ovs_idl(ovs_idl);
+    encaps_register_ovs_idl(ovs_idl);
+    binding_register_ovs_idl(ovs_idl);
+    bfd_register_ovs_idl(ovs_idl);
+    physical_register_ovs_idl(ovs_idl);
+}
+
+static void
+create_ovnsb_indexes(struct ovsdb_idl *ovnsb_idl)
+{
+    struct ovsdb_idl_index *index;
+
+    /* Index multicast group table by name and datapath. */
+    index = ovsdb_idl_create_index(ovnsb_idl, &sbrec_table_multicast_group,
+                                   "multicast-group-by-dp-name");
+    ovsdb_idl_index_add_column(index, &sbrec_multicast_group_col_name,
+                               OVSDB_INDEX_ASC, NULL);
+    ovsdb_idl_index_add_column(index, &sbrec_multicast_group_col_datapath,
+                               OVSDB_INDEX_ASC, NULL);
+
+    /* Index logical port table by name. */
+    index = ovsdb_idl_create_index(ovnsb_idl, &sbrec_table_port_binding,
+                                   "lport-by-name");
+    ovsdb_idl_index_add_column(index, &sbrec_port_binding_col_logical_port,
+                               OVSDB_INDEX_ASC, NULL);
+
+    /* Index logical port table by tunnel key and datapath. */
+    index = ovsdb_idl_create_index(ovnsb_idl, &sbrec_table_port_binding,
+                                   "lport-by-key");
+    ovsdb_idl_index_add_column(index, &sbrec_port_binding_col_tunnel_key,
+                               OVSDB_INDEX_ASC, NULL);
+    ovsdb_idl_index_add_column(index, &sbrec_port_binding_col_datapath,
+                               OVSDB_INDEX_ASC, NULL);
+
+    /* Index logical port table by datapath. */
+    index = ovsdb_idl_create_index(ovnsb_idl, &sbrec_table_port_binding,
+                                   "lport-by-datapath");
+    ovsdb_idl_index_add_column(index, &sbrec_port_binding_col_datapath,
+                               OVSDB_INDEX_ASC, NULL);
+
+    /* Index datapath binding table by tunnel key. */
+    index = ovsdb_idl_create_index(ovnsb_idl, &sbrec_table_datapath_binding,
+                                   "dpath-by-key");
+    ovsdb_idl_index_add_column(index, &sbrec_datapath_binding_col_tunnel_key,
+                               OVSDB_INDEX_ASC, NULL);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -431,43 +605,22 @@ main(int argc, char *argv[])
     pinctrl_init();
     lflow_init();
 
-    /* Connect to OVS OVSDB instance.  We do not monitor all tables by
-     * default, so modules must register their interest explicitly.  */
+    /* Connect to OVS OVSDB instance. */
     struct ovsdb_idl_loop ovs_idl_loop = OVSDB_IDL_LOOP_INITIALIZER(
         ovsdb_idl_create(ovs_remote, &ovsrec_idl_class, false, true));
-    ovsdb_idl_add_table(ovs_idl_loop.idl, &ovsrec_table_open_vswitch);
-    ovsdb_idl_add_column(ovs_idl_loop.idl,
-                         &ovsrec_open_vswitch_col_external_ids);
-    ovsdb_idl_add_column(ovs_idl_loop.idl, &ovsrec_open_vswitch_col_bridges);
-    ovsdb_idl_add_table(ovs_idl_loop.idl, &ovsrec_table_interface);
-    ovsdb_idl_add_column(ovs_idl_loop.idl, &ovsrec_interface_col_name);
-    ovsdb_idl_add_column(ovs_idl_loop.idl, &ovsrec_interface_col_type);
-    ovsdb_idl_add_column(ovs_idl_loop.idl, &ovsrec_interface_col_options);
-    ovsdb_idl_add_table(ovs_idl_loop.idl, &ovsrec_table_port);
-    ovsdb_idl_add_column(ovs_idl_loop.idl, &ovsrec_port_col_name);
-    ovsdb_idl_add_column(ovs_idl_loop.idl, &ovsrec_port_col_interfaces);
-    ovsdb_idl_add_column(ovs_idl_loop.idl, &ovsrec_port_col_external_ids);
-    ovsdb_idl_add_table(ovs_idl_loop.idl, &ovsrec_table_bridge);
-    ovsdb_idl_add_column(ovs_idl_loop.idl, &ovsrec_bridge_col_ports);
-    ovsdb_idl_add_column(ovs_idl_loop.idl, &ovsrec_bridge_col_name);
-    ovsdb_idl_add_column(ovs_idl_loop.idl, &ovsrec_bridge_col_fail_mode);
-    ovsdb_idl_add_column(ovs_idl_loop.idl, &ovsrec_bridge_col_other_config);
-    ovsdb_idl_add_column(ovs_idl_loop.idl, &ovsrec_bridge_col_external_ids);
-    chassis_register_ovs_idl(ovs_idl_loop.idl);
-    encaps_register_ovs_idl(ovs_idl_loop.idl);
-    binding_register_ovs_idl(ovs_idl_loop.idl);
-    physical_register_ovs_idl(ovs_idl_loop.idl);
+    ctrl_register_ovs_idl(ovs_idl_loop.idl);
     ovsdb_idl_get_initial_snapshot(ovs_idl_loop.idl);
 
-    /* Connect to OVN SB database. */
+    /* Connect to OVN SB database and get a snapshot. */
     char *ovnsb_remote = get_ovnsb_remote(ovs_idl_loop.idl);
     struct ovsdb_idl_loop ovnsb_idl_loop = OVSDB_IDL_LOOP_INITIALIZER(
         ovsdb_idl_create(ovnsb_remote, &sbrec_idl_class, true, true));
+
+    create_ovnsb_indexes(ovnsb_idl_loop.idl);
+    lport_init(ovnsb_idl_loop.idl);
+
     ovsdb_idl_omit_alert(ovnsb_idl_loop.idl, &sbrec_chassis_col_nb_cfg);
-
-    /* Track the southbound idl. */
-    ovsdb_idl_track_add_all(ovnsb_idl_loop.idl);
-
+    update_sb_monitors(ovnsb_idl_loop.idl, NULL, NULL, NULL);
     ovsdb_idl_get_initial_snapshot(ovnsb_idl_loop.idl);
 
     /* Initialize connection tracking zones. */
@@ -479,6 +632,10 @@ main(int argc, char *argv[])
     restore_ct_zones(ovs_idl_loop.idl, &ct_zones, ct_zone_bitmap);
     unixctl_command_register("ct-zone-list", "", 0, 0,
                              ct_zone_list, &ct_zones);
+
+    struct pending_pkt pending_pkt = { .conn = NULL };
+    unixctl_command_register("inject-pkt", "MICROFLOW", 1, 1, inject_pkt,
+                             &pending_pkt);
 
     /* Main loop. */
     exiting = false;
@@ -500,56 +657,73 @@ main(int argc, char *argv[])
             .ovnsb_idl_txn = ovsdb_idl_loop_run(&ovnsb_idl_loop),
         };
 
-        update_probe_interval(&ctx);
+        update_probe_interval(&ctx, ovnsb_remote);
 
-        /* Contains "struct local_datapath" nodes whose hash values are the
-         * tunnel_key of datapaths with at least one local port binding. */
+        update_ssl_config(ctx.ovs_idl);
+
+        /* Contains "struct local_datapath" nodes. */
         struct hmap local_datapaths = HMAP_INITIALIZER(&local_datapaths);
 
-        struct hmap patched_datapaths = HMAP_INITIALIZER(&patched_datapaths);
-        struct sset all_lports = SSET_INITIALIZER(&all_lports);
+        /* Contains the name of each logical port resident on the local
+         * hypervisor.  These logical ports include the VIFs (and their child
+         * logical ports, if any) that belong to VMs running on the hypervisor,
+         * l2gateway ports for which options:l2gateway-chassis designates the
+         * local hypervisor, and localnet ports. */
+        struct sset local_lports = SSET_INITIALIZER(&local_lports);
+        struct sset active_tunnels = SSET_INITIALIZER(&active_tunnels);
 
         const struct ovsrec_bridge *br_int = get_br_int(&ctx);
         const char *chassis_id = get_chassis_id(ctx.ovs_idl);
+
+        struct chassis_index chassis_index;
+
+        chassis_index_init(&chassis_index, ctx.ovnsb_idl);
 
         const struct sbrec_chassis *chassis = NULL;
         if (chassis_id) {
             chassis = chassis_run(&ctx, chassis_id, br_int);
             encaps_run(&ctx, br_int, chassis_id);
-            binding_run(&ctx, br_int, chassis_id, &local_datapaths,
-                        &all_lports);
+            bfd_calculate_active_tunnels(br_int, &active_tunnels);
+            binding_run(&ctx, br_int, chassis,
+                        &chassis_index, &active_tunnels, &local_datapaths,
+                        &local_lports);
         }
-
         if (br_int && chassis) {
-            patch_run(&ctx, br_int, chassis_id, &local_datapaths,
-                      &patched_datapaths);
+            struct shash addr_sets = SHASH_INITIALIZER(&addr_sets);
+            addr_sets_init(&ctx, &addr_sets);
 
-            static struct lport_index lports;
-            static struct mcgroup_index mcgroups;
-            lport_index_init(&lports, ctx.ovnsb_idl);
-            mcgroup_index_init(&mcgroups, ctx.ovnsb_idl);
+            patch_run(&ctx, br_int, chassis);
 
             enum mf_field_id mff_ovn_geneve = ofctrl_run(br_int,
                                                          &pending_ct_zones);
 
-            pinctrl_run(&ctx, &lports, br_int, chassis_id, &local_datapaths);
-            update_ct_zones(&all_lports, &patched_datapaths, &ct_zones,
+            pinctrl_run(&ctx, br_int, chassis, &chassis_index,
+                        &local_datapaths, &active_tunnels);
+            update_ct_zones(&local_lports, &local_datapaths, &ct_zones,
                             ct_zone_bitmap, &pending_ct_zones);
             if (ctx.ovs_idl_txn) {
-                commit_ct_zones(br_int, &pending_ct_zones);
+                if (ofctrl_can_put()) {
+                    commit_ct_zones(br_int, &pending_ct_zones);
 
-                struct hmap flow_table = HMAP_INITIALIZER(&flow_table);
-                lflow_run(&ctx, &lports, &mcgroups, &local_datapaths,
-                          &patched_datapaths, &group_table, &ct_zones,
-                          &flow_table);
+                    struct hmap flow_table = HMAP_INITIALIZER(&flow_table);
+                    lflow_run(&ctx, chassis,
+                              &chassis_index, &local_datapaths, &group_table,
+                              &addr_sets, &flow_table, &active_tunnels);
 
-                physical_run(&ctx, mff_ovn_geneve,
-                             br_int, chassis_id, &ct_zones, &flow_table,
-                             &local_datapaths, &patched_datapaths);
+                    if (chassis_id) {
+                        bfd_run(&ctx, br_int, chassis, &local_datapaths,
+                                &chassis_index);
+                    }
+                    physical_run(&ctx, mff_ovn_geneve,
+                                 br_int, chassis, &ct_zones,
+                                 &flow_table, &local_datapaths, &local_lports,
+                                 &chassis_index, &active_tunnels);
 
-                ofctrl_put(&flow_table, &pending_ct_zones,
-                           get_nb_cfg(ctx.ovnsb_idl));
-                hmap_destroy(&flow_table);
+                    ofctrl_put(&flow_table, &pending_ct_zones,
+                               get_nb_cfg(ctx.ovnsb_idl));
+
+                    hmap_destroy(&flow_table);
+                }
                 if (ctx.ovnsb_idl_txn) {
                     int64_t cur_cfg = ofctrl_get_cur_cfg();
                     if (cur_cfg && cur_cfg != chassis->nb_cfg) {
@@ -557,32 +731,53 @@ main(int argc, char *argv[])
                     }
                 }
             }
-            mcgroup_index_destroy(&mcgroups);
-            lport_index_destroy(&lports);
+
+            if (pending_pkt.conn) {
+                char *error = ofctrl_inject_pkt(br_int, pending_pkt.flow_s,
+                                                &addr_sets);
+                if (error) {
+                    unixctl_command_reply_error(pending_pkt.conn, error);
+                    free(error);
+                } else {
+                    unixctl_command_reply(pending_pkt.conn, NULL);
+                }
+                pending_pkt.conn = NULL;
+                free(pending_pkt.flow_s);
+            }
+
+            update_sb_monitors(ctx.ovnsb_idl, chassis,
+                               &local_lports, &local_datapaths);
+
+            expr_addr_sets_destroy(&addr_sets);
+            shash_destroy(&addr_sets);
         }
 
-        sset_destroy(&all_lports);
+        /* If we haven't handled the pending packet insertion
+         * request, the system is not ready. */
+        if (pending_pkt.conn) {
+            unixctl_command_reply_error(pending_pkt.conn,
+                                        "ovn-controller not ready.");
+            pending_pkt.conn = NULL;
+            free(pending_pkt.flow_s);
+        }
+
+        chassis_index_destroy(&chassis_index);
+
+        sset_destroy(&local_lports);
+        sset_destroy(&active_tunnels);
 
         struct local_datapath *cur_node, *next_node;
         HMAP_FOR_EACH_SAFE (cur_node, next_node, hmap_node, &local_datapaths) {
+            free(cur_node->peer_dps);
             hmap_remove(&local_datapaths, &cur_node->hmap_node);
-            free(cur_node->logical_port);
             free(cur_node);
         }
         hmap_destroy(&local_datapaths);
 
-        struct patched_datapath *pd_cur_node, *pd_next_node;
-        HMAP_FOR_EACH_SAFE (pd_cur_node, pd_next_node, hmap_node,
-                &patched_datapaths) {
-            hmap_remove(&patched_datapaths, &pd_cur_node->hmap_node);
-            free(pd_cur_node);
-        }
-        hmap_destroy(&patched_datapaths);
-
         unixctl_server_run(unixctl);
 
         unixctl_server_wait(unixctl);
-        if (exiting) {
+        if (exiting || pending_pkt.conn) {
             poll_immediate_wake();
         }
 
@@ -591,7 +786,6 @@ main(int argc, char *argv[])
             pinctrl_wait(&ctx);
         }
         ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
-        ovsdb_idl_track_clear(ovnsb_idl_loop.idl);
 
         if (ovsdb_idl_loop_commit_and_wait(&ovs_idl_loop) == 1) {
             struct shash_node *iter, *iter_next;
@@ -603,8 +797,6 @@ main(int argc, char *argv[])
                 }
             }
         }
-        ovsdb_idl_track_clear(ovs_idl_loop.idl);
-
         poll_block();
         if (should_service_stop()) {
             exiting = true;
@@ -623,11 +815,13 @@ main(int argc, char *argv[])
 
         const struct ovsrec_bridge *br_int = get_br_int(&ctx);
         const char *chassis_id = get_chassis_id(ctx.ovs_idl);
+        const struct sbrec_chassis *chassis
+            = chassis_id ? get_chassis(ctx.ovnsb_idl, chassis_id) : NULL;
 
         /* Run all of the cleanup functions, even if one of them returns false.
          * We're done if all of them return true. */
-        done = binding_cleanup(&ctx, chassis_id);
-        done = chassis_cleanup(&ctx, chassis_id) && done;
+        done = binding_cleanup(&ctx, chassis);
+        done = chassis_cleanup(&ctx, chassis) && done;
         done = encaps_cleanup(&ctx, br_int) && done;
         if (done) {
             poll_immediate_wake();
@@ -674,7 +868,8 @@ parse_options(int argc, char *argv[])
         OPT_PEER_CA_CERT = UCHAR_MAX + 1,
         OPT_BOOTSTRAP_CA_CERT,
         VLOG_OPTION_ENUMS,
-        DAEMON_OPTION_ENUMS
+        DAEMON_OPTION_ENUMS,
+        SSL_OPTION_ENUMS,
     };
 
     static struct option long_options[] = {
@@ -781,17 +976,38 @@ ct_zone_list(struct unixctl_conn *conn, int argc OVS_UNUSED,
     ds_destroy(&ds);
 }
 
+static void
+inject_pkt(struct unixctl_conn *conn, int argc OVS_UNUSED,
+           const char *argv[], void *pending_pkt_)
+{
+    struct pending_pkt *pending_pkt = pending_pkt_;
+
+    if (pending_pkt->conn) {
+        unixctl_command_reply_error(conn, "already pending packet injection");
+        return;
+    }
+    pending_pkt->conn = conn;
+    pending_pkt->flow_s = xstrdup(argv[1]);
+}
+
 /* Get the desired SB probe timer from the OVS database and configure it into
  * the SB database. */
 static void
-update_probe_interval(struct controller_ctx *ctx)
+update_probe_interval(struct controller_ctx *ctx, const char *ovnsb_remote)
 {
     const struct ovsrec_open_vswitch *cfg
         = ovsrec_open_vswitch_first(ctx->ovs_idl);
-    int interval = (cfg
-                    ? smap_get_int(&cfg->external_ids,
-                                   "ovn-remote-probe-interval",
-                                   DEFAULT_PROBE_INTERVAL_MSEC)
-                    : DEFAULT_PROBE_INTERVAL_MSEC);
+    int interval = -1;
+    if (cfg) {
+        interval = smap_get_int(&cfg->external_ids,
+                                "ovn-remote-probe-interval",
+                                -1);
+    }
+    if (interval == -1) {
+        interval = stream_or_pstream_needs_probes(ovnsb_remote)
+                   ? DEFAULT_PROBE_INTERVAL_MSEC
+                   : 0;
+    }
+
     ovsdb_idl_set_probe_interval(ctx->ovnsb_idl, interval);
 }

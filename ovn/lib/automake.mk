@@ -1,10 +1,14 @@
 lib_LTLIBRARIES += ovn/lib/libovn.la
 ovn_lib_libovn_la_LDFLAGS = \
-        -version-info $(LT_CURRENT):$(LT_REVISION):$(LT_AGE) \
+        $(OVS_LTINFO) \
         -Wl,--version-script=$(top_builddir)/ovn/lib/libovn.sym \
         $(AM_LDFLAGS)
 ovn_lib_libovn_la_SOURCES = \
+	ovn/lib/acl-log.c \
+	ovn/lib/acl-log.h \
 	ovn/lib/actions.c \
+	ovn/lib/chassis-index.c \
+	ovn/lib/chassis-index.h \
 	ovn/lib/expr.c \
 	ovn/lib/lex.c \
 	ovn/lib/ovn-dhcp.h \

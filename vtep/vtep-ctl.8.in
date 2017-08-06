@@ -325,9 +325,9 @@ List the remote MAC bindings for \fIlswitch\fR, one per line.
 These commands manipulate the \fBmanagers\fR column in the \fBGlobal\fR
 table and rows in the \fBManagers\fR table.  When \fBovsdb\-server\fR is
 configured to use the \fBmanagers\fR column for OVSDB connections (as
-described in \fBINSTALL.Linux\fR and in the startup scripts provided
-with Open vSwitch), this allows the administrator to use \fBvtep\-ctl\fR
-to configure database connections.
+described in the startup scripts provided with Open vSwitch), this
+allows the administrator to use \fBvtep\-ctl\fR to configure database
+connections.
 .
 .IP "\fBget\-manager\fR"
 Prints the configured manager(s).
@@ -394,10 +394,12 @@ encapsulated and forwarded.  Records may be identified by physical
 locator name.
 .PP
 Record names must be specified in full and with correct
-capitalization.  Names of tables and columns are not case-sensitive,
-and \fB\-\-\fR and \fB_\fR are treated interchangeably.  Unique
-abbreviations are acceptable, e.g. \fBman\fR or \fBm\fR is sufficient
-to identify the \fBManager\fR table.
+capitalization, except that UUIDs may be abbreviated to their first 4
+(or more) hex digits, as long as that is unique within the table.
+Names of tables and columns are not case-sensitive, and \fB\-\fR and
+\fB_\fR are treated interchangeably.  Unique abbreviations of table
+and column names are acceptable, e.g. \fBman\fR or \fBm\fR is
+sufficient to identify the \fBManager\fR table.
 .
 .so lib/db-ctl-base.man
 .PP

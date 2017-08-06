@@ -15,143 +15,153 @@
 
 #include <config.h>
 
+#include "lib/sset.h"
 #include "lport.h"
 #include "hash.h"
 #include "openvswitch/vlog.h"
 #include "ovn/lib/ovn-sb-idl.h"
-
 VLOG_DEFINE_THIS_MODULE(lport);
 
-/* A logical port. */
-struct lport {
-    struct hmap_node name_node; /* Index by name. */
-    struct hmap_node key_node;  /* Index by (dp_key, port_key). */
-    const struct sbrec_port_binding *pb;
-};
+static struct ovsdb_idl_index_cursor lport_by_name_cursor;
+static struct ovsdb_idl_index_cursor lport_by_key_cursor;
+static struct ovsdb_idl_index_cursor dpath_by_key_cursor;
+static struct ovsdb_idl_index_cursor mc_grp_by_dp_name_cursor;
 
-void
-lport_index_init(struct lport_index *lports, struct ovsdb_idl *ovnsb_idl)
-{
-    hmap_init(&lports->by_name);
-    hmap_init(&lports->by_key);
+
 
-    const struct sbrec_port_binding *pb;
-    SBREC_PORT_BINDING_FOR_EACH (pb, ovnsb_idl) {
-        if (lport_lookup_by_name(lports, pb->logical_port)) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-            VLOG_WARN_RL(&rl, "duplicate logical port name '%s'",
-                         pb->logical_port);
-            continue;
-        }
-
-        struct lport *p = xmalloc(sizeof *p);
-        hmap_insert(&lports->by_name, &p->name_node,
-                    hash_string(pb->logical_port, 0));
-        hmap_insert(&lports->by_key, &p->key_node,
-                    hash_int(pb->tunnel_key, pb->datapath->tunnel_key));
-        p->pb = pb;
-    }
-}
-
-void
-lport_index_destroy(struct lport_index *lports)
-{
-    /* Destroy all of the "struct lport"s.
-     *
-     * We don't have to remove the node from both indexes. */
-    struct lport *port, *next;
-    HMAP_FOR_EACH_SAFE (port, next, name_node, &lports->by_name) {
-        hmap_remove(&lports->by_name, &port->name_node);
-        free(port);
-    }
-
-    hmap_destroy(&lports->by_name);
-    hmap_destroy(&lports->by_key);
-}
-
-/* Finds and returns the lport with the given 'name', or NULL if no such lport
- * exists. */
+/* Finds and returns the port binding record with the given 'name',
+ * or NULL if no such port binding exists. */
 const struct sbrec_port_binding *
-lport_lookup_by_name(const struct lport_index *lports, const char *name)
+lport_lookup_by_name(struct ovsdb_idl *idl, const char *name)
 {
-    const struct lport *lport;
-    HMAP_FOR_EACH_WITH_HASH (lport, name_node, hash_string(name, 0),
-                             &lports->by_name) {
-        if (!strcmp(lport->pb->logical_port, name)) {
-            return lport->pb;
-        }
+    struct sbrec_port_binding *value;
+    const struct sbrec_port_binding *pb, *retval =  NULL;
+
+    /* Build key for an indexed lookup. */
+    value = sbrec_port_binding_index_init_row(idl, &sbrec_table_port_binding);
+    sbrec_port_binding_index_set_logical_port(value, name);
+
+    /* Find an entry with matching logical port name. Since this column is
+     * declared to be an index in the OVN_Southbound schema, the first match
+     * (if any) will be the only match. */
+    SBREC_PORT_BINDING_FOR_EACH_EQUAL (pb, &lport_by_name_cursor, value) {
+        retval = pb;
+        break;
     }
-    return NULL;
+
+    sbrec_port_binding_index_destroy_row(value);
+
+    return retval;
 }
 
-const struct sbrec_port_binding *
-lport_lookup_by_key(const struct lport_index *lports,
-                    uint32_t dp_key, uint16_t port_key)
+/* Finds and returns the datapath binding record with tunnel_key equal to the
+ * given 'dp_key', or NULL if no such datapath binding exists. */
+const struct sbrec_datapath_binding *
+datapath_lookup_by_key(struct ovsdb_idl *idl, uint64_t dp_key)
 {
-    const struct lport *lport;
-    HMAP_FOR_EACH_WITH_HASH (lport, key_node, hash_int(port_key, dp_key),
-                             &lports->by_key) {
-        if (port_key == lport->pb->tunnel_key
-            && dp_key == lport->pb->datapath->tunnel_key) {
-            return lport->pb;
-        }
+    struct sbrec_datapath_binding *dbval;
+    const struct sbrec_datapath_binding *db, *retval = NULL;
+
+    /* Build key for an indexed lookup. */
+    dbval = sbrec_datapath_binding_index_init_row(idl,
+                                                &sbrec_table_datapath_binding);
+    sbrec_datapath_binding_index_set_tunnel_key(dbval, dp_key);
+
+    /* Find an entry with matching tunnel_key. Since this column is declared
+     * to be an index in the OVN_Southbound schema, the first match (if any)
+     * will be the only match. */
+    SBREC_DATAPATH_BINDING_FOR_EACH_EQUAL (db, &dpath_by_key_cursor, dbval) {
+        retval = db;
+        break;
     }
-    return NULL;
+    sbrec_datapath_binding_index_destroy_row(dbval);
+
+    return retval;
+}
+
+/* Finds and returns the port binding record with tunnel_key equal to the
+ * given 'port_key' and datapath binding matching 'dp_key', or NULL if no
+ * such port binding exists. */
+const struct sbrec_port_binding *
+lport_lookup_by_key(struct ovsdb_idl *idl, uint64_t dp_key, uint64_t port_key)
+{
+    struct sbrec_port_binding *pbval;
+    const struct sbrec_port_binding *pb, *retval = NULL;
+    const struct sbrec_datapath_binding *db;
+
+    /* Lookup datapath corresponding to dp_key. */
+    db = datapath_lookup_by_key(idl, dp_key);
+    if (!db) {
+        return NULL;
+    }
+
+    /* Build key for an indexed lookup. */
+    pbval = sbrec_port_binding_index_init_row(idl, &sbrec_table_port_binding);
+    sbrec_port_binding_index_set_datapath(pbval, db);
+    sbrec_port_binding_index_set_tunnel_key(pbval, port_key);
+
+    /* Find an entry with matching tunnel_key and datapath UUID. Since this
+     * column pair is declared to be an index in the OVN_Southbound schema,
+     * the first match (if any) will be the only match. */
+    SBREC_PORT_BINDING_FOR_EACH_EQUAL (pb, &lport_by_key_cursor, pbval) {
+        retval = pb;
+        break;
+    }
+    sbrec_port_binding_index_destroy_row(pbval);
+
+    return retval;
 }
 
-struct mcgroup {
-    struct hmap_node dp_name_node; /* Index by (logical datapath, name). */
-    const struct sbrec_multicast_group *mg;
-};
-
-void
-mcgroup_index_init(struct mcgroup_index *mcgroups, struct ovsdb_idl *ovnsb_idl)
-{
-    hmap_init(&mcgroups->by_dp_name);
-
-    const struct sbrec_multicast_group *mg;
-    SBREC_MULTICAST_GROUP_FOR_EACH (mg, ovnsb_idl) {
-        const struct uuid *dp_uuid = &mg->datapath->header_.uuid;
-        if (mcgroup_lookup_by_dp_name(mcgroups, mg->datapath, mg->name)) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-            VLOG_WARN_RL(&rl, "datapath "UUID_FMT" contains duplicate "
-                         "multicast group '%s'", UUID_ARGS(dp_uuid), mg->name);
-            continue;
-        }
-
-        struct mcgroup *m = xmalloc(sizeof *m);
-        hmap_insert(&mcgroups->by_dp_name, &m->dp_name_node,
-                    hash_string(mg->name, uuid_hash(dp_uuid)));
-        m->mg = mg;
-    }
-}
-
-void
-mcgroup_index_destroy(struct mcgroup_index *mcgroups)
-{
-    struct mcgroup *mcgroup, *next;
-    HMAP_FOR_EACH_SAFE (mcgroup, next, dp_name_node, &mcgroups->by_dp_name) {
-        hmap_remove(&mcgroups->by_dp_name, &mcgroup->dp_name_node);
-        free(mcgroup);
-    }
-
-    hmap_destroy(&mcgroups->by_dp_name);
-}
-
+/* Finds and returns the logical multicast group with the given 'name' and
+ * datapath binding, or NULL if no such logical multicast group exists. */
 const struct sbrec_multicast_group *
-mcgroup_lookup_by_dp_name(const struct mcgroup_index *mcgroups,
-                          const struct sbrec_datapath_binding *dp,
-                          const char *name)
+mcgroup_lookup_by_dp_name(struct ovsdb_idl *idl,
+                           const struct sbrec_datapath_binding *dp,
+                           const char *name)
 {
-    const struct uuid *dp_uuid = &dp->header_.uuid;
-    const struct mcgroup *mcgroup;
-    HMAP_FOR_EACH_WITH_HASH (mcgroup, dp_name_node,
-                             hash_string(name, uuid_hash(dp_uuid)),
-                             &mcgroups->by_dp_name) {
-        if (uuid_equals(&mcgroup->mg->datapath->header_.uuid, dp_uuid)
-            && !strcmp(mcgroup->mg->name, name)) {
-            return mcgroup->mg;
-        }
+    struct sbrec_multicast_group *mcval;
+    const struct sbrec_multicast_group *mc, *retval = NULL;
+
+    /* Build key for an indexed lookup. */
+    mcval = sbrec_multicast_group_index_init_row(idl,
+                                                 &sbrec_table_multicast_group);
+    sbrec_multicast_group_index_set_name(mcval, name);
+    sbrec_multicast_group_index_set_datapath(mcval, dp);
+
+    /* Find an entry with matching logical multicast group name and datapath.
+     * Since this column pair is declared to be an index in the OVN_Southbound
+     * schema, the first match (if any) will be the only match. */
+    SBREC_MULTICAST_GROUP_FOR_EACH_EQUAL (mc, &mc_grp_by_dp_name_cursor,
+                                          mcval) {
+        retval = mc;
+        break;
     }
-    return NULL;
+
+    sbrec_multicast_group_index_destroy_row(mcval);
+
+    return retval;
+}
+
+void
+lport_init(struct ovsdb_idl *idl)
+{
+    /* Create a cursor for searching multicast group table by datapath
+     * and group name. */
+    ovsdb_idl_initialize_cursor(idl, &sbrec_table_multicast_group,
+                                "multicast-group-by-dp-name",
+                                &mc_grp_by_dp_name_cursor);
+
+    /* Create cursor to search port binding table by logical port name. */
+    ovsdb_idl_initialize_cursor(idl, &sbrec_table_port_binding,
+                                "lport-by-name",
+                                &lport_by_name_cursor);
+
+    /* Create cursor to search port binding table by logical port tunnel key
+     * and datapath uuid. */
+    ovsdb_idl_initialize_cursor(idl, &sbrec_table_port_binding, "lport-by-key",
+                                &lport_by_key_cursor);
+
+    /* Create cursor to search datapath binding table by tunnel key. */
+    ovsdb_idl_initialize_cursor(idl, &sbrec_table_datapath_binding,
+                                "dpath-by-key", &dpath_by_key_cursor);
 }

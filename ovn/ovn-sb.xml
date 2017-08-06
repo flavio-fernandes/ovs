@@ -21,60 +21,61 @@
     different properties, as described in the sections below.
   </p>
 
-  <h3>Physical Network (PN) data</h3>
+  <h3>Physical network</h3>
 
   <p>
-    PN tables contain information about the chassis nodes in the system.  This
-    contains all the information necessary to wire the overlay, such as IP
-    addresses, supported tunnel types, and security keys.
+    Physical network tables contain information about the chassis nodes in the
+    system.  This contains all the information necessary to wire the overlay,
+    such as IP addresses, supported tunnel types, and security keys.
   </p>
 
   <p>
-    The amount of PN data is small (O(n) in the number of chassis) and it
-    changes infrequently, so it can be replicated to every chassis.
+    The amount of physical network data is small (O(n) in the number of
+    chassis) and it changes infrequently, so it can be replicated to every
+    chassis.
   </p>
 
   <p>
-    The <ref table="Chassis"/> table comprises the PN tables.
+    The <ref table="Chassis"/> and <ref table="Encap"/> tables are the physical
+    network tables.
   </p>
 
-  <h3>Logical Network (LN) data</h3>
+  <h3>Logical Network</h3>
 
   <p>
-    LN tables contain the topology of logical switches and routers, ACLs,
-    firewall rules, and everything needed to describe how packets traverse a
-    logical network, represented as logical datapath flows (see Logical
-    Datapath Flows, below).
-  </p>
-
-  <p>
-    LN data may be large (O(n) in the number of logical ports, ACL rules,
-    etc.).  Thus, to improve scaling, each chassis should receive only data
-    related to logical networks in which that chassis participates.  Past
-    experience shows that in the presence of large logical networks, even
-    finer-grained partitioning of data, e.g. designing logical flows so that
-    only the chassis hosting a logical port needs related flows, pays off
-    scale-wise.  (This is not necessary initially but it is worth bearing in
-    mind in the design.)
+    Logical network tables contain the topology of logical switches and
+    routers, ACLs, firewall rules, and everything needed to describe how
+    packets traverse a logical network, represented as logical datapath flows
+    (see Logical Datapath Flows, below).
   </p>
 
   <p>
-    The LN is a slave of the cloud management system running northbound of OVN.
-    That CMS determines the entire OVN logical configuration and therefore the
-    LN's content at any given time is a deterministic function of the CMS's
-    configuration, although that happens indirectly via the
-    <ref db="OVN_Northbound"/> database and <code>ovn-northd</code>.
+    Logical network data may be large (O(n) in the number of logical ports, ACL
+    rules, etc.).  Thus, to improve scaling, each chassis should receive only
+    data related to logical networks in which that chassis participates.
   </p>
 
   <p>
-    LN data is likely to change more quickly than PN data.  This is especially
-    true in a container environment where VMs are created and destroyed (and
-    therefore added to and deleted from logical switches) quickly.
+    The logical network data is ultimately controlled by the cloud management
+    system (CMS) running northbound of OVN.  That CMS determines the entire OVN
+    logical configuration and therefore the logical network data at any given
+    time is a deterministic function of the CMS's configuration, although that
+    happens indirectly via the <ref db="OVN_Northbound"/> database and
+    <code>ovn-northd</code>.
   </p>
 
   <p>
-    <ref table="Logical_Flow"/> and <ref table="Multicast_Group"/> contain LN
-    data.
+    Logical network data is likely to change more quickly than physical network
+    data.  This is especially true in a container environment where containers
+    are created and destroyed (and therefore added to and deleted from logical
+    switches) quickly.
+  </p>
+
+  <p>
+    The <ref table="Logical_Flow"/>, <ref table="Multicast_Group"/>, <ref
+    table="Address_Group"/>, <ref table="DHCP_Options"/>, <ref
+    table="DHCPv6_Options"/>, and <ref table="DNS"/> tables contain logical
+    network data.
   </p>
 
   <h3>Logical-physical bindings</h3>
@@ -169,13 +170,16 @@
         connections should be configured.  See the <ref table="Connection"/>
         table for more information.
       </column>
+      <column name="ssl">
+        Global SSL configuration.
+      </column>
     </group>
   </table>
 
   <table name="Chassis" title="Physical Network Hypervisor and Gateway Information">
     <p>
       Each row in this table represents a hypervisor or gateway (a chassis) in
-      the physical network (PN).  Each chassis, via
+      the physical network.  Each chassis, via
       <code>ovn-controller</code>/<code>ovn-controller-vtep</code>, adds
       and updates its own row, and keeps a copy of the remaining rows to
       determine how to reach other hypervisors.
@@ -257,8 +261,8 @@
       </column>
     </group>
 
-     <group title="Gateway Configuration">
-       <p>
+    <group title="Gateway Configuration">
+      <p>
         A <dfn>gateway</dfn> is a chassis that forwards traffic between the
         OVN-managed part of a logical network and a physical VLAN, extending a
         tunnel-based logical network into a physical network.  Gateways are
@@ -276,7 +280,7 @@
         <ref column="vtep_logical_switches" table="Chassis"/>, will be
         associated with this <ref table="Chassis"/>.
       </column>
-     </group>
+    </group>
   </table>
 
   <table name="Encap" title="Encapsulation Types">
@@ -301,14 +305,18 @@
       <p>
         Options for configuring the encapsulation. Currently, the only
         option that has been defined is <code>csum</code>.
-       </p>
+      </p>
 
       <p>
         <code>csum</code> indicates that encapsulation checksums can be
         transmitted and received with reasonable performance. It is a hint
         to senders transmitting data to this chassis that they should use
-        checksums to protect OVN metadata. Set to <code>true</code> to enable
-        or <code>false</code> to disable.
+        checksums to protect OVN metadata. <code>ovn-controller</code>
+        populates this key with the value defined in
+        <ref table="Open_vSwitch" column="external_ids:ovn-encap-csum"/> column
+        of the Open_vSwitch database's <ref table="Open_vSwitch"
+        db="Open_vSwitch"/> table.  Other applications should treat this key as
+        read-only. See <code>ovn-controller</code>(8) for more information.
       </p>
 
       <p>
@@ -344,6 +352,9 @@
 
     <column name="ip">
       The IPv4 address of the encapsulation tunnel endpoint.
+    </column>
+    <column name="chassis_name">
+      The name of the chassis that created this encap.
     </column>
   </table>
 
@@ -530,6 +541,20 @@
         latter is useful by itself as a catch-all expression that matches every
         packet.
       </p>
+
+      <p>
+        Match expressions also support a kind of function syntax.  The
+        following functions are supported:
+      </p>
+
+      <dl>
+        <dt><code>is_chassis_resident(<var>lport</var>)</code></dt>
+        <dd>
+          Evaluates to true on a chassis on which logical port <var>lport</var>
+          (a quoted string) resides, and to false elsewhere.  This function was
+          introduced in OVN 2.7.
+        </dd>
+      </dl>
 
       <p><em>Symbols</em></p>
 
@@ -831,9 +856,16 @@
         <li><code>ct_mark</code> <code>ct_label</code></li>
         <li>
           <p>
-            <code>ct_state</code>, which has the following Boolean subfields:
+            <code>ct_state</code>, which has several Boolean subfields.  The
+            <code>ct_next</code> action initializes the following subfields:
           </p>
           <ul>
+            <li>
+              <code>ct.trk</code>: Always set to true by <code>ct_next</code>
+              to indicate that connection tracking has taken place.  All other
+              <code>ct</code> subfields have <code>ct.trk</code> as a
+              prerequisite.
+            </li>
             <li><code>ct.new</code>: True for a new flow</li>
             <li><code>ct.est</code>: True for an established flow</li>
             <li><code>ct.rel</code>: True for a related flow</li>
@@ -841,9 +873,19 @@
             <li><code>ct.inv</code>: True for a connection entry in a bad state</li>
           </ul>
           <p>
-            <code>ct_state</code> and its subfields are initialized by the
-            <code>ct_next</code> action, described below.
+            The <code>ct_dnat</code>, <code>ct_snat</code>, and
+            <code>ct_lb</code> actions initialize the following subfields:
           </p>
+          <ul>
+            <li>
+              <code>ct.dnat</code>: True for a packet whose destination IP
+              address has been changed.
+            </li>
+            <li>
+              <code>ct.snat</code>: True for a packet whose source IP
+              address has been changed.
+            </li>
+          </ul>
         </li>
       </ul>
 
@@ -924,10 +966,16 @@
 
         <dt><code>next;</code></dt>
         <dt><code>next(<var>table</var>);</code></dt>
+        <dt><code>next(pipeline=<var>pipeline</var>, table=<var>table</var>);</code></dt>
         <dd>
-          Executes another logical datapath table as a subroutine.  By default,
-          the table after the current one is executed.  Specify
-          <var>table</var> to jump to a specific table in the same pipeline.
+          Executes the given logical datapath <var>table</var> in
+          <var>pipeline</var> as a subroutine.  The default <var>table</var> is
+          just after the current one.  If <var>pipeline</var> is specified, it
+          may be <code>ingress</code> or <code>egress</code>; the default
+          <var>pipeline</var> is the one currently executing.  Actions in the
+          ingress pipeline may not use <code>next</code> to jump into the
+          egress pipeline (use the <code>output</code> instead), but
+          transitions in the opposite direction are allowed.
         </dd>
 
         <dt><code><var>field</var> = <var>constant</var>;</code></dt>
@@ -1022,9 +1070,11 @@
             As a side effect, IP fragments will be reassembled for matching.
             If a fragmented packet is output, then it will be sent with any
             overlapping fragments squashed.  The connection tracking state is
-            scoped by the logical port, so overlapping addresses may be used.
-            To allow traffic related to the matched flow, execute
-            <code>ct_commit</code>.
+            scoped by the logical port when the action is used in a flow for
+            a logical switch, so overlapping addresses may be used.  To allow
+            traffic related to the matched flow, execute <code>ct_commit
+            </code>.  Connection tracking state is scoped by the logical
+            topology when the action is used in a flow for a router.
           </p>
 
           <p>
@@ -1088,11 +1138,26 @@
         <dd>
           <p>
             <code>ct_snat</code> sends the packet through the SNAT zone to
-            unSNAT any packet that was SNATed in the opposite direction.  If
-            the packet needs to be sent to the next tables, then it should be
-            followed by a <code>next;</code> action.  The next tables will not
-            see the changes in the packet caused by the connection tracker.
+            unSNAT any packet that was SNATed in the opposite direction.  The
+            behavior on gateway routers differs from the behavior on a
+            distributed router:
           </p>
+          <ul>
+            <li>
+              On a gateway router, if the packet needs to be sent to the next
+              tables, then it should be followed by a <code>next;</code>
+              action.  The next tables will not see the changes in the packet
+              caused by the connection tracker.
+            </li>
+            <li>
+              On a distributed router, if the connection tracker finds a
+              connection that was SNATed in the opposite direction, then the
+              destination IP address of the packet is UNSNATed.  The packet is
+              automatically sent to the next tables as if followed by the
+              <code>next;</code> action.  The next tables will see the changes
+              in the packet caused by the connection tracker.
+            </li>
+          </ul>
           <p>
             <code>ct_snat(<var>IP</var>)</code> sends the packet through the
             SNAT zone to change the source IP address of the packet to
@@ -1101,6 +1166,20 @@
             followed by <code>next;</code> action.  The next tables will see the
             changes in the packet caused by the connection tracker.
           </p>
+        </dd>
+
+        <dt><code>ct_clear;</code></dt>
+        <dd>
+          Clears connection tracking state.
+        </dd>
+
+        <dt><code>clone { <var>action</var>; </code>...<code> };</code></dt>
+        <dd>
+          Makes a copy of the packet being processed and executes each
+          <code>action</code> on the copy.  Actions following the
+          <var>clone</var> action, if any, apply to the original, unmodified
+          packet.  This can be used as a way to ``save and restore'' the packet
+          around a set of actions that may modify it and should not persist.
         </dd>
 
         <dt><code>arp { <var>action</var>; </code>...<code> };</code></dt>
@@ -1390,6 +1469,94 @@
             packet in that connection.
           </p>
         </dd>
+
+        <dt>
+          <code><var>R</var> = dns_lookup();</code>
+        </dt>
+
+        <dd>
+          <p>
+            <b>Parameters</b>: No parameters.
+          </p>
+
+          <p>
+            <b>Result</b>: stored to a 1-bit subfield <var>R</var>.
+          </p>
+
+          <p>
+            Valid only in the ingress pipeline.
+          </p>
+
+          <p>
+            When this action is applied to a valid DNS request (a UDP packet
+            typically directed to port 53), it attempts to resolve the query
+            using the contents of the <ref table="DNS"/> table.  If it is
+            successful, it changes the packet into a DNS reply and stores 1 in
+            <var>R</var>.  If the action is applied to a non-DNS packet, an
+            invalid DNS request packet, or a valid DNS request for which the
+            <ref table="DNS"/> table does not supply an answer, it leaves the
+            packet unchanged and stores 0 in <var>R</var>.
+          </p>
+
+          <p>
+            Regardless of success, the action does not make any of the changes
+            to the flow that are necessary to direct the packet back to the
+            requester.  The logical pipeline can implement this behavior with
+            matches and actions in later tables.
+          </p>
+
+          <p>
+            <b>Example:</b>
+            <code>
+              reg0[3] = dns_lookup();
+            </code>
+          </p>
+
+          <p>
+            <b>Prerequisite:</b> <code>udp</code>
+          </p>
+        </dd>
+      </dl>
+
+      <dl>
+        <dt>
+          <code>log(<var>key</var>=<var>value</var>, </code>...<code>);</code>
+        </dt>
+
+        <dd>
+          <p>
+            Causes <code>ovn-controller</code> to log the packet on the chassis
+            that processes it.  Packet logging currently uses the same logging
+            mechanism as other Open vSwitch and OVN messages, which means that
+            whether and where log messages appear depends on the local logging
+            configuration that can be configured with <code>ovs-appctl</code>,
+            etc.
+          </p>
+          <p>
+            The <code>log</code> action takes zero or more of the following
+            key-value pair arguments that control what is logged:
+          </p>
+          <dl>
+            <dt><code>name=</code><var>string</var></dt>
+            <dd>
+              An optional name for the ACL.  The <var>string</var> is
+              currently limited to 64 bytes.
+            </dd>
+            <dt><code>severity=</code><var>level</var></dt>
+            <dd>
+              Indicates the severity of the event.  The <var>level</var> is one
+              of following (from more to less serious): <code>alert</code>,
+              <code>warning</code>, <code>notice</code>, <code>info</code>, or
+              <code>debug</code>.  If a severity is not provided, the default
+              is <code>info</code>.
+            </dd>
+            <dt><code>verdict=</code><var>value</var></dt>
+            <dd>
+              The verdict for packets matching the flow.  The value must be one
+              of <code>allow</code>, <code>deny</code>, or <code>reject</code>.
+            </dd>
+          </dl>
+        </dd>
       </dl>
 
       <p>
@@ -1463,6 +1630,12 @@ tcp.flags = RST;
       Human-readable name for this flow's stage in the pipeline.
     </column>
 
+    <column name="external_ids" key="stage-hint" type='{"type": "uuid"}'>
+      UUID of a <ref db="OVN_Northbound"/> record that caused this logical flow
+      to be created.  Currently used only for attribute of logical flows to
+      northbound <ref db="OVN_Northbound" table="ACL"/> records.
+    </column>
+
     <column name="external_ids" key="source">
       Source file and line number of the code that added this flow to the
       pipeline.
@@ -1527,11 +1700,18 @@ tcp.flags = RST;
 
   <table name="Datapath_Binding" title="Physical-Logical Datapath Bindings">
     <p>
-      Each row in this table identifies physical bindings of a logical
-      datapath.  A logical datapath implements a logical pipeline among the
-      ports in the <ref table="Port_Binding"/> table associated with it.  In
-      practice, the pipeline in a given logical datapath implements either a
-      logical switch or a logical router.
+      Each row in this table represents a logical datapath, which implements a
+      logical pipeline among the ports in the <ref table="Port_Binding"/> table
+      associated with it.  In practice, the pipeline in a given logical
+      datapath implements either a logical switch or a logical router.
+    </p>
+
+    <p>
+      The main purpose of a row in this table is provide a physical binding for
+      a logical datapath.  A logical datapath does not have a physical
+      location, so its physical binding information is limited: just <ref
+      column="tunnel_key"/>.  The rest of the data in this table does not
+      affect packet forwarding.
     </p>
 
     <column name="tunnel_key">
@@ -1563,12 +1743,28 @@ tcp.flags = RST;
         the <ref db="OVN_Northbound"/> database.
       </column>
 
-      <column name="external_ids" key="name">
-        <code>ovn-northd</code> copies this from the <ref
-        table="Logical_Router" db="OVN_Northbound"/> or <ref
-        table="Logical_Switch" db="OVN_Northbound"/> table in the <ref
-        db="OVN_Northbound"/> database, when that column is nonempty.
-      </column>
+      <group title="Naming">
+        <p>
+          <code>ovn-northd</code> copies these from the name fields in the <ref
+          db="OVN_Northbound"/> database, either from <ref
+          table="Logical_Router" db="OVN_Northbound" column="name"/> and <ref
+          table="Logical_Router" db="OVN_Northbound" column="external_ids"
+          key="neutron:router_name"/> in the <ref table="Logical_Router"
+          db="OVN_Northbound"/> table or from <ref table="Logical_Switch"
+          db="OVN_Northbound" column="name"/> and <ref table="Logical_Switch"
+          db="OVN_Northbound" column="external_ids"
+          key="neutron:network_name"/> in the <ref table="Logical_Switch"
+          db="OVN_Northbound"/> table.
+        </p>
+
+        <column name="external_ids" key="name">
+          A name for the logical datapath.
+        </column>
+
+        <column name="external_ids" key="name2">
+          Another name for the logical datapath.
+        </column>
+      </group>
     </group>
 
     <group title="Common Columns">
@@ -1581,9 +1777,12 @@ tcp.flags = RST;
 
   <table name="Port_Binding" title="Physical-Logical Port Bindings">
     <p>
-      Most rows in this table identify the physical location of a logical port.
-      (The exceptions are logical patch ports, which do not have any physical
-      location.)
+      Each row in this table binds a logical port to a realization.  For most
+      logical ports, this means binding to some physical location, for example
+      by binding a logical port to a VIF that belongs to a VM running on a
+      particular hypervisor.  Other logical ports, such as logical patch ports,
+      can be realized without a specific physical location, but their bindings
+      are still expressed through rows in this table.
     </p>
 
     <p>
@@ -1658,6 +1857,11 @@ tcp.flags = RST;
             connectivity to the corresponding physical network.
           </dd>
 
+          <dt>localport</dt>
+          <dd>
+            Always empty.  A localport port is present on every chassis.
+          </dd>
+
           <dt>l3gateway</dt>
           <dd>
             The physical location of the L3 gateway.  To successfully identify a
@@ -1675,6 +1879,18 @@ tcp.flags = RST;
           </dd>
         </dl>
 
+      </column>
+
+      <column name="gateway_chassis">
+        <p>
+          A list of <ref table="Gateway_Chassis"/>.
+        </p>
+        <p>
+          This should only be populated for ports with
+          <ref column="type"/> set to <code>chassisredirect</code>.
+          This column defines the list of chassis used as gateways where
+          traffic will be redirected through.
+        </p>
       </column>
 
       <column name="tunnel_key">
@@ -1738,6 +1954,15 @@ tcp.flags = RST;
             to model direct connectivity to an existing network.
           </dd>
 
+          <dt><code>localport</code></dt>
+          <dd>
+            A connection to a local VIF. Traffic that arrives on a
+            <code>localport</code> is never forwarded over a tunnel to another
+            chassis. These ports are present on every chassis and have the same
+            address in all of them. This is used to model connectivity to local
+            services that run on every hypervisor.
+          </dd>
+
           <dt><code>l2gateway</code></dt>
           <dd>
             An L2 connection to a physical network.  The chassis this
@@ -1756,6 +1981,21 @@ tcp.flags = RST;
             table="Port_Binding"/>:<code>vtep-logical-switch</code> must also
             be defined.
           </dd>
+
+          <dt><code>chassisredirect</code></dt>
+          <dd>
+            A logical port that represents a particular instance, bound
+            to a specific chassis, of an otherwise distributed parent
+            port (e.g. of type <code>patch</code>).  A
+            <code>chassisredirect</code> port should never be used as an
+            <code>inport</code>.  When an ingress pipeline sets the
+            <code>outport</code>, it may set the value to a logical port
+            of type <code>chassisredirect</code>.  This will cause the
+            packet to be directed to a specific chassis to carry out the
+            egress pipeline.  At the beginning of the egress pipeline,
+            the <code>outport</code> will be reset to the value of the
+            distributed port.
+          </dd>
         </dl>
       </column>
     </group>
@@ -1773,6 +2013,21 @@ tcp.flags = RST;
         in its own <code>peer</code> option.  That is, the two patch logical
         ports must have reversed <ref column="logical_port"/> and
         <code>peer</code> values.
+      </column>
+
+      <column name="nat_addresses">
+        MAC address followed by a list of SNAT and DNAT external IP
+        addresses, followed by
+        <code>is_chassis_resident("<var>lport</var>")</code>, where
+        <var>lport</var> is the name of a logical port on the same chassis
+        where the corresponding NAT rules are applied.  This is used to
+        send gratuitous ARPs for SNAT and DNAT external IP addresses via
+        <code>localnet</code>, from the chassis where <var>lport</var>
+        resides.  Example: <code>80:fa:5b:06:72:b7 158.36.44.22
+        158.36.44.24 is_chassis_resident("foo1")</code>.  This would result
+        in generation of gratuitous ARPs for IP addresses 158.36.44.22 and
+        158.36.44.24 with a MAC address of 80:fa:5b:06:72:b7 from the chassis
+        where the logical port "foo1" resides.
       </column>
     </group>
 
@@ -1795,15 +2050,25 @@ tcp.flags = RST;
         The <code>chassis</code> in which the port resides.
       </column>
 
-        <column name="options" key="nat-addresses">
-          MAC address of the <code>l3gateway</code> port followed by a list of
-          SNAT and DNAT IP addresses. This is used to send gratuitous ARPs for
-          SNAT and DNAT IP addresses via <code>localnet</code> and is valid for
-          only L3 gateway ports.  Example: <code>80:fa:5b:06:72:b7 158.36.44.22
-          158.36.44.24</code>. This would result in generation of gratuitous
-          ARPs for IP addresses 158.36.44.22 and 158.36.44.24 with a MAC
-          address of 80:fa:5b:06:72:b7.
-        </column>
+      <column name="options" key="nat-addresses">
+        MAC address of the <code>l3gateway</code> port followed by a list of
+        SNAT and DNAT external IP addresses.  This is used to send gratuitous
+        ARPs for SNAT and DNAT external IP addresses via <code>localnet</code>.
+        Example: <code>80:fa:5b:06:72:b7 158.36.44.22 158.36.44.24</code>.
+        This would result in generation of gratuitous ARPs for IP addresses
+        158.36.44.22 and 158.36.44.24 with a MAC address of 80:fa:5b:06:72:b7.
+        This is used in OVS versions prior to 2.8.
+      </column>
+
+      <column name="nat_addresses">
+        MAC address of the <code>l3gateway</code> port followed by a list of
+        SNAT and DNAT external IP addresses.  This is used to send gratuitous
+        ARPs for SNAT and DNAT external IP addresses via <code>localnet</code>.
+        Example: <code>80:fa:5b:06:72:b7 158.36.44.22 158.36.44.24</code>.
+        This would result in generation of gratuitous ARPs for IP addresses
+        158.36.44.22 and 158.36.44.24 with a MAC address of 80:fa:5b:06:72:b7.
+        This is used in OVS version 2.8 and later versions.
+      </column>
     </group>
 
     <group title="Localnet Options">
@@ -1912,6 +2177,26 @@ tcp.flags = RST;
       </column>
     </group>
 
+    <group title="Chassis Redirect Options">
+      <p>
+        These options apply to logical ports with <ref column="type"/>
+        of <code>chassisredirect</code>.
+      </p>
+
+      <column name="options" key="distributed-port">
+        The name of the distributed port for which this
+        <code>chassisredirect</code> port represents a particular instance.
+      </column>
+
+      <column name="options" key="redirect-chassis">
+        The <code>chassis</code> that this <code>chassisredirect</code> port
+        is bound to.  This is taken from <ref table="Logical_Router_Port"
+        column="options" key="redirect-chassis" db="OVN_Northbound"/>
+        in the OVN_Northbound database's <ref table="Logical_Router_Port"
+        db="OVN_Northbound"/> table.
+      </column>
+    </group>
+
     <group title="Nested Containers">
       <p>
         These columns support containers nested within a VM.  Specifically,
@@ -1938,6 +2223,38 @@ tcp.flags = RST;
           This column is used for a different purpose when <ref column="type"/>
           is <code>localnet</code> (see <code>Localnet Options</code>, above)
           or <code>l2gateway</code> (see <code>L2 Gateway Options</code>, above).
+        </p>
+      </column>
+    </group>
+
+    <group title="Naming">
+      <column name="external_ids" key="name">
+        <p>
+          For a logical switch port, <code>ovn-northd</code> copies this from
+          <ref table="Logical_Switch_Port" db="OVN_Northbound"
+          column="external_ids" key="neutron:port_name"/> in the <ref
+          table="Logical_Switch_Port" db="OVN_Northbound"/> table in the
+          OVN_Northbound database, if it is a nonempty string.
+        </p>
+
+        <p>
+          For a logical switch port, <code>ovn-northd</code> does not currently
+          set this key.
+        </p>
+      </column>
+    </group>
+
+    <group title="Common Columns">
+      <column name="external_ids">
+        <p>
+          See <em>External IDs</em> at the beginning of this document.
+        </p>
+
+        <p>
+          The <code>ovn-northd</code> program populates this column with
+          all entries into the <ref column="external_ids"/> column of the
+          <ref table="Logical_Switch_Port"/> table of the
+          <ref db="OVN_Northbound"/> database.
         </p>
       </column>
     </group>
@@ -2294,7 +2611,9 @@ tcp.flags = RST;
             <p>
               The specified SSL <var>port</var> on the host at the given
               <var>ip</var>, which must be expressed as an IP address
-              (not a DNS name).
+              (not a DNS name). A valid SSL configuration must be provided
+              when this form is used, this configuration can be specified
+              via command-line options or the <ref table="SSL"/> table.
             </p>
             <p>
               If <var>port</var> is not specified, it defaults to 6640.
@@ -2330,6 +2649,9 @@ tcp.flags = RST;
               address, wrap in square brackets,
               e.g. <code>pssl:6640:[::1]</code>.  If <var>ip</var> is not
               specified then it listens only on IPv4 (but not IPv6) addresses.
+              A valid SSL configuration must be provided when this form is used,
+              this can be specified either via command-line options or the
+              <ref table="SSL"/> table.
             </p>
             <p>
               If <var>port</var> is not specified, it defaults to 6640.
@@ -2365,6 +2687,9 @@ tcp.flags = RST;
       <column name="read_only">
         <code>true</code> to restrict these connections to read-only
         transactions, <code>false</code> to allow them to modify the database.
+      </column>
+      <column name="role">
+        String containing role name for this connection entry.
       </column>
     </group>
 
@@ -2407,7 +2732,7 @@ tcp.flags = RST;
         connection targets. They are omitted.
       </p>
 
-    <column name="is_connected">
+      <column name="is_connected">
         <code>true</code> if currently connected to this client,
         <code>false</code> otherwise.
       </column>
@@ -2500,6 +2825,157 @@ tcp.flags = RST;
 
       <column name="external_ids"/>
       <column name="other_config"/>
+    </group>
+  </table>
+  <table name="SSL">
+    SSL configuration for ovn-sb database access.
+
+    <column name="private_key">
+      Name of a PEM file containing the private key used as the switch's
+      identity for SSL connections to the controller.
+    </column>
+
+    <column name="certificate">
+      Name of a PEM file containing a certificate, signed by the
+      certificate authority (CA) used by the controller and manager,
+      that certifies the switch's private key, identifying a trustworthy
+      switch.
+    </column>
+
+    <column name="ca_cert">
+      Name of a PEM file containing the CA certificate used to verify
+      that the switch is connected to a trustworthy controller.
+    </column>
+
+    <column name="bootstrap_ca_cert">
+      If set to <code>true</code>, then Open vSwitch will attempt to
+      obtain the CA certificate from the controller on its first SSL
+      connection and save it to the named PEM file. If it is successful,
+      it will immediately drop the connection and reconnect, and from then
+      on all SSL connections must be authenticated by a certificate signed
+      by the CA certificate thus obtained.  <em>This option exposes the
+      SSL connection to a man-in-the-middle attack obtaining the initial
+      CA certificate.</em>  It may still be useful for bootstrapping.
+    </column>
+
+    <column name="ssl_protocols">
+      List of SSL protocols to be enabled for SSL connections. The default
+      when this option is omitted is <code>TLSv1,TLSv1.1,TLSv1.2</code>.
+    </column>
+
+    <column name="ssl_ciphers">
+      List of ciphers (in OpenSSL cipher string format) to be supported
+      for SSL connections. The default when this option is omitted is
+      <code>HIGH:!aNULL:!MD5</code>.
+    </column>
+
+    <group title="Common Columns">
+      The overall purpose of these columns is described under <code>Common
+      Columns</code> at the beginning of this document.
+
+      <column name="external_ids"/>
+    </group>
+  </table>
+  <table name="DNS" title="Native DNS resolution">
+    <p>
+      Each row in this table stores the DNS records. The OVN action
+      <code>dns_lookup</code> uses this table for DNS resolution.
+    </p>
+
+    <column name="records">
+      Key-value pair of DNS records with <code>DNS query name</code> as the key
+      and a string of IP address(es) separated by comma or space as the
+      value.
+
+      <p><b>Example: </b> "vm1.ovn.org" = "10.0.0.4 aef0::4"</p>
+    </column>
+
+    <column name="datapaths">
+      The DNS records defined in the column <ref column="records"/> will be
+      applied only to the DNS queries originating from the datapaths defined
+      in this column.
+    </column>
+
+    <group title="Common Columns">
+      <column name="external_ids">
+        See <em>External IDs</em> at the beginning of this document.
+      </column>
+    </group>
+  </table>
+
+  <table name="RBAC_Role">
+    Role table for role-based access controls.
+
+    <column name="name">
+        The role name, corresponding to the <code>role</code>
+        column in the <code>Connection</code> table.
+    </column>
+
+    <column name="permissions">
+        A mapping of table names to rows in the
+        <code>RBAC_Permission</code> table.
+    </column>
+  </table>
+  <table name="RBAC_Permission">
+    Permissions table for role-based access controls.
+
+    <column name="table">
+      Name of table to which this row applies.
+    </column>
+
+    <column name="authorization">
+        Set of strings identifying columns and column:key pairs to be compared
+        with client ID. At least one match is required in order to be
+        authorized.  A zero-length string is treated as a special value
+        indicating all clients should be considered authorized.
+    </column>
+
+    <column name="insert_delete">
+        When "true", row insertions and authorized row
+        deletions are permitted.
+    </column>
+    <column name="update">
+        Set of strings identifying columns and column:key pairs that authorized
+        clients are allowed to modify.
+    </column>
+  </table>
+  <table name="Gateway_Chassis">
+    <p>
+      Association of <ref table="Port_Binding"/> rows of
+      <ref table="Port_Binding" column="type"/> <code>chassisredirect</code> to
+      a <ref table="Chassis"/>. The traffic going out through a specific
+      <code>chassisredirect</code> port will be redirected to a chassis,
+      or a set of them in high availability configurations.
+    </p>
+
+    <column name="name">
+      <p>
+        Name of the <ref table="Gateway_Chassis"/>.
+      </p>
+      <p>
+        A suggested, but not required naming convention is
+        <code>${port_name}_${chassis_name}</code>.
+      </p>
+    </column>
+
+    <column name="chassis">
+      The <ref table="Chassis"/> to which we send the traffic.
+    </column>
+
+    <column name="priority">
+      This is the priority the specific <ref table="Chassis"/> among all
+      Gateway_Chassis belonging to the same <ref table="Port_Binding"/>.
+    </column>
+
+    <column name="options">
+      Reserved for future use.
+    </column>
+
+    <group title="Common Columns">
+      The overall purpose of these columns is described under <code>Common
+      Columns</code> at the beginning of this document.
+
+      <column name="external_ids"/>
     </group>
   </table>
 </database>

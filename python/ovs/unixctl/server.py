@@ -17,9 +17,6 @@ import errno
 import os
 import sys
 
-import six
-from six.moves import range
-
 import ovs.dirs
 import ovs.jsonrpc
 import ovs.stream
@@ -27,6 +24,9 @@ import ovs.unixctl
 import ovs.util
 import ovs.version
 import ovs.vlog
+
+import six
+from six.moves import range
 
 Message = ovs.jsonrpc.Message
 vlog = ovs.vlog.Vlog("unixctl_server")
@@ -148,6 +148,10 @@ class UnixctlServer(object):
     def run(self):
         for _ in range(10):
             error, stream = self._listener.accept()
+            if sys.platform == "win32" and error == errno.WSAEWOULDBLOCK:
+                # WSAEWOULDBLOCK would be the equivalent on Windows
+                # for EAGAIN on Unix.
+                error = errno.EAGAIN
             if not error:
                 rpc = ovs.jsonrpc.Connection(stream)
                 self._conns.append(UnixctlConnection(rpc))

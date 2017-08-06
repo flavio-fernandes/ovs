@@ -34,6 +34,7 @@
 #include "Vport.h"
 #include "Vxlan.h"
 #include "Geneve.h"
+#include "IpFragment.h"
 
 #ifdef OVS_DBG_MOD
 #undef OVS_DBG_MOD
@@ -69,63 +70,6 @@ typedef struct _OVS_ACTION_STATS {
 } OVS_ACTION_STATS, *POVS_ACTION_STATS;
 
 OVS_ACTION_STATS ovsActionStats;
-
-/*
- * There a lot of data that needs to be maintained while executing the pipeline
- * as dictated by the actions of a flow, across different functions at different
- * levels. Such data is put together in a 'context' structure. Care should be
- * exercised while adding new members to the structure - only add ones that get
- * used across multiple stages in the pipeline/get used in multiple functions.
- */
-typedef struct OvsForwardingContext {
-    POVS_SWITCH_CONTEXT switchContext;
-    /* The NBL currently used in the pipeline. */
-    PNET_BUFFER_LIST curNbl;
-    /* NDIS forwarding detail for 'curNbl'. */
-    PNDIS_SWITCH_FORWARDING_DETAIL_NET_BUFFER_LIST_INFO fwdDetail;
-    /* Array of destination ports for 'curNbl'. */
-    PNDIS_SWITCH_FORWARDING_DESTINATION_ARRAY destinationPorts;
-    /* send flags while sending 'curNbl' into NDIS. */
-    ULONG sendFlags;
-    /* Total number of output ports, used + unused, in 'curNbl'. */
-    UINT32 destPortsSizeIn;
-    /* Total number of used output ports in 'curNbl'. */
-    UINT32 destPortsSizeOut;
-    /*
-     * If 'curNbl' is not owned by OVS, they need to be tracked, if they need to
-     * be freed/completed.
-     */
-    OvsCompletionList *completionList;
-    /*
-     * vport number of 'curNbl' when it is passed from the PIF bridge to the INT
-     * bridge. ie. during tunneling on the Rx side.
-     */
-    UINT32 srcVportNo;
-
-    /*
-     * Tunnel key:
-     * - specified in actions during tunneling Tx
-     * - extracted from an NBL during tunneling Rx
-     */
-    OvsIPv4TunnelKey tunKey;
-
-    /*
-     * Tunneling - Tx:
-     * To store the output port, when it is a tunneled port. We don't foresee
-     * multiple tunneled ports as outport for any given NBL.
-     */
-    POVS_VPORT_ENTRY tunnelTxNic;
-
-    /*
-     * Tunneling - Rx:
-     * Points to the Internal port on the PIF Bridge, if the packet needs to be
-     * de-tunneled.
-     */
-    POVS_VPORT_ENTRY tunnelRxNic;
-
-    /* header information */
-    OVS_PACKET_HDR_INFO layers;
-} OvsForwardingContext;
 
 /*
  * --------------------------------------------------------------------------
@@ -197,6 +141,36 @@ OvsInitForwardingCtx(OvsForwardingContext *ovsFwdCtx,
     }
 
     return NDIS_STATUS_SUCCESS;
+}
+
+/*
+ * --------------------------------------------------------------------------
+ * OvsDoFragmentNbl --
+ *     Utility function to Fragment nbl based on mru.
+ * --------------------------------------------------------------------------
+ */
+static __inline VOID
+OvsDoFragmentNbl(OvsForwardingContext *ovsFwdCtx, UINT16 mru)
+{
+    PNET_BUFFER_LIST fragNbl = NULL;
+    fragNbl = OvsFragmentNBL(ovsFwdCtx->switchContext,
+                             ovsFwdCtx->curNbl,
+                             &(ovsFwdCtx->layers),
+                             mru, 0, TRUE);
+
+   if (fragNbl != NULL) {
+        OvsCompleteNBL(ovsFwdCtx->switchContext, ovsFwdCtx->curNbl, TRUE);
+        OvsInitForwardingCtx(ovsFwdCtx,
+                            ovsFwdCtx->switchContext,
+                             fragNbl,
+                             ovsFwdCtx->srcVportNo,
+                             ovsFwdCtx->sendFlags,
+                             NET_BUFFER_LIST_SWITCH_FORWARDING_DETAIL(fragNbl),
+                             ovsFwdCtx->completionList,
+                             &ovsFwdCtx->layers, FALSE);
+    } else {
+        OVS_LOG_INFO("Fragment NBL failed for MRU = %u", mru);
+    }
 }
 
 /*
@@ -290,8 +264,8 @@ OvsDetectTunnelPkt(OvsForwardingContext *ovsFwdCtx,
          * default port.
          */
         BOOLEAN validSrcPort =
-            (ovsFwdCtx->fwdDetail->SourcePortId ==
-                 ovsFwdCtx->switchContext->virtualExternalPortId) ||
+            (OvsIsExternalVportByPortId(ovsFwdCtx->switchContext,
+                 ovsFwdCtx->fwdDetail->SourcePortId)) ||
             (ovsFwdCtx->fwdDetail->SourcePortId ==
                  NDIS_SWITCH_DEFAULT_PORT_ID);
 
@@ -301,7 +275,6 @@ OvsDetectTunnelPkt(OvsForwardingContext *ovsFwdCtx,
             return TRUE;
         }
     } else if (OvsIsTunnelVportType(dstVport->ovsType)) {
-        ASSERT(ovsFwdCtx->tunnelTxNic == NULL);
         ASSERT(ovsFwdCtx->tunnelRxNic == NULL);
 
         /*
@@ -322,7 +295,7 @@ OvsDetectTunnelPkt(OvsForwardingContext *ovsFwdCtx,
 
             if (!vport ||
                 (vport->ovsType != OVS_VPORT_TYPE_NETDEV &&
-                 !OvsIsBridgeInternalVport(vport) &&
+                 vport->ovsType != OVS_VPORT_TYPE_INTERNAL &&
                  !OvsIsTunnelVportType(vport->ovsType))) {
                 ovsFwdCtx->tunKey.dst = 0;
             }
@@ -402,10 +375,6 @@ OvsAddPorts(OvsForwardingContext *ovsFwdCtx,
     vport->stats.txPackets++;
     vport->stats.txBytes +=
         NET_BUFFER_DATA_LENGTH(NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl));
-
-    if (OvsIsBridgeInternalVport(vport)) {
-        return NDIS_STATUS_SUCCESS;
-    }
 
     if (OvsDetectTunnelPkt(ovsFwdCtx, vport, flowKey)) {
         return NDIS_STATUS_SUCCESS;
@@ -663,46 +632,49 @@ OvsTunnelPortTx(OvsForwardingContext *ovsFwdCtx)
 {
     NDIS_STATUS status = NDIS_STATUS_FAILURE;
     PNET_BUFFER_LIST newNbl = NULL;
+    UINT32 srcVportNo;
+    NDIS_SWITCH_NIC_INDEX srcNicIndex;
+    NDIS_SWITCH_PORT_ID srcPortId;
+    POVS_BUFFER_CONTEXT ctx;
 
     /*
      * Setup the source port to be the internal port to as to facilitate the
      * second OvsLookupFlow.
      */
-    if (ovsFwdCtx->switchContext->internalVport == NULL ||
+    if (ovsFwdCtx->switchContext->countInternalVports <= 0 ||
         ovsFwdCtx->switchContext->virtualExternalVport == NULL) {
         OvsClearTunTxCtx(ovsFwdCtx);
         OvsCompleteNBLForwardingCtx(ovsFwdCtx,
             L"OVS-Dropped since either internal or external port is absent");
         return NDIS_STATUS_FAILURE;
     }
-    ovsFwdCtx->srcVportNo =
-        ((POVS_VPORT_ENTRY)ovsFwdCtx->switchContext->internalVport)->portNo;
 
-    ovsFwdCtx->fwdDetail->SourcePortId = ovsFwdCtx->switchContext->internalPortId;
-    ovsFwdCtx->fwdDetail->SourceNicIndex =
-        ((POVS_VPORT_ENTRY)ovsFwdCtx->switchContext->internalVport)->nicIndex;
-
-    /* Do the encap. Encap function does not consume the NBL. */
+    ctx = (POVS_BUFFER_CONTEXT)NET_BUFFER_LIST_CONTEXT_DATA_START(ovsFwdCtx->curNbl);
+    if (ctx->mru != 0) {
+        OvsDoFragmentNbl(ovsFwdCtx, ctx->mru);
+    }
+    OVS_FWD_INFO switchFwdInfo = { 0 };
+    /* Apply the encapsulation. The encapsulation will not consume the NBL. */
     switch(ovsFwdCtx->tunnelTxNic->ovsType) {
     case OVS_VPORT_TYPE_GRE:
         status = OvsEncapGre(ovsFwdCtx->tunnelTxNic, ovsFwdCtx->curNbl,
                              &ovsFwdCtx->tunKey, ovsFwdCtx->switchContext,
-                             &ovsFwdCtx->layers, &newNbl);
+                             &ovsFwdCtx->layers, &newNbl, &switchFwdInfo);
         break;
     case OVS_VPORT_TYPE_VXLAN:
         status = OvsEncapVxlan(ovsFwdCtx->tunnelTxNic, ovsFwdCtx->curNbl,
                                &ovsFwdCtx->tunKey, ovsFwdCtx->switchContext,
-                               &ovsFwdCtx->layers, &newNbl);
+                               &ovsFwdCtx->layers, &newNbl, &switchFwdInfo);
         break;
     case OVS_VPORT_TYPE_STT:
         status = OvsEncapStt(ovsFwdCtx->tunnelTxNic, ovsFwdCtx->curNbl,
                              &ovsFwdCtx->tunKey, ovsFwdCtx->switchContext,
-                             &ovsFwdCtx->layers, &newNbl);
+                             &ovsFwdCtx->layers, &newNbl, &switchFwdInfo);
         break;
     case OVS_VPORT_TYPE_GENEVE:
         status = OvsEncapGeneve(ovsFwdCtx->tunnelTxNic, ovsFwdCtx->curNbl,
                                 &ovsFwdCtx->tunKey, ovsFwdCtx->switchContext,
-                                &ovsFwdCtx->layers, &newNbl);
+                                &ovsFwdCtx->layers, &newNbl, &switchFwdInfo);
         break;
     default:
         ASSERT(! "Tx: Unhandled tunnel type");
@@ -711,16 +683,32 @@ OvsTunnelPortTx(OvsForwardingContext *ovsFwdCtx)
     /* Reset the tunnel context so that it doesn't get used after this point. */
     OvsClearTunTxCtx(ovsFwdCtx);
 
-    if (status == NDIS_STATUS_SUCCESS) {
+    if (status == NDIS_STATUS_SUCCESS && switchFwdInfo.vport != NULL) {
         ASSERT(newNbl);
+        /*
+         * Save the 'srcVportNo', 'srcPortId', 'srcNicIndex' so that
+         * this can be applied to the new NBL later on.
+         */
+        srcVportNo = switchFwdInfo.vport->portNo;
+        srcPortId = switchFwdInfo.vport->portId;
+        srcNicIndex = switchFwdInfo.vport->nicIndex;
+
         OvsCompleteNBLForwardingCtx(ovsFwdCtx,
                                     L"Complete after cloning NBL for encapsulation");
+        status = OvsInitForwardingCtx(ovsFwdCtx, ovsFwdCtx->switchContext,
+                                      newNbl, srcVportNo, 0,
+                                      NET_BUFFER_LIST_SWITCH_FORWARDING_DETAIL(newNbl),
+                                      ovsFwdCtx->completionList,
+                                      &ovsFwdCtx->layers, FALSE);
         ovsFwdCtx->curNbl = newNbl;
+        /* Update the forwarding detail for the new NBL */
+        ovsFwdCtx->fwdDetail->SourcePortId = srcPortId;
+        ovsFwdCtx->fwdDetail->SourceNicIndex = srcNicIndex;
         status = OvsDoFlowLookupOutput(ovsFwdCtx);
         ASSERT(ovsFwdCtx->curNbl == NULL);
     } else {
         /*
-        * XXX: Temporary freeing of the packet until we register a
+         * XXX: Temporary freeing of the packet until we register a
          * callback to IP helper.
          */
         OvsCompleteNBLForwardingCtx(ovsFwdCtx,
@@ -855,6 +843,7 @@ OvsOutputForwardingCtx(OvsForwardingContext *ovsFwdCtx)
     NDIS_STATUS status = STATUS_SUCCESS;
     POVS_SWITCH_CONTEXT switchContext = ovsFwdCtx->switchContext;
     PCWSTR dropReason;
+    POVS_BUFFER_CONTEXT ctx;
 
     /*
      * Handle the case where the some of the destination ports are tunneled
@@ -877,8 +866,12 @@ OvsOutputForwardingCtx(OvsForwardingContext *ovsFwdCtx)
          * before doing encapsulation.
          */
         if (ovsFwdCtx->tunnelTxNic != NULL || ovsFwdCtx->tunnelRxNic != NULL) {
+            POVS_BUFFER_CONTEXT oldCtx, newCtx;
             nb = NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl);
-            newNbl = OvsPartialCopyNBL(ovsFwdCtx->switchContext, ovsFwdCtx->curNbl,
+            oldCtx = (POVS_BUFFER_CONTEXT)
+                NET_BUFFER_LIST_CONTEXT_DATA_START(ovsFwdCtx->curNbl);
+            newNbl = OvsPartialCopyNBL(ovsFwdCtx->switchContext,
+                                       ovsFwdCtx->curNbl,
                                        0, 0, TRUE /*copy NBL info*/);
             if (newNbl == NULL) {
                 status = NDIS_STATUS_RESOURCES;
@@ -886,6 +879,9 @@ OvsOutputForwardingCtx(OvsForwardingContext *ovsFwdCtx)
                 dropReason = L"Dropped due to failure to create NBL copy.";
                 goto dropit;
             }
+            newCtx = (POVS_BUFFER_CONTEXT)
+                NET_BUFFER_LIST_CONTEXT_DATA_START(newNbl);
+            newCtx->mru = oldCtx->mru;
         }
 
         /* It does not seem like we'll get here unless 'portsToUpdate' > 0. */
@@ -898,6 +894,11 @@ OvsOutputForwardingCtx(OvsForwardingContext *ovsFwdCtx)
             ovsActionStats.cannotGrowDest++;
             dropReason = L"Dropped due to failure to update destinations.";
             goto dropit;
+        }
+
+        ctx = (POVS_BUFFER_CONTEXT)NET_BUFFER_LIST_CONTEXT_DATA_START(ovsFwdCtx->curNbl);
+        if (ctx->mru != 0) {
+            OvsDoFragmentNbl(ovsFwdCtx, ctx->mru);
         }
 
         OvsSendNBLIngress(ovsFwdCtx->switchContext, ovsFwdCtx->curNbl,
@@ -956,12 +957,11 @@ dropit:
 VOID
 OvsLookupFlowOutput(POVS_SWITCH_CONTEXT switchContext,
                     VOID *compList,
-                    PNET_BUFFER_LIST curNbl)
+                    PNET_BUFFER_LIST curNbl,
+                    POVS_VPORT_ENTRY internalVport)
 {
     NDIS_STATUS status;
     OvsForwardingContext ovsFwdCtx;
-    POVS_VPORT_ENTRY internalVport =
-        (POVS_VPORT_ENTRY)switchContext->internalVport;
 
     /* XXX: make sure comp list was not a stack variable previously. */
     OvsCompletionList *completionList = (OvsCompletionList *)compList;
@@ -971,7 +971,7 @@ OvsLookupFlowOutput(POVS_SWITCH_CONTEXT switchContext,
      * It could, but will we get this callback from IP helper in that case. Need
      * to check.
      */
-    ASSERT(switchContext->internalVport);
+    ASSERT(switchContext->countInternalVports > 0);
     status = OvsInitForwardingCtx(&ovsFwdCtx, switchContext, curNbl,
                                   internalVport->portNo, 0,
                                   NET_BUFFER_LIST_SWITCH_FORWARDING_DETAIL(curNbl),
@@ -1061,7 +1061,7 @@ OvsOutputBeforeSetAction(OvsForwardingContext *ovsFwdCtx)
  * --------------------------------------------------------------------------
  * OvsPopFieldInPacketBuf --
  *     Function to pop a specified field of length 'shiftLength' located at
- *     'shiftOffset' from the ethernet header. The data on the left of the
+ *     'shiftOffset' from the Ethernet header. The data on the left of the
  *     'shiftOffset' is right shifted.
  *
  *     Returns a pointer to the new start in 'bufferData'.
@@ -1079,9 +1079,6 @@ OvsPopFieldInPacketBuf(OvsForwardingContext *ovsFwdCtx,
     UINT32 packetLen, mdlLen;
     PNET_BUFFER_LIST newNbl;
     NDIS_STATUS status;
-    PUINT8 tempBuffer[ETH_HEADER_LENGTH];
-
-    ASSERT(shiftOffset > ETH_ADDR_LENGTH);
 
     newNbl = OvsPartialCopyNBL(ovsFwdCtx->switchContext, ovsFwdCtx->curNbl,
                                0, 0, TRUE /* copy NBL info */);
@@ -1118,8 +1115,16 @@ OvsPopFieldInPacketBuf(OvsForwardingContext *ovsFwdCtx,
         return NDIS_STATUS_FAILURE;
     }
     bufferStart += NET_BUFFER_CURRENT_MDL_OFFSET(curNb);
-    RtlCopyMemory(tempBuffer, bufferStart, shiftOffset);
-    RtlCopyMemory(bufferStart + shiftLength, tempBuffer, shiftOffset);
+    /* XXX At the momemnt !bufferData means it should be treated as VLAN. We
+     * should split the function and refactor. */
+    if (!bufferData) {
+        EthHdr *ethHdr = (EthHdr *)bufferStart;
+        /* If the frame is not VLAN make it a no op */
+        if (ethHdr->Type != ETH_TYPE_802_1PQ_NBO) {
+            return NDIS_STATUS_SUCCESS;
+        }
+    }
+    RtlMoveMemory(bufferStart + shiftLength, bufferStart, shiftOffset);
     NdisAdvanceNetBufferDataStart(curNb, shiftLength, FALSE, NULL);
 
     if (bufferData) {
@@ -1295,62 +1300,48 @@ OvsUpdateEthHeader(OvsForwardingContext *ovsFwdCtx,
 
 /*
  *----------------------------------------------------------------------------
- * OvsUpdateIPv4Header --
- *      Updates the IPv4 header in ovsFwdCtx.curNbl inline based on the
- *      specified key.
+ * OvsGetHeaderBySize --
+ *      Tries to retrieve a continuous buffer from 'ovsFwdCtx->curnbl' of size
+ *      'size'.
+ *      If the original buffer is insufficient it will, try to clone the net
+ *      buffer list and force the size.
+ *      Returns 'NULL' on failure or a pointer to the first byte of the data
+ *      in the first net buffer of the net buffer list 'nbl'.
  *----------------------------------------------------------------------------
  */
-static __inline NDIS_STATUS
-OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
-                    const struct ovs_key_ipv4 *ipAttr)
+PUINT8 OvsGetHeaderBySize(OvsForwardingContext *ovsFwdCtx,
+                          UINT32 size)
 {
     PNET_BUFFER curNb;
+    UINT32 mdlLen, packetLen;
     PMDL curMdl;
     ULONG curMdlOffset;
-    PUINT8 bufferStart;
-    UINT32 mdlLen, hdrSize, packetLen;
-    OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
-    NDIS_STATUS status;
-    IPHdr *ipHdr;
-    TCPHdr *tcpHdr = NULL;
-    UDPHdr *udpHdr = NULL;
+    PUINT8 start;
 
-    ASSERT(layers->value != 0);
-
-    /*
-     * Peek into the MDL to get a handle to the IP header and if required
-     * the TCP/UDP header as well. We check if the required headers are in one
-     * contiguous MDL, and if not, we copy them over to one MDL.
-     */
     curNb = NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl);
     ASSERT(curNb->Next == NULL);
     packetLen = NET_BUFFER_DATA_LENGTH(curNb);
     curMdl = NET_BUFFER_CURRENT_MDL(curNb);
-    NdisQueryMdl(curMdl, &bufferStart, &mdlLen, LowPagePriority);
-    if (!bufferStart) {
+    NdisQueryMdl(curMdl, &start, &mdlLen, LowPagePriority);
+    if (!start) {
         ovsActionStats.noResource++;
-        return NDIS_STATUS_RESOURCES;
+        return NULL;
     }
+
     curMdlOffset = NET_BUFFER_CURRENT_MDL_OFFSET(curNb);
     mdlLen -= curMdlOffset;
     ASSERT((INT)mdlLen >= 0);
 
-    if (layers->isTcp || layers->isUdp) {
-        hdrSize = layers->l4Offset +
-                  layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr);
-    } else {
-        hdrSize = layers->l3Offset + sizeof (*ipHdr);
-    }
-
     /* Count of number of bytes of valid data there are in the first MDL. */
     mdlLen = MIN(packetLen, mdlLen);
-    if (mdlLen < hdrSize) {
+    if (mdlLen < size) {
         PNET_BUFFER_LIST newNbl;
+        NDIS_STATUS status;
         newNbl = OvsPartialCopyNBL(ovsFwdCtx->switchContext, ovsFwdCtx->curNbl,
-                                   hdrSize, 0, TRUE /*copy NBL info*/);
+                                   size, 0, TRUE /*copy NBL info*/);
         if (!newNbl) {
             ovsActionStats.noCopiedNbl++;
-            return NDIS_STATUS_RESOURCES;
+            return NULL;
         }
         OvsCompleteNBLForwardingCtx(ovsFwdCtx,
                                     L"Complete after partial copy.");
@@ -1359,35 +1350,312 @@ OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
                                       newNbl, ovsFwdCtx->srcVportNo, 0,
                                       NET_BUFFER_LIST_SWITCH_FORWARDING_DETAIL(newNbl),
                                       NULL, &ovsFwdCtx->layers, FALSE);
+
         if (status != NDIS_STATUS_SUCCESS) {
             OvsCompleteNBLForwardingCtx(ovsFwdCtx,
                                         L"OVS-Dropped due to resources");
-            return NDIS_STATUS_RESOURCES;
+            return NULL;
         }
 
         curNb = NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl);
         ASSERT(curNb->Next == NULL);
         curMdl = NET_BUFFER_CURRENT_MDL(curNb);
-        NdisQueryMdl(curMdl, &bufferStart, &mdlLen, LowPagePriority);
+        NdisQueryMdl(curMdl, &start, &mdlLen, LowPagePriority);
         if (!curMdl) {
             ovsActionStats.noResource++;
-            return NDIS_STATUS_RESOURCES;
+            return NULL;
         }
         curMdlOffset = NET_BUFFER_CURRENT_MDL_OFFSET(curNb);
         mdlLen -= curMdlOffset;
-        ASSERT(mdlLen >= hdrSize);
+        ASSERT(mdlLen >= size);
     }
 
-    ipHdr = (IPHdr *)(bufferStart + curMdlOffset + layers->l3Offset);
+    return start + curMdlOffset;
+}
+
+/*
+ *----------------------------------------------------------------------------
+ * OvsUpdateUdpPorts --
+ *      Updates the UDP source or destination port in ovsFwdCtx.curNbl inline
+ *      based on the specified key.
+ *----------------------------------------------------------------------------
+ */
+NDIS_STATUS
+OvsUpdateUdpPorts(OvsForwardingContext *ovsFwdCtx,
+                  const struct ovs_key_udp *udpAttr)
+{
+    PUINT8 bufferStart;
+    OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
+    UDPHdr *udpHdr = NULL;
+
+    ASSERT(layers->value != 0);
+
+    if (!layers->isUdp) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_FAILURE;
+    }
+
+    bufferStart = OvsGetHeaderBySize(ovsFwdCtx, layers->l7Offset);
+    if (!bufferStart) {
+        return NDIS_STATUS_RESOURCES;
+    }
+
+    udpHdr = (UDPHdr *)(bufferStart + layers->l4Offset);
+    if (udpHdr->check) {
+        if (udpHdr->source != udpAttr->udp_src) {
+            udpHdr->check = ChecksumUpdate16(udpHdr->check, udpHdr->source,
+                                             udpAttr->udp_src);
+            udpHdr->source = udpAttr->udp_src;
+        }
+        if (udpHdr->dest != udpAttr->udp_dst) {
+            udpHdr->check = ChecksumUpdate16(udpHdr->check, udpHdr->dest,
+                                             udpAttr->udp_dst);
+            udpHdr->dest = udpAttr->udp_dst;
+        }
+    } else {
+        udpHdr->source = udpAttr->udp_src;
+        udpHdr->dest = udpAttr->udp_dst;
+    }
+
+    return NDIS_STATUS_SUCCESS;
+}
+
+/*
+ *----------------------------------------------------------------------------
+ * OvsUpdateTcpPorts --
+ *      Updates the TCP source or destination port in ovsFwdCtx.curNbl inline
+ *      based on the specified key.
+ *----------------------------------------------------------------------------
+ */
+NDIS_STATUS
+OvsUpdateTcpPorts(OvsForwardingContext *ovsFwdCtx,
+                  const struct ovs_key_tcp *tcpAttr)
+{
+    PUINT8 bufferStart;
+    OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
+    TCPHdr *tcpHdr = NULL;
+
+    ASSERT(layers->value != 0);
+
+    if (!layers->isTcp) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_FAILURE;
+    }
+
+    bufferStart = OvsGetHeaderBySize(ovsFwdCtx, layers->l7Offset);
+    if (!bufferStart) {
+        return NDIS_STATUS_RESOURCES;
+    }
+
+    tcpHdr = (TCPHdr *)(bufferStart + layers->l4Offset);
+
+    if (tcpHdr->source != tcpAttr->tcp_src) {
+        tcpHdr->check = ChecksumUpdate16(tcpHdr->check, tcpHdr->source,
+                                         tcpAttr->tcp_src);
+        tcpHdr->source = tcpAttr->tcp_src;
+    }
+    if (tcpHdr->dest != tcpAttr->tcp_dst) {
+        tcpHdr->check = ChecksumUpdate16(tcpHdr->check, tcpHdr->dest,
+                                         tcpAttr->tcp_dst);
+        tcpHdr->dest = tcpAttr->tcp_dst;
+    }
+
+    return NDIS_STATUS_SUCCESS;
+}
+
+/*
+ *----------------------------------------------------------------------------
+ * OvsUpdateAddressAndPort --
+ *      Updates the source/destination IP and port fields in
+ *      ovsFwdCtx.curNbl inline based on the specified key.
+ *----------------------------------------------------------------------------
+ */
+NDIS_STATUS
+OvsUpdateAddressAndPort(OvsForwardingContext *ovsFwdCtx,
+                        UINT32 newAddr, UINT16 newPort,
+                        BOOLEAN isSource, BOOLEAN isTx)
+{
+    PUINT8 bufferStart;
+    UINT32 hdrSize;
+    OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
+    IPHdr *ipHdr;
+    TCPHdr *tcpHdr = NULL;
+    UDPHdr *udpHdr = NULL;
+    UINT32 *addrField = NULL;
+    UINT16 *portField = NULL;
+    UINT16 *checkField = NULL;
+    BOOLEAN l4Offload = FALSE;
+    NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO csumInfo;
+
+    ASSERT(layers->value != 0);
+
+    if (layers->isTcp || layers->isUdp) {
+        hdrSize = layers->l4Offset +
+                  layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr);
+    } else {
+        hdrSize = layers->l3Offset + sizeof (*ipHdr);
+    }
+
+    bufferStart = OvsGetHeaderBySize(ovsFwdCtx, hdrSize);
+    if (!bufferStart) {
+        return NDIS_STATUS_RESOURCES;
+    }
+
+    ipHdr = (IPHdr *)(bufferStart + layers->l3Offset);
 
     if (layers->isTcp) {
-        tcpHdr = (TCPHdr *)(bufferStart + curMdlOffset + layers->l4Offset);
+        tcpHdr = (TCPHdr *)(bufferStart + layers->l4Offset);
     } else if (layers->isUdp) {
-        udpHdr = (UDPHdr *)(bufferStart + curMdlOffset + layers->l4Offset);
+        udpHdr = (UDPHdr *)(bufferStart + layers->l4Offset);
+    }
+
+    csumInfo.Value = NET_BUFFER_LIST_INFO(ovsFwdCtx->curNbl,
+                                          TcpIpChecksumNetBufferListInfo);
+    /*
+     * Adjust the IP header inline as dictated by the action, and also update
+     * the IP and the TCP checksum for the data modified.
+     *
+     * In the future, this could be optimized to make one call to
+     * ChecksumUpdate32(). Ignoring this for now, since for the most common
+     * case, we only update the TTL.
+     */
+
+    if (isSource) {
+        addrField = &ipHdr->saddr;
+        if (tcpHdr) {
+            portField = &tcpHdr->source;
+            checkField = &tcpHdr->check;
+            l4Offload = isTx ? (BOOLEAN)csumInfo.Transmit.TcpChecksum :
+                        ((BOOLEAN)csumInfo.Receive.TcpChecksumSucceeded ||
+                         (BOOLEAN)csumInfo.Receive.TcpChecksumFailed);
+        } else if (udpHdr) {
+            portField = &udpHdr->source;
+            checkField = &udpHdr->check;
+            l4Offload = isTx ? (BOOLEAN)csumInfo.Transmit.UdpChecksum :
+                        ((BOOLEAN)csumInfo.Receive.UdpChecksumSucceeded ||
+                         (BOOLEAN)csumInfo.Receive.UdpChecksumFailed);
+        }
+    } else {
+        addrField = &ipHdr->daddr;
+        if (tcpHdr) {
+            portField = &tcpHdr->dest;
+            checkField = &tcpHdr->check;
+        } else if (udpHdr) {
+            portField = &udpHdr->dest;
+            checkField = &udpHdr->check;
+        }
+    }
+    if (*addrField != newAddr) {
+        UINT32 oldAddr = *addrField;
+        if (checkField && *checkField != 0) {
+            if (l4Offload) {
+                /* Recompute IP pseudo checksum */
+                *checkField = ~(*checkField);
+                *checkField = ChecksumUpdate32(*checkField, oldAddr,
+                                               newAddr);
+                *checkField = ~(*checkField);
+            } else {
+                *checkField = ChecksumUpdate32(*checkField, oldAddr,
+                                               newAddr);
+            }
+        }
+        if (ipHdr->check != 0) {
+            ipHdr->check = ChecksumUpdate32(ipHdr->check, oldAddr,
+                                            newAddr);
+        }
+        *addrField = newAddr;
+    }
+
+    if (portField && *portField != newPort) {
+        if (checkField && !l4Offload) {
+            *checkField = ChecksumUpdate16(*checkField, *portField,
+                                           newPort);
+        }
+        *portField = newPort;
+    }
+    PNET_BUFFER_LIST curNbl = ovsFwdCtx->curNbl;
+    PNET_BUFFER_LIST newNbl = NULL;
+    if (layers->isTcp) {
+        UINT32 mss = OVSGetTcpMSS(curNbl);
+        if (mss) {
+            OVS_LOG_TRACE("l4Offset %d", layers->l4Offset);
+            newNbl = OvsTcpSegmentNBL(ovsFwdCtx->switchContext, curNbl, layers,
+                                      mss, 0, FALSE);
+            if (newNbl == NULL) {
+                OVS_LOG_ERROR("Unable to segment NBL");
+                return NDIS_STATUS_FAILURE;
+            }
+            /* Clear out LSO flags after this point */
+            NET_BUFFER_LIST_INFO(newNbl, TcpLargeSendNetBufferListInfo) = 0;
+        }
+    }
+    /* If we didn't split the packet above, make a copy now */
+    if (newNbl == NULL) {
+        csumInfo.Value = NET_BUFFER_LIST_INFO(curNbl,
+                                              TcpIpChecksumNetBufferListInfo);
+        OvsApplySWChecksumOnNB(layers, curNbl, &csumInfo);
+    }
+
+    if (newNbl) {
+        curNbl = newNbl;
+        OvsCompleteNBLForwardingCtx(ovsFwdCtx,
+                                    L"Complete after cloning NBL for encapsulation");
+        OvsInitForwardingCtx(ovsFwdCtx, ovsFwdCtx->switchContext,
+                             newNbl, ovsFwdCtx->srcVportNo, 0,
+                             NET_BUFFER_LIST_SWITCH_FORWARDING_DETAIL(newNbl),
+                             ovsFwdCtx->completionList,
+                             &ovsFwdCtx->layers, FALSE);
+        ovsFwdCtx->curNbl = newNbl;
+    }
+
+    NET_BUFFER_LIST_INFO(curNbl,
+                         TcpIpChecksumNetBufferListInfo) = 0;
+
+    return NDIS_STATUS_SUCCESS;
+}
+
+/*
+ *----------------------------------------------------------------------------
+ * OvsUpdateIPv4Header --
+ *      Updates the IPv4 header in ovsFwdCtx.curNbl inline based on the
+ *      specified key.
+ *----------------------------------------------------------------------------
+ */
+NDIS_STATUS
+OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
+                    const struct ovs_key_ipv4 *ipAttr)
+{
+    PUINT8 bufferStart;
+    UINT32 hdrSize;
+    OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
+    IPHdr *ipHdr;
+    TCPHdr *tcpHdr = NULL;
+    UDPHdr *udpHdr = NULL;
+
+    ASSERT(layers->value != 0);
+
+    if (layers->isTcp || layers->isUdp) {
+        hdrSize = layers->l4Offset +
+                  layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr);
+    } else {
+        hdrSize = layers->l3Offset + sizeof (*ipHdr);
+    }
+
+    bufferStart = OvsGetHeaderBySize(ovsFwdCtx, hdrSize);
+    if (!bufferStart) {
+        return NDIS_STATUS_RESOURCES;
+    }
+
+    ipHdr = (IPHdr *)(bufferStart + layers->l3Offset);
+
+    if (layers->isTcp) {
+        tcpHdr = (TCPHdr *)(bufferStart + layers->l4Offset);
+    } else if (layers->isUdp) {
+        udpHdr = (UDPHdr *)(bufferStart + layers->l4Offset);
     }
 
     /*
-     * Adjust the IP header inline as dictated by the action, nad also update
+     * Adjust the IP header inline as dictated by the action, and also update
      * the IP and the TCP checksum for the data modified.
      *
      * In the future, this could be optimized to make one call to
@@ -1479,14 +1747,24 @@ OvsExecuteSetAction(OvsForwardingContext *ovsFwdCtx,
     case OVS_KEY_ATTR_TUNNEL:
     {
         OvsIPv4TunnelKey tunKey;
+        tunKey.flow_hash = (uint16)(hash ? *hash : OvsHashFlow(key));
+        tunKey.dst_port = key->ipKey.l4.tpDst;
         NTSTATUS convertStatus = OvsTunnelAttrToIPv4TunnelKey((PNL_ATTR)a, &tunKey);
         status = SUCCEEDED(convertStatus) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
         ASSERT(status == NDIS_STATUS_SUCCESS);
-        tunKey.flow_hash = (uint16)(hash ? *hash : OvsHashFlow(key));
-        tunKey.dst_port = key->ipKey.l4.tpDst;
         RtlCopyMemory(&ovsFwdCtx->tunKey, &tunKey, sizeof ovsFwdCtx->tunKey);
         break;
     }
+
+    case OVS_KEY_ATTR_UDP:
+        status = OvsUpdateUdpPorts(ovsFwdCtx,
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_udp)));
+        break;
+
+    case OVS_KEY_ATTR_TCP:
+        status = OvsUpdateTcpPorts(ovsFwdCtx,
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_tcp)));
+        break;
 
     default:
         OVS_LOG_INFO("Unhandled attribute %#x", type);
@@ -1897,12 +2175,35 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
                 }
             }
 
-            status = OvsExecuteConntrackAction(ovsFwdCtx.curNbl, layers,
-                                               key, (const PNL_ATTR)a);
+            PNET_BUFFER_LIST oldNbl = ovsFwdCtx.curNbl;
+            status = OvsExecuteConntrackAction(&ovsFwdCtx, key,
+                                               (const PNL_ATTR)a);
             if (status != NDIS_STATUS_SUCCESS) {
-                OVS_LOG_ERROR("CT Action failed");
-                dropReason = L"OVS-conntrack action failed";
+                /* Pending NBLs are consumed by Defragmentation. */
+                if (status != NDIS_STATUS_PENDING) {
+                    OVS_LOG_ERROR("CT Action failed status = %lu", status);
+                    dropReason = L"OVS-conntrack action failed";
+                } else {
+                    /* We added a new pending NBL to be consumed later.
+                     * Report to the userspace that the action applied
+                     * successfully */
+                    status = NDIS_STATUS_SUCCESS;
+                }
                 goto dropit;
+            } else if (oldNbl != ovsFwdCtx.curNbl) {
+                /*
+                 * OvsIpv4Reassemble consumes the original NBL and creates a
+                 * new one and assigns it to the curNbl of ovsFwdCtx.
+                 */
+                OvsInitForwardingCtx(&ovsFwdCtx,
+                                     ovsFwdCtx.switchContext,
+                                     ovsFwdCtx.curNbl,
+                                     ovsFwdCtx.srcVportNo,
+                                     ovsFwdCtx.sendFlags,
+                                     NET_BUFFER_LIST_SWITCH_FORWARDING_DETAIL(ovsFwdCtx.curNbl),
+                                     ovsFwdCtx.completionList,
+                                     &ovsFwdCtx.layers, FALSE);
+                key->ipKey.nwFrag = OVS_FRAG_TYPE_NONE;
             }
             break;
         }
@@ -2072,6 +2373,7 @@ OvsDoRecirc(POVS_SWITCH_CONTEXT switchContext,
                          srcPortNo, 0,
                          NET_BUFFER_LIST_SWITCH_FORWARDING_DETAIL(curNbl),
                          completionList, layers, TRUE);
+    ASSERT(ovsFwdCtx.switchContext);
 
     flow = OvsLookupFlow(&ovsFwdCtx.switchContext->datapath, key, &hash, FALSE);
     if (flow) {
@@ -2117,8 +2419,8 @@ OvsDoRecirc(POVS_SWITCH_CONTEXT switchContext,
         }
         status = OvsCreateAndAddPackets(NULL, 0, OVS_PACKET_CMD_MISS,
                                         vport, key, ovsFwdCtx.curNbl,
-                                        vport->portId ==
-                                        switchContext->virtualExternalPortId,
+                                        OvsIsExternalVportByPortId(switchContext,
+                                            vport->portId),
                                         &ovsFwdCtx.layers,
                                         ovsFwdCtx.switchContext,
                                         &missedPackets, &num);
