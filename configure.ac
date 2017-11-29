@@ -28,12 +28,7 @@ AC_PROG_CPP
 AC_PROG_MKDIR_P
 AC_PROG_FGREP
 AC_PROG_EGREP
-
-AC_ARG_VAR([PERL], [path to Perl interpreter])
-AC_PATH_PROG([PERL], perl, no)
-if test "$PERL" = no; then
-   AC_MSG_ERROR([Perl interpreter not found in $PATH or $PERL.])
-fi
+PKG_PROG_PKG_CONFIG
 
 AM_MISSING_PROG([AUTOM4TE], [autom4te])
 
@@ -111,7 +106,7 @@ AC_CHECK_MEMBERS([struct mmsghdr.msg_len], [], [], [[#include <sys/socket.h>]])
 AC_CHECK_MEMBERS([struct sockaddr_in6.sin6_scope_id], [], [],
   [[#include <sys/socket.h>
 #include <netinet/in.h>]])
-AC_CHECK_FUNCS([mlockall strnlen getloadavg statvfs getmntent_r sendmmsg])
+AC_CHECK_FUNCS([mlockall strnlen getloadavg statvfs getmntent_r sendmmsg clock_gettime])
 AC_CHECK_HEADERS([mntent.h sys/statvfs.h linux/types.h linux/if_ether.h stdatomic.h])
 AC_CHECK_HEADERS([net/if_mib.h], [], [], [[#include <sys/types.h>
 #include <net/if.h>]])
