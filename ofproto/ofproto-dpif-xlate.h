@@ -1,4 +1,4 @@
-/* Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+/* Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,10 +38,28 @@ struct mcast_snooping;
 struct xlate_cache;
 
 struct xlate_out {
-    enum slow_path_reason slow; /* 0 if fast path may be used. */
+    /* Caching exceptions:
+     *
+     *   - If 'slow' is nonzero, the translation needs to be slow-pathed for
+     *     one reason or another.  (The particular value is only important for
+     *     explaining to an administrator why the flow is slow-pathed.)  This
+     *     makes OVS install a datapath flow with a send-to-userspace action.
+     *     Only on revalidation will the flow be replaced, if appropriate, by
+     *     one that does something else with the traffic.
+     *
+     *   - If 'avoid_caching' is true, then OVS won't install a datapath flow
+     *     at all.  If the reason to avoid caching goes away, the next upcall
+     *     will immediately install a correct datapath flow.
+     *
+     *   - Otherwise a datapath flow can be installed in the usual way.
+     *
+     * If 'avoid_caching' is true then 'slow' doesn't matter.
+     */
+    enum slow_path_reason slow;
+    bool avoid_caching;
 
-    struct recirc_refs recircs; /* Recirc action IDs on which references are
-                                 * held. */
+    /* Recirc action IDs on which references are held. */
+    struct recirc_refs recircs;
 };
 
 struct xlate_in {
@@ -83,27 +101,10 @@ struct xlate_in {
      * timeouts.) */
     uint16_t tcp_flags;
 
-    /* If nonnull, flow translation calls this function just before executing a
-     * resubmit or OFPP_TABLE action.  In addition, disables logging of traces
-     * when the recursion depth is exceeded.
-     *
-     * 'rule' is the rule being submitted into.  It will be null if the
-     * resubmit or OFPP_TABLE action didn't find a matching rule.
-     *
-     * 'indentation' is the resubmit recursion depth at time of invocation,
-     * suitable for indenting the output.
-     *
-     * This is normally null so the client has to set it manually after
-     * calling xlate_in_init(). */
-    void (*resubmit_hook)(struct xlate_in *, struct rule_dpif *rule,
-                          int indentation);
-
-    /* If nonnull, flow translation calls this function to report some
-     * significant decision, e.g. to explain why OFPP_NORMAL translation
-     * dropped a packet.  'indentation' is the resubmit recursion depth at time
-     * of invocation, suitable for indenting the output. */
-    void (*report_hook)(struct xlate_in *, int indentation,
-                        const char *format, va_list args);
+    /* Set to nonnull to trace the translation.  See ofproto-dpif-trace.h for
+     * more information.  This points to the list of oftrace nodes to which the
+     * translation should add tracing information (with oftrace_report()). */
+    struct ovs_list *trace;
 
     /* If nonnull, flow translation credits the specified statistics to each
      * rule reached through a resubmit or OFPP_TABLE action.
@@ -127,7 +128,6 @@ struct xlate_in {
      * These fields are really implementation details; the client doesn't care
      * about what they mean.  See the corresponding fields in xlate_ctx for
      * real documentation. */
-    int indentation;
     int depth;
     int resubmits;
 
@@ -155,6 +155,13 @@ struct xlate_in {
 
     /* The frozen state to be resumed, as returned by xlate_lookup(). */
     const struct frozen_state *frozen_state;
+
+    /* If true, the packet to be translated is from a packet_out msg. */
+    bool in_packet_out;
+
+    /* ofproto/trace maintains this queue to trace flows that require
+     * recirculation. */
+    struct ovs_list *recirc_queue;
 };
 
 void xlate_ofproto_set(struct ofproto_dpif *, const char *name, struct dpif *,
@@ -167,10 +174,12 @@ void xlate_ofproto_set(struct ofproto_dpif *, const char *name, struct dpif *,
 void xlate_remove_ofproto(struct ofproto_dpif *);
 
 void xlate_bundle_set(struct ofproto_dpif *, struct ofbundle *,
-                      const char *name, enum port_vlan_mode, int vlan,
-                      unsigned long *trunks, bool use_priority_tags,
+                      const char *name, enum port_vlan_mode,
+                      uint16_t qinq_ethtype, int vlan,
+                      unsigned long *trunks, unsigned long *cvlans,
+                      bool use_priority_tags,
                       const struct bond *, const struct lacp *,
-                      bool floodable);
+                      bool floodable, bool protected);
 void xlate_bundle_remove(struct ofbundle *);
 
 void xlate_ofport_set(struct ofproto_dpif *, struct ofbundle *,
@@ -202,6 +211,7 @@ enum xlate_error {
     XLATE_RECIRCULATION_CONFLICT,
     XLATE_TOO_MANY_MPLS_LABELS,
     XLATE_INVALID_TUNNEL_METADATA,
+    XLATE_UNSUPPORTED_PACKET_TYPE,
 };
 
 const char *xlate_strerror(enum xlate_error error);
@@ -223,6 +233,9 @@ int xlate_send_packet(const struct ofport_dpif *, bool oam, struct dp_packet *);
 void xlate_mac_learning_update(const struct ofproto_dpif *ofproto,
                                ofp_port_t in_port, struct eth_addr dl_src,
                                int vlan, bool is_grat_arp);
+
+void xlate_set_support(const struct ofproto_dpif *,
+                       const struct dpif_backer_support *);
 
 void xlate_txn_start(void);
 void xlate_txn_commit(void);

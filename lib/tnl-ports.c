@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2014, 2015, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,6 +51,7 @@ static struct ovs_list addr_list;
 
 struct tnl_port {
     odp_port_t port;
+    struct ovs_refcount ref_cnt;
     ovs_be16 tp_port;
     uint8_t nw_proto;
     char dev_name[IFNAMSIZ];
@@ -136,7 +137,7 @@ map_insert(odp_port_t port, struct eth_addr mac, struct in6_addr *addr,
         } else {
             match.wc.masks.ipv6_dst = in6addr_exact;
         }
-        match.wc.masks.vlan_tci = OVS_BE16_MAX;
+        match.wc.masks.vlans[0].tci = OVS_BE16_MAX;
         memset(&match.wc.masks.dl_dst, 0xff, sizeof (struct eth_addr));
 
         cls_rule_init(&p->cr, &match, 0); /* Priority == 0. */
@@ -194,8 +195,9 @@ tnl_port_map_insert(odp_port_t port, ovs_be16 tp_port,
 
     ovs_mutex_lock(&mutex);
     LIST_FOR_EACH(p, node, &port_list) {
-        if (tp_port == p->tp_port && p->nw_proto == nw_proto) {
-             goto out;
+        if (p->port == port && p->nw_proto == nw_proto) {
+            ovs_refcount_ref(&p->ref_cnt);
+            goto out;
         }
     }
 
@@ -204,6 +206,7 @@ tnl_port_map_insert(odp_port_t port, ovs_be16 tp_port,
     p->tp_port = tp_port;
     p->nw_proto = nw_proto;
     ovs_strlcpy(p->dev_name, dev_name, sizeof p->dev_name);
+    ovs_refcount_init(&p->ref_cnt);
     ovs_list_insert(&port_list, &p->node);
 
     LIST_FOR_EACH(ip_dev, node, &addr_list) {
@@ -252,33 +255,26 @@ ipdev_map_delete(struct ip_device *ip_dev, ovs_be16 tp_port, uint8_t nw_proto)
 }
 
 void
-tnl_port_map_delete(ovs_be16 tp_port, const char type[])
+tnl_port_map_delete(odp_port_t port, const char type[])
 {
     struct tnl_port *p, *next;
     struct ip_device *ip_dev;
-    bool found = false;
     uint8_t nw_proto;
 
     nw_proto = tnl_type_to_nw_proto(type);
 
     ovs_mutex_lock(&mutex);
     LIST_FOR_EACH_SAFE(p, next, node, &port_list) {
-        if (p->tp_port == tp_port && p->nw_proto == nw_proto) {
+        if (p->port == port && p->nw_proto == nw_proto &&
+                    ovs_refcount_unref_relaxed(&p->ref_cnt) == 1) {
             ovs_list_remove(&p->node);
-            found = true;
+            LIST_FOR_EACH(ip_dev, node, &addr_list) {
+                ipdev_map_delete(ip_dev, p->tp_port, p->nw_proto);
+            }
+            free(p);
             break;
         }
     }
-
-    if (!found) {
-        goto out;
-    }
-    LIST_FOR_EACH(ip_dev, node, &addr_list) {
-        ipdev_map_delete(ip_dev, p->tp_port, p->nw_proto);
-    }
-
-    free(p);
-out:
     ovs_mutex_unlock(&mutex);
 }
 
@@ -352,7 +348,8 @@ tnl_port_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
     }
 
     LIST_FOR_EACH(p, node, &port_list) {
-        ds_put_format(&ds, "%s (%"PRIu32")\n", p->dev_name, p->port);
+        ds_put_format(&ds, "%s (%"PRIu32") ref_cnt=%u\n", p->dev_name, p->port,
+                      ovs_refcount_read(&p->ref_cnt));
     }
 
 out:
@@ -412,7 +409,7 @@ insert_ipdev(const char dev_name[])
     struct netdev *dev;
     int error, n_in6;
 
-    error = netdev_open(dev_name, NULL, &dev);
+    error = netdev_open(dev_name, netdev_get_type_from_name(dev_name), &dev);
     if (error) {
         return;
     }
@@ -492,7 +489,7 @@ tnl_port_map_run(void)
         }
 
         /* Address changed. */
-        ovs_strlcpy(dev_name, ip_dev->dev_name, sizeof dev_name);
+        ovs_strlcpy_arrays(dev_name, ip_dev->dev_name);
         delete_ipdev(ip_dev);
         insert_ipdev(dev_name);
     }

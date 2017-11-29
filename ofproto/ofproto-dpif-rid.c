@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2014, 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -107,6 +107,19 @@ recirc_id_node_find(uint32_t id)
         : NULL;
 }
 
+bool
+recirc_id_node_find_and_ref(uint32_t id)
+{
+    struct recirc_id_node *rid_node =
+        CONST_CAST(struct recirc_id_node *, recirc_id_node_find(id));
+
+    if (!rid_node) {
+        return false;
+    }
+
+    return ovs_refcount_try_ref_rcu(&rid_node->refcount);
+}
+
 static uint32_t
 frozen_state_hash(const struct frozen_state *state)
 {
@@ -114,22 +127,13 @@ frozen_state_hash(const struct frozen_state *state)
 
     hash = uuid_hash(&state->ofproto_uuid);
     hash = hash_int(state->table_id, hash);
-    if (flow_tnl_dst_is_set(state->metadata.tunnel)) {
-        /* We may leave remainder bytes unhashed, but that is unlikely as
-         * the tunnel is not in the datapath format. */
-        hash = hash_bytes64((const uint64_t *) state->metadata.tunnel,
-                            flow_tnl_size(state->metadata.tunnel), hash);
-    }
+    hash = hash_bytes64((const uint64_t *) &state->metadata,
+                        sizeof state->metadata, hash);
     hash = hash_boolean(state->conntracked, hash);
-    hash = hash_bytes64((const uint64_t *) &state->metadata.metadata,
-                        sizeof state->metadata - sizeof state->metadata.tunnel,
-                        hash);
-    if (state->stack && state->n_stack) {
-        hash = hash_bytes64((const uint64_t *) state->stack,
-                            state->n_stack * sizeof *state->stack, hash);
+    if (state->stack && state->stack_size) {
+        hash = hash_bytes(state->stack, state->stack_size, hash);
     }
     hash = hash_int(state->mirrors, hash);
-    hash = hash_int(state->action_set_len, hash);
     if (state->action_set_len) {
         hash = hash_bytes64(ALIGNED_CAST(const uint64_t *, state->action_set),
                             state->action_set_len, hash);
@@ -146,11 +150,9 @@ frozen_state_equal(const struct frozen_state *a, const struct frozen_state *b)
 {
     return (a->table_id == b->table_id
             && uuid_equals(&a->ofproto_uuid, &b->ofproto_uuid)
-            && flow_tnl_equal(a->metadata.tunnel, b->metadata.tunnel)
-            && !memcmp(&a->metadata.metadata, &b->metadata.metadata,
-                       sizeof a->metadata - sizeof a->metadata.tunnel)
-            && a->n_stack == b->n_stack
-            && !memcmp(a->stack, b->stack, a->n_stack * sizeof *a->stack)
+            && !memcmp(&a->metadata, &b->metadata, sizeof a->metadata)
+            && a->stack_size == b->stack_size
+            && !memcmp(a->stack, b->stack, a->stack_size)
             && a->mirrors == b->mirrors
             && a->conntracked == b->conntracked
             && ofpacts_equal(a->ofpacts, a->ofpacts_len,
@@ -189,15 +191,11 @@ recirc_ref_equal(const struct frozen_state *target, uint32_t hash)
 }
 
 static void
-frozen_state_clone(struct frozen_state *new, const struct frozen_state *old,
-                   struct flow_tnl *tunnel)
+frozen_state_clone(struct frozen_state *new, const struct frozen_state *old)
 {
     *new = *old;
-    flow_tnl_copy__(tunnel, old->metadata.tunnel);
-    new->metadata.tunnel = tunnel;
-
-    new->stack = (new->n_stack
-                  ? xmemdup(new->stack, new->n_stack * sizeof *new->stack)
+    new->stack = (new->stack_size
+                  ? xmemdup(new->stack, new->stack_size)
                   : NULL);
     new->ofpacts = (new->ofpacts_len
                     ? xmemdup(new->ofpacts, new->ofpacts_len)
@@ -217,8 +215,7 @@ frozen_state_free(struct frozen_state *state)
 
 /* Allocate a unique recirculation id for the given set of flow metadata.
  * The ID space is 2^^32, so there should never be a situation in which all
- * the IDs are used up.  We loop until we find a free one.
- * hash is recomputed if it is passed in as 0. */
+ * the IDs are used up.  We loop until we find a free one. */
 static struct recirc_id_node *
 recirc_alloc_id__(const struct frozen_state *state, uint32_t hash)
 {
@@ -228,8 +225,7 @@ recirc_alloc_id__(const struct frozen_state *state, uint32_t hash)
 
     node->hash = hash;
     ovs_refcount_init(&node->refcount);
-    frozen_state_clone(CONST_CAST(struct frozen_state *, &node->state), state,
-                       &node->state_metadata_tunnel);
+    frozen_state_clone(CONST_CAST(struct frozen_state *, &node->state), state);
 
     ovs_mutex_lock(&mutex);
     for (;;) {
@@ -280,13 +276,15 @@ recirc_alloc_id_ctx(const struct frozen_state *state)
 uint32_t
 recirc_alloc_id(struct ofproto_dpif *ofproto)
 {
-    struct flow_tnl tunnel;
-    tunnel.ip_dst = htonl(0);
-    tunnel.ipv6_dst = in6addr_any;
     struct frozen_state state = {
         .table_id = TBL_INTERNAL,
-        .ofproto_uuid = *ofproto_dpif_get_uuid(ofproto),
-        .metadata = { .tunnel = &tunnel, .in_port = OFPP_NONE },
+        .ofproto_uuid = ofproto->uuid,
+        .metadata = {
+            .tunnel = {
+                .ip_dst = htonl(0),
+                .ipv6_dst = in6addr_any,
+            },
+            .in_port = OFPP_NONE },
     };
     return recirc_alloc_id__(&state, frozen_state_hash(&state))->id;
 }
@@ -338,9 +336,8 @@ recirc_free_ofproto(struct ofproto_dpif *ofproto, const char *ofproto_name)
 {
     struct recirc_id_node *n;
 
-    const struct uuid *ofproto_uuid = ofproto_dpif_get_uuid(ofproto);
     CMAP_FOR_EACH (n, metadata_node, &metadata_map) {
-        if (uuid_equals(&n->state.ofproto_uuid, ofproto_uuid)) {
+        if (uuid_equals(&n->state.ofproto_uuid, &ofproto->uuid)) {
             VLOG_ERR("recirc_id %"PRIu32
                      " left allocated when ofproto (%s)"
                      " is destructed", n->id, ofproto_name);

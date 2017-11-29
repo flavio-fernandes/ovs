@@ -72,7 +72,8 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
                            OvsIPv4TunnelKey *tunKey,
                            POVS_SWITCH_CONTEXT switchContext,
                            POVS_PACKET_HDR_INFO layers,
-                           PNET_BUFFER_LIST *newNbl)
+                           PNET_BUFFER_LIST *newNbl,
+                           POVS_FWD_INFO switchFwdInfo)
 {
     NTSTATUS status;
     OVS_FWD_INFO fwdInfo;
@@ -90,7 +91,7 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
     ULONG mss = 0;
     NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO csumInfo;
 
-    status = OvsLookupIPFwdInfo(tunKey->dst, &fwdInfo);
+    status = OvsLookupIPFwdInfo(tunKey->src, tunKey->dst, &fwdInfo);
     if (status != STATUS_SUCCESS) {
         OvsFwdIPHelperRequest(NULL, 0, tunKey, NULL, NULL, NULL);
         // return NDIS_STATUS_PENDING;
@@ -104,6 +105,8 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
         return NDIS_STATUS_FAILURE;
     }
 
+    RtlCopyMemory(switchFwdInfo->value, fwdInfo.value, sizeof fwdInfo.value);
+
     curNb = NET_BUFFER_LIST_FIRST_NB(curNbl);
     packetLength = NET_BUFFER_DATA_LENGTH(curNb);
 
@@ -115,7 +118,7 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
         if (mss) {
             OVS_LOG_TRACE("l4Offset %d", layers->l4Offset);
             *newNbl = OvsTcpSegmentNBL(switchContext, curNbl, layers,
-                                       mss, headRoom);
+                                       mss, headRoom, FALSE);
             if (*newNbl == NULL) {
                 OVS_LOG_ERROR("Unable to segment NBL");
                 return NDIS_STATUS_FAILURE;
@@ -154,8 +157,7 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
         }
 
         curMdl = NET_BUFFER_CURRENT_MDL(curNb);
-        bufferStart = (PUINT8)MmGetSystemAddressForMdlSafe(curMdl,
-                                                           LowPagePriority);
+        bufferStart = (PUINT8)OvsGetMdlWithLowPriority(curMdl);
         if (!bufferStart) {
             status = NDIS_STATUS_RESOURCES;
             goto ret_error;
@@ -198,7 +200,8 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
         /* UDP header */
         udpHdr = (UDPHdr *)((PCHAR)ipHdr + sizeof *ipHdr);
         udpHdr->source = htons(tunKey->flow_hash | MAXINT16);
-        udpHdr->dest = htons(vportGeneve->dstPort);
+        udpHdr->dest = tunKey->dst_port ? tunKey->dst_port :
+                                          htons(vportGeneve->dstPort);
         udpHdr->len = htons(NET_BUFFER_DATA_LENGTH(curNb) - headRoom +
                             sizeof *udpHdr + sizeof *geneveHdr +
                             tunKey->tunOptLen);
@@ -258,10 +261,16 @@ NDIS_STATUS OvsDecapGeneve(POVS_SWITCH_CONTEXT switchContext,
     PUINT8 bufferStart;
     PVOID optStart;
     NDIS_STATUS status;
+    OVS_PACKET_HDR_INFO layers = { 0 };
+
+    status = OvsExtractLayers(curNbl, &layers);
+    if (status != NDIS_STATUS_SUCCESS) {
+        return status;
+    }
 
     /* Check the length of the UDP payload */
     curNb = NET_BUFFER_LIST_FIRST_NB(curNbl);
-    tunnelSize = OvsGetGeneveTunHdrMinSize();
+    tunnelSize = OvsGetGeneveTunHdrSizeFromLayers(&layers);
     packetLength = NET_BUFFER_DATA_LENGTH(curNb);
     if (packetLength <= tunnelSize) {
         return NDIS_STATUS_INVALID_LENGTH;
@@ -282,7 +291,7 @@ NDIS_STATUS OvsDecapGeneve(POVS_SWITCH_CONTEXT switchContext,
     curNbl = *newNbl;
     curNb = NET_BUFFER_LIST_FIRST_NB(curNbl);
     curMdl = NET_BUFFER_CURRENT_MDL(curNb);
-    bufferStart = (PUINT8)MmGetSystemAddressForMdlSafe(curMdl, LowPagePriority)
+    bufferStart = (PUINT8)OvsGetMdlWithLowPriority(curMdl)
                   + NET_BUFFER_CURRENT_MDL_OFFSET(curNb);
     if (!bufferStart) {
         status = NDIS_STATUS_RESOURCES;
@@ -291,13 +300,13 @@ NDIS_STATUS OvsDecapGeneve(POVS_SWITCH_CONTEXT switchContext,
 
     ethHdr = (EthHdr *)bufferStart;
     /* XXX: Handle IP options. */
-    ipHdr = (IPHdr *)((PCHAR)ethHdr + sizeof *ethHdr);
+    ipHdr = (IPHdr *)(bufferStart + layers.l3Offset);
     tunKey->src = ipHdr->saddr;
     tunKey->dst = ipHdr->daddr;
     tunKey->tos = ipHdr->tos;
     tunKey->ttl = ipHdr->ttl;
     tunKey->pad = 0;
-    udpHdr = (UDPHdr *)((PCHAR)ipHdr + sizeof *ipHdr);
+    udpHdr = (UDPHdr *)(bufferStart + layers.l4Offset);
 
     /* Validate if NIC has indicated checksum failure. */
     status = OvsValidateUDPChecksum(curNbl, udpHdr->check == 0);
@@ -308,7 +317,7 @@ NDIS_STATUS OvsDecapGeneve(POVS_SWITCH_CONTEXT switchContext,
     /* Calculate and verify UDP checksum if NIC didn't do it. */
     if (udpHdr->check != 0) {
         status = OvsCalculateUDPChecksum(curNbl, curNb, ipHdr, udpHdr,
-                                         packetLength);
+                                         packetLength, &layers);
         tunKey->flags |= OVS_TNL_F_CSUM;
         if (status != NDIS_STATUS_SUCCESS) {
             goto dropNbl;
@@ -320,10 +329,10 @@ NDIS_STATUS OvsDecapGeneve(POVS_SWITCH_CONTEXT switchContext,
         status = STATUS_NDIS_INVALID_PACKET;
         goto dropNbl;
     }
-    tunKey->flags = OVS_TNL_F_KEY;
-    if (geneveHdr->oam) {
-        tunKey->flags |= OVS_TNL_F_OAM;
-    }
+    /* Update tunnelKey flags. */
+    tunKey->flags = OVS_TNL_F_KEY | (geneveHdr->oam ? OVS_TNL_F_OAM : 0) |
+                    (geneveHdr->critical ? OVS_TNL_F_CRT_OPT : 0);
+
     tunKey->tunnelId = GENEVE_VNI_TO_TUNNELID(geneveHdr->vni);
     tunKey->tunOptLen = (uint8)geneveHdr->optLen * 4;
     if (tunKey->tunOptLen > TUN_OPT_MAX_LEN ||
@@ -345,6 +354,7 @@ NDIS_STATUS OvsDecapGeneve(POVS_SWITCH_CONTEXT switchContext,
             memcpy(TunnelKeyGetOptions(tunKey), optStart, tunKey->tunOptLen);
         }
         NdisAdvanceNetBufferDataStart(curNb, tunKey->tunOptLen, FALSE, NULL);
+        tunKey->flags |= OVS_TNL_F_GENEVE_OPT;
     }
 
     return NDIS_STATUS_SUCCESS;

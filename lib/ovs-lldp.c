@@ -42,7 +42,7 @@
 #include "netdev.h"
 #include "openvswitch/types.h"
 #include "packets.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "smap.h"
 #include "unixctl.h"
 #include "util.h"
@@ -797,8 +797,6 @@ lldp_create(const struct netdev *netdev,
     lchassis->c_id = &mac->ea[0];
 
     ovs_list_init(&lchassis->c_mgmt);
-    lchassis->c_ttl = lldp->lldpd->g_config.c_tx_interval *
-                      lldp->lldpd->g_config.c_tx_hold;
     lchassis->c_ttl = LLDP_CHASSIS_TTL;
     lldpd_assign_cfg_to_protocols(lldp->lldpd);
     ovs_list_init(&lldp->lldpd->g_chassis);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@
 extern char *program_name;
 
 #define __ARRAY_SIZE_NOCHECK(ARRAY) (sizeof(ARRAY) / sizeof((ARRAY)[0]))
-#ifdef __GNUC__
+#if __GNUC__ && !defined(__cplusplus)
 /* return 0 for array types, 1 otherwise */
 #define __ARRAY_CHECK(ARRAY) 					\
     !__builtin_types_compatible_p(typeof(ARRAY), typeof(&ARRAY[0]))
@@ -41,6 +41,19 @@ extern char *program_name;
 #define __ARRAY_SIZE(ARRAY)					\
     __builtin_choose_expr(__ARRAY_CHECK(ARRAY),			\
         __ARRAY_SIZE_NOCHECK(ARRAY), __ARRAY_FAIL(ARRAY))
+#elif defined(__cplusplus)
+#define __ARRAY_SIZE(ARRAY) ( \
+   0 * sizeof(reinterpret_cast<const ::Bad_arg_to_ARRAY_SIZE *>(ARRAY)) + \
+   0 * sizeof(::Bad_arg_to_ARRAY_SIZE::check_type((ARRAY), &(ARRAY))) + \
+   sizeof(ARRAY) / sizeof((ARRAY)[0]) )
+
+struct Bad_arg_to_ARRAY_SIZE {
+   class Is_pointer;
+   class Is_array {};
+   template <typename T>
+   static Is_pointer check_type(const T *, const T * const *);
+   static Is_array check_type(const void *, const void *);
+};
 #else
 #define __ARRAY_SIZE(ARRAY) __ARRAY_SIZE_NOCHECK(ARRAY)
 #endif
@@ -50,6 +63,12 @@ extern char *program_name;
  * Being wrong hurts performance but not correctness. */
 #define CACHE_LINE_SIZE 64
 BUILD_ASSERT_DECL(IS_POW2(CACHE_LINE_SIZE));
+
+/* Cacheline marking is typically done using zero-sized array.
+ * However MSVC doesn't like zero-sized array in struct/union.
+ * C4200: https://msdn.microsoft.com/en-us/library/79wf64bc.aspx
+ */
+typedef uint8_t OVS_CACHE_LINE_MARKER[1];
 
 static inline void
 ovs_prefetch_range(const void *start, size_t size)
@@ -112,6 +131,9 @@ extern "C" {
 const char *get_subprogram_name(void);
     void set_subprogram_name(const char *);
 
+unsigned int get_page_size(void);
+long long int get_boot_time(void);
+
 void ovs_print_version(uint8_t min_ofp, uint8_t max_ofp);
 
 OVS_NO_RETURN void out_of_memory(void);
@@ -135,6 +157,34 @@ void free_cacheline(void *);
 void ovs_strlcpy(char *dst, const char *src, size_t size);
 void ovs_strzcpy(char *dst, const char *src, size_t size);
 
+/* The C standards say that neither the 'dst' nor 'src' argument to
+ * memcpy() may be null, even if 'n' is zero.  This wrapper tolerates
+ * the null case. */
+static inline void
+nullable_memcpy(void *dst, const void *src, size_t n)
+{
+    if (n) {
+        memcpy(dst, src, n);
+    }
+}
+
+/* The C standards say that the 'dst' argument to memset may not be
+ * null, even if 'n' is zero.  This wrapper tolerates the null case. */
+static inline void
+nullable_memset(void *dst, int c, size_t n)
+{
+    if (n) {
+        memset(dst, c, n);
+    }
+}
+
+/* Copy string SRC to DST, but no more bytes than the shorter of DST or SRC.
+ * DST and SRC must both be char arrays, not pointers, and with GNU C, this
+ * raises a compiler error if either DST or SRC is a pointer instead of an
+ * array. */
+#define ovs_strlcpy_arrays(DST, SRC) \
+    ovs_strlcpy(DST, SRC, MIN(ARRAY_SIZE(DST), ARRAY_SIZE(SRC)))
+
 OVS_NO_RETURN void ovs_abort(int err_no, const char *format, ...)
     OVS_PRINTF_FORMAT(2, 3);
 OVS_NO_RETURN void ovs_abort_valist(int err_no, const char *format, va_list)
@@ -153,7 +203,10 @@ void ovs_hex_dump(FILE *, const void *, size_t, uintptr_t offset, bool ascii);
 bool str_to_int(const char *, int base, int *);
 bool str_to_long(const char *, int base, long *);
 bool str_to_llong(const char *, int base, long long *);
+bool str_to_llong_with_tail(const char *, char **, int base, long long *);
 bool str_to_uint(const char *, int base, unsigned int *);
+bool str_to_ullong(const char *, int base, unsigned long long *);
+bool str_to_llong_range(const char *, int base, long long *, long long *);
 
 bool ovs_scan(const char *s, const char *format, ...) OVS_SCANF_FORMAT(2, 3);
 bool ovs_scan_len(const char *s, int *n, const char *format, ...);
@@ -378,6 +431,7 @@ static inline ovs_be32 be32_prefix_mask(int plen)
 
 bool is_all_zeros(const void *, size_t);
 bool is_all_ones(const void *, size_t);
+bool is_all_byte(const void *, size_t, uint8_t byte);
 void bitwise_copy(const void *src, unsigned int src_len, unsigned int src_ofs,
                   void *dst, unsigned int dst_len, unsigned int dst_ofs,
                   unsigned int n_bits);
@@ -449,6 +503,7 @@ ovs_u128_and(const ovs_u128 a, const ovs_u128 b)
 }
 
 void xsleep(unsigned int seconds);
+void xnanosleep(uint64_t nanoseconds);
 
 bool is_stdout_a_tty(void);
 

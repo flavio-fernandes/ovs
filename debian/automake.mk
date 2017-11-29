@@ -7,6 +7,8 @@ EXTRA_DIST += \
 	debian/copyright.in \
 	debian/dkms.conf.in \
 	debian/dirs \
+	debian/libopenvswitch.install \
+	debian/libopenvswitch-dev.install \
 	debian/openvswitch-common.dirs \
 	debian/openvswitch-common.docs \
 	debian/openvswitch-common.install \
@@ -18,7 +20,6 @@ EXTRA_DIST += \
 	debian/openvswitch-datapath-source.copyright \
 	debian/openvswitch-datapath-source.dirs \
 	debian/openvswitch-datapath-source.install \
-	debian/openvswitch-dev.install \
 	debian/openvswitch-pki.dirs \
 	debian/openvswitch-pki.postinst \
 	debian/openvswitch-pki.postrm \
@@ -89,12 +90,12 @@ check-debian-changelog-version:
 ALL_LOCAL += check-debian-changelog-version
 DIST_HOOKS += check-debian-changelog-version
 
-$(srcdir)/debian/copyright: AUTHORS debian/copyright.in
+$(srcdir)/debian/copyright: AUTHORS.rst debian/copyright.in
 	$(AM_V_GEN) \
 	{ sed -n -e '/%AUTHORS%/q' -e p < $(srcdir)/debian/copyright.in;   \
-	  sed '1,/^$$/d' $(srcdir)/AUTHORS |				   \
+	  sed '34,/^$$/d' $(srcdir)/AUTHORS.rst |			   \
 		sed -n -e '/^$$/q' -e 's/^/  /p';			   \
-	  sed -e '1,/%AUTHORS%/d' $(srcdir)/debian/copyright.in;	   \
+	  sed -e '34,/%AUTHORS%/d' $(srcdir)/debian/copyright.in;	   \
 	} > $@
 
-DISTCLEANFILES += debian/copyright
+CLEANFILES += debian/copyright

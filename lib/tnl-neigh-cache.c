@@ -34,7 +34,7 @@
 #include "netdev.h"
 #include "ovs-thread.h"
 #include "packets.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "seq.h"
 #include "socket-util.h"
 #include "timeval.h"
@@ -126,8 +126,8 @@ tnl_neigh_set__(const char name[IFNAMSIZ], const struct in6_addr *dst,
             return;
         }
         tnl_neigh_delete(neigh);
-        seq_change(tnl_conf_seq);
     }
+    seq_change(tnl_conf_seq);
 
     neigh = xmalloc(sizeof *neigh);
 

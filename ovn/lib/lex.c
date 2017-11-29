@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -562,7 +562,7 @@ lex_parse_id(const char *p, enum lex_type type, struct lex_token *token)
 }
 
 static const char *
-lex_parse_macro(const char *p, struct lex_token *token)
+lex_parse_addr_set(const char *p, struct lex_token *token)
 {
     p++;
     if (!lex_is_id1(*p)) {
@@ -744,7 +744,7 @@ next:
         break;
 
     case '$':
-        p = lex_parse_macro(p, token);
+        p = lex_parse_addr_set(p, token);
         break;
 
     case ':':
@@ -753,7 +753,8 @@ next:
             p++;
             break;
         }
-        /* IPv6 address beginning with "::".  Fall through. */
+        /* IPv6 address beginning with "::". */
+        /* fall through */
     case '0': case '1': case '2': case '3': case '4':
     case '5': case '6': case '7': case '8': case '9':
         p = lex_parse_integer(p, token);
@@ -856,7 +857,9 @@ lexer_match(struct lexer *lexer, enum lex_type type)
 bool
 lexer_force_match(struct lexer *lexer, enum lex_type t)
 {
-    if (lexer_match(lexer, t)) {
+    if (t == LEX_T_END) {
+        return lexer_force_end(lexer);
+    } else if (lexer_match(lexer, t)) {
         return true;
     } else {
         struct lex_token token = { .type = t };
@@ -915,11 +918,14 @@ lexer_force_int(struct lexer *lexer, int *value)
     return ok;
 }
 
-void
+bool
 lexer_force_end(struct lexer *lexer)
 {
-    if (lexer->token.type != LEX_T_END) {
+    if (lexer->token.type == LEX_T_END) {
+        return true;
+    } else {
         lexer_syntax_error(lexer, "expecting end of input");
+        return false;
     }
 }
 

@@ -17,6 +17,10 @@
 #ifndef __OVS_STT_H_
 #define __OVS_STT_H_ 1
 
+#include "IpHelper.h"
+
+typedef union _OVS_FWD_INFO *POVS_FWD_INFO;
+
 #define STT_TCP_PORT 7471
 #define STT_TCP_PORT_NBO 0x2f1d
 
@@ -91,7 +95,8 @@ NDIS_STATUS OvsEncapStt(POVS_VPORT_ENTRY vport,
                         OvsIPv4TunnelKey *tunKey,
                         POVS_SWITCH_CONTEXT switchContext,
                         POVS_PACKET_HDR_INFO layers,
-                        PNET_BUFFER_LIST *newNbl);
+                        PNET_BUFFER_LIST *newNbl,
+                        POVS_FWD_INFO switchFwdInfo);
 
 
 NDIS_STATUS OvsDecapStt(POVS_SWITCH_CONTEXT switchContext,
@@ -108,6 +113,12 @@ OvsGetSttTunHdrSize(VOID)
 {
     return sizeof (EthHdr) + sizeof(IPHdr) + sizeof(TCPHdr) +
                   STT_HDR_LEN;
+}
+
+static __inline UINT32
+OvsGetSttTunHdrSizeFromLayers(POVS_PACKET_HDR_INFO layers)
+{
+    return layers->l7Offset + STT_HDR_LEN;
 }
 
 #endif /*__OVS_STT_H_ */

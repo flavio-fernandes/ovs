@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@
 #include <errno.h>
 #include <getopt.h>
 #include <sys/wait.h>
+
 #include "command-line.h"
+#include "dp-packet.h"
 #include "fatal-signal.h"
 #include "flow.h"
 #include "openvswitch/dynamic-string.h"
@@ -30,7 +32,7 @@
 #include "ovn/expr.h"
 #include "ovn/lex.h"
 #include "ovn/lib/logical-fields.h"
-#include "ovn/lib/ovn-dhcp.h"
+#include "ovn/lib/ovn-l7.h"
 #include "ovs-thread.h"
 #include "ovstest.h"
 #include "openvswitch/shash.h"
@@ -153,7 +155,8 @@ create_symtab(struct shash *symtab)
 }
 
 static void
-create_dhcp_opts(struct hmap *dhcp_opts, struct hmap *dhcpv6_opts)
+create_gen_opts(struct hmap *dhcp_opts, struct hmap *dhcpv6_opts,
+                struct hmap *nd_ra_opts)
 {
     hmap_init(dhcp_opts);
     dhcp_opt_add(dhcp_opts, "offerip", 0, "ipv4");
@@ -185,12 +188,16 @@ create_dhcp_opts(struct hmap *dhcp_opts, struct hmap *dhcpv6_opts)
     dhcp_opt_add(dhcpv6_opts, "ia_addr",  5, "ipv6");
     dhcp_opt_add(dhcpv6_opts, "dns_server",  23, "ipv6");
     dhcp_opt_add(dhcpv6_opts, "domain_search",  24, "str");
+
+    /* IPv6 ND RA options. */
+    hmap_init(nd_ra_opts);
+    nd_ra_opts_init(nd_ra_opts);
 }
 
 static void
-create_macros(struct shash *macros)
+create_addr_sets(struct shash *addr_sets)
 {
-    shash_init(macros);
+    shash_init(addr_sets);
 
     static const char *const addrs1[] = {
         "10.0.0.1", "10.0.0.2", "10.0.0.3",
@@ -201,10 +208,12 @@ create_macros(struct shash *macros)
     static const char *const addrs3[] = {
         "00:00:00:00:00:01", "00:00:00:00:00:02", "00:00:00:00:00:03",
     };
+    static const char *const addrs4[] = { NULL };
 
-    expr_macros_add(macros, "set1", addrs1, 3);
-    expr_macros_add(macros, "set2", addrs2, 3);
-    expr_macros_add(macros, "set3", addrs3, 3);
+    expr_addr_sets_add(addr_sets, "set1", addrs1, 3);
+    expr_addr_sets_add(addr_sets, "set2", addrs2, 3);
+    expr_addr_sets_add(addr_sets, "set3", addrs3, 3);
+    expr_addr_sets_add(addr_sets, "set4", addrs4, 0);
 }
 
 static bool
@@ -219,16 +228,27 @@ lookup_port_cb(const void *ports_, const char *port_name, unsigned int *portp)
     return true;
 }
 
+static bool
+is_chassis_resident_cb(const void *ports_, const char *port_name)
+{
+    const struct simap *ports = ports_;
+    const struct simap_node *node = simap_find(ports, port_name);
+    if (node) {
+        return true;
+    }
+    return false;
+}
+
 static void
 test_parse_expr__(int steps)
 {
     struct shash symtab;
-    struct shash macros;
+    struct shash addr_sets;
     struct simap ports;
     struct ds input;
 
     create_symtab(&symtab);
-    create_macros(&macros);
+    create_addr_sets(&addr_sets);
 
     simap_init(&ports);
     simap_put(&ports, "eth0", 5);
@@ -240,13 +260,13 @@ test_parse_expr__(int steps)
         struct expr *expr;
         char *error;
 
-        expr = expr_parse_string(ds_cstr(&input), &symtab, &macros, &error);
+        expr = expr_parse_string(ds_cstr(&input), &symtab, &addr_sets, &error);
         if (!error && steps > 0) {
             expr = expr_annotate(expr, &symtab, &error);
         }
         if (!error) {
             if (steps > 1) {
-                expr = expr_simplify(expr);
+                expr = expr_simplify(expr, is_chassis_resident_cb, &ports);
             }
             if (steps > 2) {
                 expr = expr_normalize(expr);
@@ -277,8 +297,8 @@ test_parse_expr__(int steps)
     simap_destroy(&ports);
     expr_symtab_destroy(&symtab);
     shash_destroy(&symtab);
-    expr_macros_destroy(&macros);
-    shash_destroy(&macros);
+    expr_addr_sets_destroy(&addr_sets);
+    shash_destroy(&addr_sets);
 }
 
 static void
@@ -361,7 +381,6 @@ test_evaluate_expr(struct ovs_cmdl_context *ctx)
     ds_init(&input);
     while (!ds_get_test_line(&input, stdin)) {
         struct expr *expr;
-        char *error;
 
         expr = expr_parse_string(ds_cstr(&input), &symtab, NULL, &error);
         if (!error) {
@@ -791,6 +810,13 @@ free_rule(struct test_rule *test_rule)
     free(test_rule);
 }
 
+static bool
+tree_shape_is_chassis_resident_cb(const void *c_aux OVS_UNUSED,
+                                  const char *port_name OVS_UNUSED)
+{
+    return true;
+}
+
 static int
 test_tree_shape_exhaustively(struct expr *expr, struct shash *symtab,
                              struct expr *terminals[], int n_terminals,
@@ -837,7 +863,9 @@ test_tree_shape_exhaustively(struct expr *expr, struct shash *symtab,
                 exit(EXIT_FAILURE);
             }
         } else if (operation >= OP_SIMPLIFY) {
-            modified  = expr_simplify(expr_clone(expr));
+            modified = expr_simplify(expr_clone(expr),
+                                     tree_shape_is_chassis_resident_cb,
+                                     NULL);
             ovs_assert(expr_honors_invariants(modified));
 
             if (operation >= OP_NORMALIZE) {
@@ -962,7 +990,7 @@ wait_pid(pid_t *pids, int *n)
     int status;
     pid_t pid;
 
-    pid = waitpid(WAIT_ANY, &status, 0);
+    pid = waitpid(-1, &status, 0);
     if (pid < 0) {
         ovs_fatal(errno, "waitpid failed");
     } else if (WIFEXITED(status)) {
@@ -1120,6 +1148,47 @@ test_exhaustive(struct ovs_cmdl_context *ctx OVS_UNUSED)
     expr_symtab_destroy(&symtab);
     shash_destroy(&symtab);
 }
+
+static void
+test_expr_to_packets(struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    struct shash symtab;
+    struct ds input;
+
+    create_symtab(&symtab);
+
+    ds_init(&input);
+    while (!ds_get_test_line(&input, stdin)) {
+        struct flow uflow;
+        char *error = expr_parse_microflow(ds_cstr(&input), &symtab, NULL,
+                                           lookup_atoi_cb, NULL, &uflow);
+        if (error) {
+            puts(error);
+            free(error);
+            continue;
+        }
+
+        uint64_t packet_stub[128 / 8];
+        struct dp_packet packet;
+        dp_packet_use_stub(&packet, packet_stub, sizeof packet_stub);
+        flow_compose(&packet, &uflow, 0);
+
+        struct ds output = DS_EMPTY_INITIALIZER;
+        const uint8_t *buf = dp_packet_data(&packet);
+        for (int i = 0; i < dp_packet_size(&packet); i++) {
+            uint8_t val = buf[i];
+            ds_put_format(&output, "%02"PRIx8, val);
+        }
+        puts(ds_cstr(&output));
+        ds_destroy(&output);
+
+        dp_packet_uninit(&packet);
+    }
+    ds_destroy(&input);
+
+    expr_symtab_destroy(&symtab);
+    shash_destroy(&symtab);
+}
 
 /* Actions. */
 
@@ -1129,12 +1198,13 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
     struct shash symtab;
     struct hmap dhcp_opts;
     struct hmap dhcpv6_opts;
-    struct simap ports, ct_zones;
+    struct hmap nd_ra_opts;
+    struct simap ports;
     struct ds input;
     bool ok = true;
 
     create_symtab(&symtab);
-    create_dhcp_opts(&dhcp_opts, &dhcpv6_opts);
+    create_gen_opts(&dhcp_opts, &dhcpv6_opts, &nd_ra_opts);
 
     /* Initialize group ids. */
     struct group_table group_table;
@@ -1147,7 +1217,6 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
     simap_put(&ports, "eth0", 5);
     simap_put(&ports, "eth1", 6);
     simap_put(&ports, "LOCAL", ofp_to_u16(OFPP_LOCAL));
-    simap_init(&ct_zones);
 
     ds_init(&input);
     while (!ds_get_test_line(&input, stdin)) {
@@ -1163,7 +1232,8 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
             .symtab = &symtab,
             .dhcp_opts = &dhcp_opts,
             .dhcpv6_opts = &dhcpv6_opts,
-            .n_tables = 16,
+            .nd_ra_opts = &nd_ra_opts,
+            .n_tables = 24,
             .cur_ltable = 10,
         };
         error = ovnacts_parse_string(ds_cstr(&input), &pp, &ovnacts, &prereqs);
@@ -1181,10 +1251,11 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
                 .lookup_port = lookup_port_cb,
                 .aux = &ports,
                 .is_switch = true,
-                .ct_zones = &ct_zones,
                 .group_table = &group_table,
 
-                .first_ptable = 16,
+                .pipeline = OVNACT_P_INGRESS,
+                .ingress_ptable = 8,
+                .egress_ptable = 40,
                 .output_ptable = 64,
                 .mac_bind_ptable = 65,
             };
@@ -1192,7 +1263,7 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
             ofpbuf_init(&ofpacts, 0);
             ovnacts_encode(ovnacts.data, ovnacts.size, &ep, &ofpacts);
             struct ds ofpacts_s = DS_EMPTY_INITIALIZER;
-            ofpacts_format(ofpacts.data, ofpacts.size, &ofpacts_s);
+            ofpacts_format(ofpacts.data, ofpacts.size, NULL, &ofpacts_s);
             printf("    encodes as %s\n", ds_cstr(&ofpacts_s));
             ds_destroy(&ofpacts_s);
             ofpbuf_uninit(&ofpacts);
@@ -1242,12 +1313,11 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
     ds_destroy(&input);
 
     simap_destroy(&ports);
-    simap_destroy(&ct_zones);
     expr_symtab_destroy(&symtab);
     shash_destroy(&symtab);
     dhcp_opts_destroy(&dhcp_opts);
     dhcp_opts_destroy(&dhcpv6_opts);
-
+    nd_ra_opts_destroy(&nd_ra_opts);
     exit(ok ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
@@ -1291,9 +1361,13 @@ annotate-expr\n\
 simplify-expr\n\
 normalize-expr\n\
 expr-to-flows\n\
-  Parses OVN expressions from stdin and print them back on stdout after\n\
+  Parses OVN expressions from stdin and prints them back on stdout after\n\
   differing degrees of analysis.  Available fields are based on packet\n\
   headers.\n\
+\n\
+expr-to-packets\n\
+  Parses OVN expressions from stdin and prints out matching packets in\n\
+  hexadecimal on stdout.\n\
 \n\
 evaluate-expr MICROFLOW\n\
   Parses OVN expressions from stdin and evaluates them against the flow\n\
@@ -1424,6 +1498,7 @@ test_ovn_main(int argc, char *argv[])
 
         case 'h':
             usage();
+            /* fall through */
 
         case '?':
             exit(1);
@@ -1451,6 +1526,7 @@ test_ovn_main(int argc, char *argv[])
         {"composition", NULL, 1, 1, test_composition, OVS_RO},
         {"tree-shape", NULL, 1, 1, test_tree_shape, OVS_RO},
         {"exhaustive", NULL, 1, 1, test_exhaustive, OVS_RO},
+        {"expr-to-packets", NULL, 0, 0, test_expr_to_packets, OVS_RO},
 
         /* Actions. */
         {"parse-actions", NULL, 0, 0, test_parse_actions, OVS_RO},

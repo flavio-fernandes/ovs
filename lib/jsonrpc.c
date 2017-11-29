@@ -27,7 +27,7 @@
 #include "openvswitch/list.h"
 #include "openvswitch/ofpbuf.h"
 #include "ovs-thread.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "reconnect.h"
 #include "stream.h"
 #include "timeval.h"
@@ -826,7 +826,7 @@ jsonrpc_session_open_unreliably(struct jsonrpc *jsonrpc, uint8_t dscp)
     s->rpc = jsonrpc;
     s->stream = NULL;
     s->pstream = NULL;
-    s->seqno = 0;
+    s->seqno = 1;
 
     return s;
 }
@@ -883,7 +883,6 @@ jsonrpc_session_connect(struct jsonrpc_session *s)
     if (error) {
         reconnect_connect_failed(s->reconnect, time_msec(), error);
     }
-    s->seqno++;
 }
 
 void
@@ -903,6 +902,7 @@ jsonrpc_session_run(struct jsonrpc_session *s)
             }
             reconnect_connected(s->reconnect, time_msec());
             s->rpc = jsonrpc_open(stream);
+            s->seqno++;
         } else if (error != EAGAIN) {
             reconnect_listen_error(s->reconnect, time_msec(), error);
             pstream_close(s->pstream);
@@ -943,6 +943,7 @@ jsonrpc_session_run(struct jsonrpc_session *s)
             reconnect_connected(s->reconnect, time_msec());
             s->rpc = jsonrpc_open(s->stream);
             s->stream = NULL;
+            s->seqno++;
         } else if (error != EAGAIN) {
             reconnect_connect_failed(s->reconnect, time_msec(), error);
             stream_close(s->stream);
@@ -1003,6 +1004,16 @@ const char *
 jsonrpc_session_get_name(const struct jsonrpc_session *s)
 {
     return reconnect_get_name(s->reconnect);
+}
+
+const char *
+jsonrpc_session_get_id(const struct jsonrpc_session *s)
+{
+    if (s->rpc && s->rpc->stream) {
+        return stream_get_peer_id(s->rpc->stream);
+    } else {
+        return NULL;
+    }
 }
 
 /* Always takes ownership of 'msg', regardless of success. */

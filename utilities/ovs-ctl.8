@@ -44,6 +44,8 @@ ovs\-ctl \- OVS startup helper script
 [\fB\-\-dport=\fIdport\fR]
 \fBenable\-protocol\fR
 .br
+\fBovs\-ctl delete\-transient\-ports
+.br
 \fBovs\-ctl help \fR| \fB\-h \fR| \fB\-\-help
 .br
 \fBovs\-ctl \-\-version
@@ -158,6 +160,13 @@ vSwitch bridges after starting \fBovsdb\-server\fR but before starting
 Deletes all ports that have the other_config:transient value set to true. This
 is important on certain environments where some ports are going to be recreated
 after reboot, but other ports need to be persisted in the database.
+.
+.IP "\fB\-\-ovs\-user=user[:group]\fR"
+Ordinarily Open vSwitch daemons are started as the user invoking the ovs-ctl
+command.  Some system administrators would prefer to have the various daemons
+spawn as different users in their environments.  This option allows passing the
+\fB\-\-user\fR option to the \fBovsdb\-server\fR and \fBovs\-vswitchd\fR
+daemons, allowing them to change their privilege levels.
 .
 .PP
 The following options are less important:
@@ -405,6 +414,10 @@ TCP or UDP source or destination port to match.  These are optional
 and allowed only with \fB\-\-protocol=tcp\fR or
 \fB\-\-protocol=udp\fR.
 .
+.SH "The ``delete\-transient\-ports'' command"
+.
+Deletes all ports that have the \fBother_config:transient\fR value set to true.
+.
 .SH "The ``help'' command"
 .
 Prints a usage message and exits successfully.
@@ -502,5 +515,4 @@ distribution are good examples of how to use \fBovs\-ctl\fR.
 .
 .SH "SEE ALSO"
 .
-\fBREADME.rst\fR, \fBINSTALL.Linux.rst\fR, \fBovsdb\-server\fR(8),
-\fBovs\-vswitchd\fR(8).
+\fBREADME.rst\fR, \fBovsdb\-server\fR(8), \fBovs\-vswitchd\fR(8).

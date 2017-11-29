@@ -15,7 +15,7 @@
  */
 
 #include <config.h>
-#include "rconn.h"
+#include "openvswitch/rconn.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -27,11 +27,12 @@
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/vconn.h"
 #include "openvswitch/vlog.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "sat-math.h"
 #include "stream.h"
 #include "timeval.h"
 #include "util.h"
+#include "ovs-thread.h"
 
 VLOG_DEFINE_THIS_MODULE(rconn);
 
@@ -141,6 +142,14 @@ struct rconn {
     size_t n_monitors;
 
     uint32_t allowed_versions;
+};
+
+/* Counts packets and bytes queued into an rconn by a given source. */
+struct rconn_packet_counter {
+    struct ovs_mutex mutex;
+    unsigned int n_packets OVS_GUARDED; /* Number of packets queued. */
+    unsigned int n_bytes OVS_GUARDED;   /* Number of bytes queued. */
+    int ref_cnt OVS_GUARDED;            /* Number of owners. */
 };
 
 uint32_t rconn_get_allowed_versions(const struct rconn *rconn)
@@ -558,19 +567,23 @@ run_ACTIVE(struct rconn *rc)
 {
     if (timed_out(rc)) {
         unsigned int base = MAX(rc->last_activity, rc->state_entered);
-        int version;
-
         VLOG_DBG("%s: idle %u seconds, sending inactivity probe",
                  rc->name, (unsigned int) (time_now() - base));
-
-        version = rconn_get_version__(rc);
-        ovs_assert(version >= 0 && version <= 0xff);
 
         /* Ordering is important here: rconn_send() can transition to BACKOFF,
          * and we don't want to transition back to IDLE if so, because then we
          * can end up queuing a packet with vconn == NULL and then *boom*. */
         state_transition(rc, S_IDLE);
-        rconn_send__(rc, make_echo_request(version), NULL);
+
+        /* Send an echo request if we can.  (If version negotiation is not
+         * complete, that is, if we did not yet receive a "hello" message from
+         * the peer, we do not know the version to use, so we don't send
+         * anything.) */
+        int version = rconn_get_version__(rc);
+        if (version >= 0 && version <= 0xff) {
+            rconn_send__(rc, make_echo_request(version), NULL);
+        }
+
         return;
     }
 

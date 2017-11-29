@@ -17,8 +17,11 @@
 #ifndef __GRE_H_
 #define __GRE_H_ 1
 
-#include "NetProto.h"
 #include "Flow.h"
+#include "IpHelper.h"
+#include "NetProto.h"
+
+typedef union _OVS_FWD_INFO *POVS_FWD_INFO;
 
 typedef struct _OVS_GRE_VPORT {
     UINT64 ipId;
@@ -66,7 +69,8 @@ NDIS_STATUS OvsEncapGre(POVS_VPORT_ENTRY vport,
                         OvsIPv4TunnelKey *tunKey,
                         POVS_SWITCH_CONTEXT switchContext,
                         POVS_PACKET_HDR_INFO layers,
-                        PNET_BUFFER_LIST *newNbl);
+                        PNET_BUFFER_LIST *newNbl,
+                        POVS_FWD_INFO switchFwdInfo);
 
 NDIS_STATUS OvsDecapGre(POVS_SWITCH_CONTEXT switchContext,
                         PNET_BUFFER_LIST curNbl,
@@ -97,6 +101,22 @@ GreTunHdrSize(UINT16 flags)
     sum += (flags & GRE_KEY) ? 4 : 0;
 
     return sum;
+}
+
+static __inline UINT32
+GreTunHdrSizeFromLayers(UINT16 flags, POVS_PACKET_HDR_INFO layers)
+{
+    UINT32 sum = layers->l4Offset + sizeof(GREHdr);
+    sum += (flags & GRE_CSUM) ? 4 : 0;
+    sum += (flags & GRE_KEY) ? 4 : 0;
+
+    return sum;
+}
+
+static __inline UINT32
+GreMaxLengthFromLayers(POVS_PACKET_HDR_INFO layers)
+{
+    return (layers->l4Offset + sizeof(GREHdr) + 12);
 }
 
 #endif /*__GRE_H_ */

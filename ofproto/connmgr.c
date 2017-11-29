@@ -34,8 +34,8 @@
 #include "openvswitch/vlog.h"
 #include "ovs-atomic.h"
 #include "pinsched.h"
-#include "poll-loop.h"
-#include "rconn.h"
+#include "openvswitch/poll-loop.h"
+#include "openvswitch/rconn.h"
 #include "openvswitch/shash.h"
 #include "simap.h"
 #include "stream.h"
@@ -791,12 +791,12 @@ update_in_band_remotes(struct connmgr *mgr)
         if (!mgr->in_band) {
             in_band_create(mgr->ofproto, mgr->local_port_name, &mgr->in_band);
         }
-        in_band_set_queue(mgr->in_band, mgr->in_band_queue);
     } else {
         /* in_band_run() needs a chance to delete any existing in-band flows.
          * We will destroy mgr->in_band after it's done with that. */
     }
     if (mgr->in_band) {
+        in_band_set_queue(mgr->in_band, mgr->in_band_queue);
         in_band_set_remotes(mgr->in_band, addrs, n_addrs);
     }
 
@@ -1092,6 +1092,16 @@ ofconn_set_async_config(struct ofconn *ofconn,
         ofconn->async_cfg = xmalloc(sizeof *ofconn->async_cfg);
     }
     *ofconn->async_cfg = *ac;
+
+    if (ofputil_protocol_to_ofp_version(ofconn_get_protocol(ofconn))
+        < OFP14_VERSION) {
+        if (ofconn->async_cfg->master[OAM_PACKET_IN] & (1u << OFPR_ACTION)) {
+            ofconn->async_cfg->master[OAM_PACKET_IN] |= OFPR14_ACTION_BITS;
+        }
+        if (ofconn->async_cfg->slave[OAM_PACKET_IN] & (1u << OFPR_ACTION)) {
+            ofconn->async_cfg->slave[OAM_PACKET_IN] |= OFPR14_ACTION_BITS;
+        }
+    }
 }
 
 struct ofputil_async_cfg
@@ -1520,7 +1530,7 @@ ofconn_receives_async_msg(const struct ofconn *ofconn,
     ovs_assert((unsigned int) type < OAM_N_TYPES);
 
     /* Keep the following code in sync with the documentation in the
-     * "Asynchronous Messages" section in DESIGN. */
+     * "Asynchronous Messages" section in 'topics/design' */
 
     if (ofconn->type == OFCONN_SERVICE && !ofconn->miss_send_len) {
         /* Service connections don't get asynchronous messages unless they have
@@ -1730,7 +1740,7 @@ connmgr_send_async_msg(struct connmgr *mgr,
         if (protocol == OFPUTIL_P_NONE || !rconn_is_connected(ofconn->rconn)
             || ofconn->controller_id != am->controller_id
             || !ofconn_receives_async_msg(ofconn, am->oam,
-                                          am->pin.up.public.reason)) {
+                                          am->pin.up.base.reason)) {
             continue;
         }
 
@@ -1738,11 +1748,11 @@ connmgr_send_async_msg(struct connmgr *mgr,
             &am->pin.up, protocol, ofconn->packet_in_format);
 
         struct ovs_list txq;
-        bool is_miss = (am->pin.up.public.reason == OFPR_NO_MATCH ||
-                        am->pin.up.public.reason == OFPR_EXPLICIT_MISS ||
-                        am->pin.up.public.reason == OFPR_IMPLICIT_MISS);
+        bool is_miss = (am->pin.up.base.reason == OFPR_NO_MATCH ||
+                        am->pin.up.base.reason == OFPR_EXPLICIT_MISS ||
+                        am->pin.up.base.reason == OFPR_IMPLICIT_MISS);
         pinsched_send(ofconn->schedulers[is_miss],
-                      am->pin.up.public.flow_metadata.flow.in_port.ofp_port,
+                      am->pin.up.base.flow_metadata.flow.in_port.ofp_port,
                       msg, &txq);
         do_send_packet_ins(ofconn, &txq);
     }
@@ -2183,14 +2193,12 @@ ofmonitor_report(struct connmgr *mgr, struct rule *rule,
             if (flags & NXFMF_OWN || ofconn != abbrev_ofconn
                 || ofconn->monitor_paused) {
                 struct ofputil_flow_update fu;
-                struct match match;
 
                 fu.event = event;
                 fu.reason = event == NXFME_DELETED ? reason : 0;
                 fu.table_id = rule->table_id;
                 fu.cookie = rule->flow_cookie;
-                minimatch_expand(&rule->cr.match, &match);
-                fu.match = &match;
+                minimatch_expand(&rule->cr.match, &fu.match);
                 fu.priority = rule->cr.priority;
 
                 ovs_mutex_lock(&rule->mutex);
@@ -2206,13 +2214,15 @@ ofmonitor_report(struct connmgr *mgr, struct rule *rule,
                     fu.ofpacts = NULL;
                     fu.ofpacts_len = 0;
                 }
-                ofputil_append_flow_update(&fu, &ofconn->updates);
+                ofputil_append_flow_update(&fu, &ofconn->updates,
+                                           ofproto_get_tun_tab(rule->ofproto));
             } else if (!ofconn->sent_abbrev_update) {
                 struct ofputil_flow_update fu;
 
                 fu.event = NXFME_ABBREV;
                 fu.xid = abbrev_xid;
-                ofputil_append_flow_update(&fu, &ofconn->updates);
+                ofputil_append_flow_update(&fu, &ofconn->updates,
+                                           ofproto_get_tun_tab(rule->ofproto));
 
                 ofconn->sent_abbrev_update = true;
             }
@@ -2227,22 +2237,22 @@ ofmonitor_flush(struct connmgr *mgr)
     struct ofconn *ofconn;
 
     LIST_FOR_EACH (ofconn, node, &mgr->all_conns) {
+        struct rconn_packet_counter *counter = ofconn->monitor_counter;
+
         struct ofpbuf *msg;
-
         LIST_FOR_EACH_POP (msg, list_node, &ofconn->updates) {
-            unsigned int n_bytes;
+            ofconn_send(ofconn, msg, counter);
+        }
 
-            ofconn_send(ofconn, msg, ofconn->monitor_counter);
-            n_bytes = rconn_packet_counter_n_bytes(ofconn->monitor_counter);
-            if (!ofconn->monitor_paused && n_bytes > 128 * 1024) {
-                struct ofpbuf *pause;
+        if (!ofconn->monitor_paused
+            && rconn_packet_counter_n_bytes(counter) > 128 * 1024) {
+            struct ofpbuf *pause;
 
-                COVERAGE_INC(ofmonitor_pause);
-                ofconn->monitor_paused = monitor_seqno++;
-                pause = ofpraw_alloc_xid(OFPRAW_NXT_FLOW_MONITOR_PAUSED,
-                                         OFP10_VERSION, htonl(0), 0);
-                ofconn_send(ofconn, pause, ofconn->monitor_counter);
-            }
+            COVERAGE_INC(ofmonitor_pause);
+            ofconn->monitor_paused = monitor_seqno++;
+            pause = ofpraw_alloc_xid(OFPRAW_NXT_FLOW_MONITOR_PAUSED,
+                                     OFP10_VERSION, htonl(0), 0);
+            ofconn_send(ofconn, pause, counter);
         }
     }
 }
@@ -2312,8 +2322,8 @@ ofmonitor_wait(struct connmgr *mgr)
 void
 ofproto_async_msg_free(struct ofproto_async_msg *am)
 {
-    free(am->pin.up.public.packet);
-    free(am->pin.up.public.userdata);
+    free(am->pin.up.base.packet);
+    free(am->pin.up.base.userdata);
     free(am->pin.up.stack);
     free(am->pin.up.actions);
     free(am->pin.up.action_set);

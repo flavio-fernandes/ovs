@@ -1,7 +1,7 @@
 {
     "name": "OVN_Northbound",
-    "version": "5.4.1",
-    "cksum": "3773248894 11490",
+    "version": "5.8.1",
+    "cksum": "607160660 16929",
     "tables": {
         "NB_Global": {
             "columns": {
@@ -10,7 +10,16 @@
                 "hv_cfg": {"type": {"key": "integer"}},
                 "external_ids": {
                     "type": {"key": "string", "value": "string",
-                             "min": 0, "max": "unlimited"}}},
+                             "min": 0, "max": "unlimited"}},
+                "connections": {
+                    "type": {"key": {"type": "uuid",
+                                     "refTable": "Connection"},
+                                     "min": 0,
+                                     "max": "unlimited"}},
+                "ssl": {
+                    "type": {"key": {"type": "uuid",
+                                     "refTable": "SSL"},
+                                     "min": 0, "max": 1}}},
             "maxRows": 1,
             "isRoot": true},
         "Logical_Switch": {
@@ -36,6 +45,11 @@
                                                   "refType": "strong"},
                                            "min": 0,
                                            "max": "unlimited"}},
+                "dns_records": {"type": {"key": {"type": "uuid",
+                                         "refTable": "DNS",
+                                         "refType": "weak"},
+                                  "min": 0,
+                                  "max": "unlimited"}},
                 "other_config": {
                     "type": {"key": "string", "value": "string",
                              "min": 0, "max": "unlimited"}},
@@ -102,7 +116,7 @@
             "isRoot": true},
         "Load_Balancer": {
             "columns": {
-		"name": {"type": "string"},
+                "name": {"type": "string"},
                 "vips": {
                     "type": {"key": "string", "value": "string",
                              "min": 0, "max": "unlimited"}},
@@ -116,6 +130,9 @@
             "isRoot": true},
         "ACL": {
             "columns": {
+                "name": {"type": {"key": {"type": "string",
+                                          "maxLength": 63},
+                                          "min": 0, "max": 1}},
                 "priority": {"type": {"key": {"type": "integer",
                                               "minInteger": 0,
                                               "maxInteger": 32767}}},
@@ -125,6 +142,12 @@
                 "action": {"type": {"key": {"type": "string",
                                             "enum": ["set", ["allow", "allow-related", "drop", "reject"]]}}},
                 "log": {"type": "boolean"},
+                "severity": {"type": {"key": {"type": "string",
+                                              "enum": ["set",
+                                                       ["alert", "warning",
+                                                        "notice", "info",
+                                                        "debug"]]},
+                                      "min": 0, "max": 1}},
                 "external_ids": {
                     "type": {"key": "string", "value": "string",
                              "min": 0, "max": "unlimited"}}},
@@ -182,12 +205,26 @@
         "Logical_Router_Port": {
             "columns": {
                 "name": {"type": "string"},
+                "gateway_chassis": {
+                    "type": {"key": {"type": "uuid",
+                                     "refTable": "Gateway_Chassis",
+                                     "refType": "strong"},
+                             "min": 0,
+                             "max": "unlimited"}},
+                "options": {
+                    "type": {"key": "string",
+                             "value": "string",
+                             "min": 0,
+                             "max": "unlimited"}},
                 "networks": {"type": {"key": "string",
                                       "min": 1,
                                       "max": "unlimited"}},
                 "mac": {"type": "string"},
                 "peer": {"type": {"key": "string", "min": 0, "max": 1}},
                 "enabled": {"type": {"key": "boolean", "min": 0, "max": 1}},
+                "ipv6_ra_configs": {
+                    "type": {"key": "string", "value": "string",
+                             "min": 0, "max": "unlimited"}},
                 "external_ids": {
                     "type": {"key": "string", "value": "string",
                              "min": 0, "max": "unlimited"}}},
@@ -206,7 +243,11 @@
         "NAT": {
             "columns": {
                 "external_ip": {"type": "string"},
+                "external_mac": {"type": {"key": "string",
+                                          "min": 0, "max": 1}},
                 "logical_ip": {"type": "string"},
+                "logical_port": {"type": {"key": "string",
+                                          "min": 0, "max": 1}},
                 "type": {"type": {"key": {"type": "string",
                                            "enum": ["set", ["dnat",
                                                              "snat",
@@ -221,6 +262,69 @@
                 "external_ids": {
                     "type": {"key": "string", "value": "string",
                              "min": 0, "max": "unlimited"}}},
-            "isRoot": true}
+            "isRoot": true},
+        "Connection": {
+            "columns": {
+                "target": {"type": "string"},
+                "max_backoff": {"type": {"key": {"type": "integer",
+                                         "minInteger": 1000},
+                                         "min": 0,
+                                         "max": 1}},
+                "inactivity_probe": {"type": {"key": "integer",
+                                              "min": 0,
+                                              "max": 1}},
+                "other_config": {"type": {"key": "string",
+                                          "value": "string",
+                                          "min": 0,
+                                          "max": "unlimited"}},
+                "external_ids": {"type": {"key": "string",
+                                 "value": "string",
+                                 "min": 0,
+                                 "max": "unlimited"}},
+                "is_connected": {"type": "boolean", "ephemeral": true},
+                "status": {"type": {"key": "string",
+                                    "value": "string",
+                                    "min": 0,
+                                    "max": "unlimited"},
+                                    "ephemeral": true}},
+            "indexes": [["target"]]},
+        "DNS": {
+            "columns": {
+                "records": {"type": {"key": "string",
+                                     "value": "string",
+                                     "min": 0,
+                                     "max": "unlimited"}},
+                "external_ids": {"type": {"key": "string",
+                                 "value": "string",
+                                 "min": 0,
+                                 "max": "unlimited"}}},
+            "isRoot": true},
+        "SSL": {
+            "columns": {
+                "private_key": {"type": "string"},
+                "certificate": {"type": "string"},
+                "ca_cert": {"type": "string"},
+                "bootstrap_ca_cert": {"type": "boolean"},
+                "ssl_protocols": {"type": "string"},
+                "ssl_ciphers": {"type": "string"},
+                "external_ids": {"type": {"key": "string",
+                                          "value": "string",
+                                          "min": 0,
+                                          "max": "unlimited"}}},
+            "maxRows": 1},
+        "Gateway_Chassis": {
+            "columns": {
+                "name": {"type": "string"},
+                "chassis_name": {"type": "string"},
+                "priority": {"type": {"key": {"type": "integer",
+                                              "minInteger": 0,
+                                              "maxInteger": 32767}}},
+                "external_ids": {
+                    "type": {"key": "string", "value": "string",
+                             "min": 0, "max": "unlimited"}},
+                "options": {
+                    "type": {"key": "string", "value": "string",
+                             "min": 0, "max": "unlimited"}}},
+            "indexes": [["name"]],
+            "isRoot": false}}
     }
-}

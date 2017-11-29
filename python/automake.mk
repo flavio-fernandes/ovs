@@ -34,13 +34,15 @@ ovs_pyfiles = \
 	python/ovs/unixctl/server.py \
 	python/ovs/util.py \
 	python/ovs/version.py \
-	python/ovs/vlog.py
+	python/ovs/vlog.py \
+	python/ovs/winutils.py
 
 # These python files are used at build time but not runtime,
 # so they are not installed.
 EXTRA_DIST += \
 	python/build/__init__.py \
-	python/build/nroff.py
+	python/build/nroff.py \
+	python/build/soutil.py
 
 # PyPI support.
 EXTRA_DIST += \

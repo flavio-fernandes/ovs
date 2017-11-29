@@ -1,19 +1,37 @@
 # Generated automatically -- do not modify!    -*- buffer-read-only: t -*-
 
+ovn/utilities/ovn-detrace.1: \
+	ovn/utilities/ovn-detrace.1.in \
+	lib/common-syn.man \
+	lib/common.man
+ovn/utilities/ovn-detrace.1.in:
+lib/common-syn.man:
+lib/common.man:
+
 ovn/utilities/ovn-sbctl.8: \
 	ovn/utilities/ovn-sbctl.8.in \
 	lib/common.man \
 	lib/db-ctl-base.man \
+	lib/ssl-bootstrap.man \
+	lib/ssl-peer-ca-cert.man \
+	lib/ssl.man \
 	lib/table.man \
 	lib/vlog.man \
 	ovsdb/remote-active.man \
+	ovsdb/remote-active.man \
+	ovsdb/remote-passive.man \
 	ovsdb/remote-passive.man
 ovn/utilities/ovn-sbctl.8.in:
 lib/common.man:
 lib/db-ctl-base.man:
+lib/ssl-bootstrap.man:
+lib/ssl-peer-ca-cert.man:
+lib/ssl.man:
 lib/table.man:
 lib/vlog.man:
 ovsdb/remote-active.man:
+ovsdb/remote-active.man:
+ovsdb/remote-passive.man:
 ovsdb/remote-passive.man:
 
 ovsdb/ovsdb-client.1: \
@@ -194,16 +212,6 @@ utilities/ovs-tcpundump.1.in:
 lib/common-syn.man:
 lib/common.man:
 
-utilities/ovs-test.8: \
-	utilities/ovs-test.8.in \
-	lib/common-syn.man \
-	lib/common.man \
-	utilities/ovs-vlan-bugs.man
-utilities/ovs-test.8.in:
-lib/common-syn.man:
-lib/common.man:
-utilities/ovs-vlan-bugs.man:
-
 utilities/ovs-testcontroller.8: \
 	utilities/ovs-testcontroller.8.in \
 	lib/common.man \
@@ -231,16 +239,6 @@ utilities/ovs-vlan-bug-workaround.8: \
 	lib/common.man \
 	utilities/ovs-vlan-bugs.man
 utilities/ovs-vlan-bug-workaround.8.in:
-lib/common.man:
-utilities/ovs-vlan-bugs.man:
-
-utilities/ovs-vlan-test.8: \
-	utilities/ovs-vlan-test.8.in \
-	lib/common-syn.man \
-	lib/common.man \
-	utilities/ovs-vlan-bugs.man
-utilities/ovs-vlan-test.8.in:
-lib/common-syn.man:
 lib/common.man:
 utilities/ovs-vlan-bugs.man:
 

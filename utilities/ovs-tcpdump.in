@@ -1,4 +1,4 @@
-#! /usr/bin/env @PYTHON@
+#! @PYTHON@
 #
 # Copyright (c) 2016 Red Hat, Inc.
 #
@@ -15,14 +15,16 @@
 # limitations under the License.
 
 import fcntl
-import netifaces
+
 import os
 import pwd
-import select
+from random import randint
 import struct
 import subprocess
 import sys
 import time
+
+import netifaces
 
 try:
     from ovs.db import idl
@@ -38,6 +40,8 @@ except Exception:
 
 tapdev_fd = None
 _make_taps = {}
+_make_mirror_name = {}
+IFNAMSIZ_LINUX = 15      # this is the max name size, excluding the null byte.
 
 
 def _doexec(*args, **kwargs):
@@ -49,7 +53,7 @@ def _doexec(*args, **kwargs):
     return proc
 
 
-def _install_tap_linux(tap_name):
+def _install_tap_linux(tap_name, mtu_value=None):
     """Uses /dev/net/tun to create a tap device"""
     global tapdev_fd
 
@@ -64,12 +68,27 @@ def _install_tap_linux(tap_name):
     fcntl.ioctl(tapdev_fd, TUNSETOWNER, os.getegid())
 
     time.sleep(1)  # required to give the new device settling time
+    if mtu_value is not None:
+        pipe = _doexec(
+            *(['ip', 'link', 'set', 'dev', str(tap_name), 'mtu',
+               str(mtu_value)]))
+        pipe.wait()
+
     pipe = _doexec(
         *(['ip', 'link', 'set', 'dev', str(tap_name), 'up']))
     pipe.wait()
 
+
+def _make_linux_mirror_name(interface_name):
+    if len(interface_name) > IFNAMSIZ_LINUX - 2:
+        return "ovsmi%06d" % randint(1, 999999)
+    return "mi%s" % interface_name
+
+
 _make_taps['linux'] = _install_tap_linux
 _make_taps['linux2'] = _install_tap_linux
+_make_mirror_name['linux'] = _make_linux_mirror_name
+_make_mirror_name['linux2'] = _make_linux_mirror_name
 
 
 def username():
@@ -174,6 +193,13 @@ class OVSDB(object):
         except Exception:
             raise OVSDBException('Unable to find port %s bridge' % port_name)
 
+    def interface_mtu(self, intf_name):
+        try:
+            intf = self._find_row_by_name('Interface', intf_name)
+            return intf.mtu[0]
+        except Exception:
+            return None
+
     def interface_exists(self, intf_name):
         return bool(self._find_row_by_name('Interface', intf_name))
 
@@ -230,7 +256,8 @@ class OVSDB(object):
                                  (port_name, txn.get_error()))
         self._txn = None
 
-    def destroy_mirror(self, mirror_name, bridge_name):
+    def destroy_mirror(self, intf_name, bridge_name):
+        mirror_name = 'm_%s' % intf_name
         if not self.mirror_exists(mirror_name):
             return
         txn = self._start_txn()
@@ -390,11 +417,15 @@ def main():
         print("TCPDUMP Args: %s" % ' '.join(tcpdargs))
 
     ovsdb = OVSDB(db_sock)
-    mirror_interface = mirror_interface or "mi%s" % interface
+    if mirror_interface is None:
+        mirror_interface = "mi%s" % interface
+        if sys.platform in _make_mirror_name:
+            mirror_interface = _make_mirror_name[sys.platform](interface)
 
     if sys.platform in _make_taps and \
        mirror_interface not in netifaces.interfaces():
-        _make_taps[sys.platform](mirror_interface)
+        _make_taps[sys.platform](mirror_interface,
+                                 ovsdb.interface_mtu(interface))
 
     if mirror_interface not in netifaces.interfaces():
         print("ERROR: Please create an interface called `%s`" %
@@ -426,17 +457,16 @@ def main():
     pipes = _doexec(*([dump_cmd, '-i', mirror_interface] + tcpdargs))
     try:
         while pipes.poll() is None:
-            data = pipes.stdout.readline()
+            data = pipes.stdout.readline().strip('\n')
             if len(data) == 0:
                 raise KeyboardInterrupt
             print(data)
-            if select.select([sys.stdin], [], [], 0.0)[0]:
-                data_in = sys.stdin.read()
-                pipes.stdin.write(data_in)
         raise KeyboardInterrupt
     except KeyboardInterrupt:
-        pipes.terminate()
-        ovsdb.destroy_mirror('m%s' % interface, ovsdb.port_bridge(interface))
+        if pipes.poll() is None:
+            pipes.terminate()
+
+        ovsdb.destroy_mirror(interface, ovsdb.port_bridge(interface))
         ovsdb.destroy_port(mirror_interface, ovsdb.port_bridge(interface))
     except Exception:
         print("Unable to tear down the ports and mirrors.")

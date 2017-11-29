@@ -26,9 +26,9 @@
 #include "openvswitch/hmap.h"
 #include "openvswitch/ofpbuf.h"
 #include "openflow/openflow.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "random.h"
-#include "rconn.h"
+#include "openvswitch/rconn.h"
 #include "sat-math.h"
 #include "timeval.h"
 #include "openvswitch/token-bucket.h"
@@ -94,6 +94,12 @@ adjust_limits(int *rate_limit, int *burst_limit)
 static void
 pinqueue_destroy(struct pinsched *ps, struct pinqueue *q)
 {
+    if (ps->next_txq == q) {
+        advance_txq(ps);
+        if (ps->next_txq == q) {
+            ps->next_txq = NULL;
+        }
+    }
     hmap_remove(&ps->queues, &q->node);
     free(q);
 }

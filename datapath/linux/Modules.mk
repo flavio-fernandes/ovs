@@ -29,6 +29,7 @@ openvswitch_headers += \
 	linux/compat/gso.h \
 	linux/compat/include/linux/percpu.h \
 	linux/compat/include/linux/bug.h \
+	linux/compat/include/linux/cache.h \
 	linux/compat/include/linux/compiler.h \
 	linux/compat/include/linux/compiler-gcc.h \
 	linux/compat/include/linux/cpumask.h \
@@ -94,6 +95,7 @@ openvswitch_headers += \
 	linux/compat/include/net/netfilter/nf_conntrack.h \
 	linux/compat/include/net/netfilter/nf_conntrack_core.h \
 	linux/compat/include/net/netfilter/nf_conntrack_expect.h \
+	linux/compat/include/net/netfilter/nf_conntrack_helper.h \
 	linux/compat/include/net/netfilter/nf_conntrack_labels.h \
 	linux/compat/include/net/netfilter/nf_conntrack_seqadj.h \
 	linux/compat/include/net/netfilter/nf_conntrack_zones.h \

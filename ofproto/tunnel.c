@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, 2014, 2015 Nicira, Inc.
+/* Copyright (c) 2013, 2014, 2015, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,6 +38,7 @@
 #include "openvswitch/vlog.h"
 #include "unaligned.h"
 #include "ofproto-dpif.h"
+#include "netdev-vport.h"
 
 VLOG_DEFINE_THIS_MODULE(tunnel);
 
@@ -49,6 +50,7 @@ struct tnl_match {
     bool in_key_flow;
     bool ip_src_flow;
     bool ip_dst_flow;
+    enum netdev_pt_mode pt_mode;
 };
 
 struct tnl_port {
@@ -124,7 +126,8 @@ static void tnl_port_mod_log(const struct tnl_port *, const char *action)
     OVS_REQ_RDLOCK(rwlock);
 static const char *tnl_port_get_name(const struct tnl_port *)
     OVS_REQ_RDLOCK(rwlock);
-static void tnl_port_del__(const struct ofport_dpif *) OVS_REQ_WRLOCK(rwlock);
+static void tnl_port_del__(const struct ofport_dpif *, odp_port_t)
+    OVS_REQ_WRLOCK(rwlock);
 
 void
 ofproto_tunnel_init(void)
@@ -162,6 +165,7 @@ tnl_port_add__(const struct ofport_dpif *ofport, const struct netdev *netdev,
     tnl_port->match.ip_dst_flow = cfg->ip_dst_flow;
     tnl_port->match.in_key_flow = cfg->in_key_flow;
     tnl_port->match.odp_port = odp_port;
+    tnl_port->match.pt_mode = netdev_get_pt_mode(netdev);
 
     map = tnl_match_map(&tnl_port->match);
     existing_port = tnl_find_exact(&tnl_port->match, *map);
@@ -205,7 +209,8 @@ tnl_port_add__(const struct ofport_dpif *ofport, const struct netdev *netdev,
  * Returns 0 if successful, otherwise a positive errno value. */
 int
 tnl_port_add(const struct ofport_dpif *ofport, const struct netdev *netdev,
-             odp_port_t odp_port, bool native_tnl, const char name[]) OVS_EXCLUDED(rwlock)
+             odp_port_t odp_port, bool native_tnl, const char name[])
+    OVS_EXCLUDED(rwlock)
 {
     bool ok;
 
@@ -217,13 +222,15 @@ tnl_port_add(const struct ofport_dpif *ofport, const struct netdev *netdev,
 }
 
 /* Checks if the tunnel represented by 'ofport' reconfiguration due to changes
- * in its netdev_tunnel_config.  If it does, returns true. Otherwise, returns
- * false.  'ofport' and 'odp_port' should be the same as would be passed to
- * tnl_port_add(). */
+ * in its netdev_tunnel_config. If it does, returns true. Otherwise, returns
+ * false. 'new_odp_port' should be the port number coming from 'ofport' that
+ * is passed to tnl_port_add__(). 'old_odp_port' should be the port number
+ * that is passed to tnl_port_del__(). */
 bool
 tnl_port_reconfigure(const struct ofport_dpif *ofport,
-                     const struct netdev *netdev, odp_port_t odp_port,
-                     bool native_tnl, const char name[])
+                     const struct netdev *netdev, odp_port_t new_odp_port,
+                     odp_port_t old_odp_port, bool native_tnl,
+                     const char name[])
     OVS_EXCLUDED(rwlock)
 {
     struct tnl_port *tnl_port;
@@ -232,13 +239,14 @@ tnl_port_reconfigure(const struct ofport_dpif *ofport,
     fat_rwlock_wrlock(&rwlock);
     tnl_port = tnl_find_ofport(ofport);
     if (!tnl_port) {
-        changed = tnl_port_add__(ofport, netdev, odp_port, false, native_tnl, name);
+        changed = tnl_port_add__(ofport, netdev, new_odp_port, false,
+                                 native_tnl, name);
     } else if (tnl_port->netdev != netdev
-               || tnl_port->match.odp_port != odp_port
+               || tnl_port->match.odp_port != new_odp_port
                || tnl_port->change_seq != netdev_get_change_seq(tnl_port->netdev)) {
         VLOG_DBG("reconfiguring %s", tnl_port_get_name(tnl_port));
-        tnl_port_del__(ofport);
-        tnl_port_add__(ofport, netdev, odp_port, true, native_tnl, name);
+        tnl_port_del__(ofport, old_odp_port);
+        tnl_port_add__(ofport, netdev, new_odp_port, true, native_tnl, name);
         changed = true;
     }
     fat_rwlock_unlock(&rwlock);
@@ -246,7 +254,8 @@ tnl_port_reconfigure(const struct ofport_dpif *ofport,
 }
 
 static void
-tnl_port_del__(const struct ofport_dpif *ofport) OVS_REQ_WRLOCK(rwlock)
+tnl_port_del__(const struct ofport_dpif *ofport, odp_port_t odp_port)
+    OVS_REQ_WRLOCK(rwlock)
 {
     struct tnl_port *tnl_port;
 
@@ -256,11 +265,9 @@ tnl_port_del__(const struct ofport_dpif *ofport) OVS_REQ_WRLOCK(rwlock)
 
     tnl_port = tnl_find_ofport(ofport);
     if (tnl_port) {
-        const struct netdev_tunnel_config *cfg =
-            netdev_get_tunnel_config(tnl_port->netdev);
         struct hmap **map;
 
-        tnl_port_map_delete(cfg->dst_port, netdev_get_type(tnl_port->netdev));
+        tnl_port_map_delete(odp_port, netdev_get_type(tnl_port->netdev));
         tnl_port_mod_log(tnl_port, "removing");
         map = tnl_match_map(&tnl_port->match);
         hmap_remove(*map, &tnl_port->match_node);
@@ -277,10 +284,11 @@ tnl_port_del__(const struct ofport_dpif *ofport) OVS_REQ_WRLOCK(rwlock)
 
 /* Removes 'ofport' from the module. */
 void
-tnl_port_del(const struct ofport_dpif *ofport) OVS_EXCLUDED(rwlock)
+tnl_port_del(const struct ofport_dpif *ofport, odp_port_t odp_port)
+    OVS_EXCLUDED(rwlock)
 {
     fat_rwlock_wrlock(&rwlock);
-    tnl_port_del__(ofport);
+    tnl_port_del__(ofport, odp_port);
     fat_rwlock_unlock(&rwlock);
 }
 
@@ -301,7 +309,7 @@ tnl_port_receive(const struct flow *flow) OVS_EXCLUDED(rwlock)
     tnl_port = tnl_find(flow);
     ofport = tnl_port ? tnl_port->ofport : NULL;
     if (!tnl_port) {
-        char *flow_str = flow_to_string(flow);
+        char *flow_str = flow_to_string(flow, NULL);
 
         VLOG_WARN_RL(&rl, "receive tunnel port not found (%s)", flow_str);
         free(flow_str);
@@ -309,11 +317,11 @@ tnl_port_receive(const struct flow *flow) OVS_EXCLUDED(rwlock)
     }
 
     if (!VLOG_DROP_DBG(&dbg_rl)) {
-        pre_flow_str = flow_to_string(flow);
+        pre_flow_str = flow_to_string(flow, NULL);
     }
 
     if (pre_flow_str) {
-        char *post_flow_str = flow_to_string(flow);
+        char *post_flow_str = flow_to_string(flow, NULL);
         char *tnl_str = tnl_port_fmt(tnl_port);
         VLOG_DBG("flow received\n"
                  "%s"
@@ -408,7 +416,7 @@ tnl_port_send(const struct ofport_dpif *ofport, struct flow *flow,
     ovs_assert(cfg);
 
     if (!VLOG_DROP_DBG(&dbg_rl)) {
-        pre_flow_str = flow_to_string(flow);
+        pre_flow_str = flow_to_string(flow, NULL);
     }
 
     if (!cfg->ip_src_flow) {
@@ -427,6 +435,7 @@ tnl_port_send(const struct ofport_dpif *ofport, struct flow *flow,
             flow->tunnel.ipv6_dst = in6addr_any;
         }
     }
+    flow->tunnel.tp_dst = cfg->dst_port;
     if (!cfg->out_key_flow) {
         flow->tunnel.tun_id = cfg->out_key;
     }
@@ -460,8 +469,13 @@ tnl_port_send(const struct ofport_dpif *ofport, struct flow *flow,
         | (cfg->csum ? FLOW_TNL_F_CSUM : 0)
         | (cfg->out_key_present ? FLOW_TNL_F_KEY : 0);
 
+    if (cfg->set_egress_pkt_mark) {
+        flow->pkt_mark = cfg->egress_pkt_mark;
+        wc->masks.pkt_mark = UINT32_MAX;
+    }
+
     if (pre_flow_str) {
-        char *post_flow_str = flow_to_string(flow);
+        char *post_flow_str = flow_to_string(flow, NULL);
         char *tnl_str = tnl_port_fmt(tnl_port);
         VLOG_DBG("flow sent\n"
                  "%s"
@@ -554,6 +568,19 @@ tnl_find(const struct flow *flow) OVS_REQ_RDLOCK(rwlock)
                     match.ip_dst_flow = ip_dst_flow;
                     match.ip_src_flow = ip_src == IP_SRC_FLOW;
 
+                    /* Look for a legacy L2 or L3 tunnel port first. */
+                    if (pt_ns(flow->packet_type) == OFPHTN_ETHERTYPE) {
+                        match.pt_mode = NETDEV_PT_LEGACY_L3;
+                    } else {
+                        match.pt_mode = NETDEV_PT_LEGACY_L2;
+                    }
+                    tnl_port = tnl_find_exact(&match, map);
+                    if (tnl_port) {
+                        return tnl_port;
+                    }
+
+                    /* Then check for a packet type aware port. */
+                    match.pt_mode = NETDEV_PT_AWARE;
                     tnl_port = tnl_find_exact(&match, map);
                     if (tnl_port) {
                         return tnl_port;
@@ -603,7 +630,11 @@ tnl_match_fmt(const struct tnl_match *match, struct ds *ds)
         ds_put_format(ds, ", key=%#"PRIx64, ntohll(match->in_key));
     }
 
-    ds_put_format(ds, ", dp port=%"PRIu32, match->odp_port);
+    const char *pt_mode
+        = (match->pt_mode == NETDEV_PT_LEGACY_L2 ? "legacy_l2"
+           : match->pt_mode == NETDEV_PT_LEGACY_L3 ? "legacy_l3"
+           : "ptap");
+    ds_put_format(ds, ", %s, dp port=%"PRIu32, pt_mode, match->odp_port);
 }
 
 static void

@@ -19,6 +19,9 @@
 #define __GENEVE_H_ 1
 
 #include "NetProto.h"
+
+typedef union _OVS_FWD_INFO *POVS_FWD_INFO;
+
 typedef struct _OVS_GENEVE_VPORT {
     UINT16 dstPort;
     UINT64 filterID;
@@ -68,10 +71,10 @@ typedef struct GeneveOptionHdr {
     UINT32   optionClass:16;
     /* Format of data contained in the option. */
     UINT32   type:8;
-    /* Reserved. */
-    UINT32   reserved:3;
     /* Length of option in int32 excluding the option header. */
     UINT32   length:5;
+    /* Reserved. */
+    UINT32   reserved:3;
 } GeneveOptionHdr;
 
 #define GENEVE_CRIT_OPT_TYPE (1 << 7)
@@ -87,7 +90,8 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
                            OvsIPv4TunnelKey *tunKey,
                            POVS_SWITCH_CONTEXT switchContext,
                            POVS_PACKET_HDR_INFO layers,
-                           PNET_BUFFER_LIST *newNbl);
+                           PNET_BUFFER_LIST *newNbl,
+                           POVS_FWD_INFO switchFwdInfo);
 
 NDIS_STATUS OvsDecapGeneve(POVS_SWITCH_CONTEXT switchContext,
                            PNET_BUFFER_LIST curNbl,
@@ -107,6 +111,12 @@ OvsGetGeneveTunHdrMaxSize(VOID)
 {
     /* XXX: Can L2 include VLAN at all? */
     return OvsGetGeneveTunHdrMinSize() + TUN_OPT_MAX_LEN;
+}
+
+static __inline UINT32
+OvsGetGeneveTunHdrSizeFromLayers(POVS_PACKET_HDR_INFO layers)
+{
+    return layers->l7Offset + sizeof(GeneveHdr);
 }
 
 #define GENEVE_UDP_PORT 6081

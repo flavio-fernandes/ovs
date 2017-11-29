@@ -1,9 +1,14 @@
 #!/bin/bash
 
-git clone git://git.kernel.org/pub/scm/devel/sparse/chrisl/sparse.git
-cd sparse && make && make install && cd ..
+set -ev
 
-# Incompatibility between flake8 3.0.x and the hacking plugin:
-# https://gitlab.com/pycqa/flake8/issues/153
-# https://bugs.launchpad.net/hacking/+bug/1607942
-pip install --disable-pip-version-check --user six "flake8<3.0" hacking
+# Build and install sparse.
+#
+# Explicitly disable sparse support for llvm because some travis
+# environments claim to have LLVM (llvm-config exists and works) but
+# linking against it fails.
+git clone git://git.kernel.org/pub/scm/devel/sparse/chrisl/sparse.git
+cd sparse && make HAVE_LLVM= install && cd ..
+
+pip install --disable-pip-version-check --user six flake8 hacking
+pip install --user --upgrade docutils

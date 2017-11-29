@@ -1,12 +1,14 @@
+.. NOTE(stephenfin): If making changes to this file, ensure that the line
+   numbers found in 'Documentation/intro/what-is-ovs' are kept up-to-date.
+
 ============
 Open vSwitch
 ============
 
-Build Status
-------------
-
 .. image:: https://travis-ci.org/openvswitch/ovs.png
     :target: https://travis-ci.org/openvswitch/ovs
+.. image:: https://ci.appveyor.com/api/projects/status/github/openvswitch/ovs?branch=master&svg=true&retina=true
+    :target: https://ci.appveyor.com/project/blp/ovs/history
 
 What is Open vSwitch?
 ---------------------
@@ -38,9 +40,11 @@ following features:
 
 The included Linux kernel module supports Linux 3.10 and up.
 
-Open vSwitch can also operate, at a cost in performance, entirely in userspace,
-without assistance from a kernel module.  This userspace implementation should
-be easier to port than the kernel-based switch.  It is considered experimental.
+Open vSwitch can also operate entirely in userspace without assistance from
+a kernel module.  This userspace implementation should be easier to port than
+the kernel-based switch. OVS in userspace can access Linux or DPDK devices.
+Note Open vSwitch with userspace datapath and non DPDK devices is considered
+experimental and comes with a cost in performance.
 
 What's here?
 ------------
@@ -73,38 +77,18 @@ Open vSwitch also provides some tools:
 What other documentation is available?
 --------------------------------------
 
+.. TODO(stephenfin): Update with a link to the hosting site of the docs, once
+   we know where that is
+
 To install Open vSwitch on a regular Linux or FreeBSD host, please read the
-`installation guide <INSTALL.rst>`__. For specifics around installation on a
-specific platform, please see one of the below installation guides:
+`installation guide <Documentation/intro/install/general.rst>`__. For specifics
+around installation on a specific platform, refer to one of the `other
+installation guides <Documentation/intro/install/index.rst>`__
 
-- `Debian <INSTALL.Debian.rst>`__
-- `Fedora <INSTALL.Fedora.rst>`__
-- `RHEL <INSTALL.RHEL.rst>`__
-- `XenServer <INSTALL.XenServer.rst>`__
-- `Windows <INSTALL.Windows.rst>`__
-
-To use Open vSwitch...
-
-- ...with Docker on Linux, see `here <INSTALL.Docker.rst>`__.
-
-- ...with KVM on Linux, see `here <INSTALL.rst>`__ and `here
-  <INSTALL.KVM.rst>`__.
-
-- ...with Libvirt, see `here <INSTALL.Libvirt.rst>`__.
-
-- ...without using a kernel module, see `here <INSTALL.userspace.rst>`__.
-
-- ...with DPDK, see `here <INSTALL.DPDK.rst>`__.
-
-- ...with SELinux, see `here <INSTALL.SELinux.rst>`__.
-
-For answers to common questions, refer to the `FAQ <FAQ.rst>`__.
-
-To learn how to set up SSL support for Open vSwitch, see `here
-<INSTALL.SSL.rst>`__.
+For answers to common questions, refer to the `FAQ <Documentation/faq>`__.
 
 To learn about some advanced features of the Open vSwitch software switch, read
-the `tutorial <tutorial/tutorial.rst>`__.
+the `tutorial <Documentation/tutorials/ovs-advanced.rst>`__.
 
 Each Open vSwitch userspace program is accompanied by a manpage.  Many of the
 manpages are customized to your configuration as part of the build process, so

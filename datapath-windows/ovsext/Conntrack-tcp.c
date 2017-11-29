@@ -51,6 +51,7 @@ struct conn_tcp {
     struct OVS_CT_ENTRY up;
     struct tcp_peer peer[2];
 };
+C_ASSERT(offsetof(struct conn_tcp, up) == 0);
 
 enum {
     TCPOPT_EOL,
@@ -182,21 +183,6 @@ OvsTcpGetWscale(const TCPHdr *tcp)
     }
 
     return wscale;
-}
-
-static __inline uint32_t
-OvsGetTcpPayloadLength(PNET_BUFFER_LIST nbl)
-{
-    IPHdr *ipHdr;
-    char *ipBuf[sizeof(IPHdr)];
-    PNET_BUFFER curNb;
-    curNb = NET_BUFFER_LIST_FIRST_NB(nbl);
-    ipHdr = NdisGetDataBuffer(curNb, sizeof *ipHdr, (PVOID) &ipBuf,
-                                                    1 /*no align*/, 0);
-    TCPHdr *tcp = (TCPHdr *)((PCHAR)ipHdr + ipHdr->ihl * 4);
-    return (UINT16)ntohs(ipHdr->tot_len)
-                        - (ipHdr->ihl * 4)
-                        - (sizeof * tcp);
 }
 
 static __inline struct conn_tcp*
@@ -457,9 +443,13 @@ OvsConntrackUpdateTcpEntry(OVS_CT_ENTRY* conn_,
 BOOLEAN
 OvsConntrackValidateTcpPacket(const TCPHdr *tcp)
 {
+    if (!tcp) {
+        return FALSE;
+    }
+
     UINT16 tcp_flags = ntohs(tcp->flags);
 
-    if (tcp == NULL || OvsCtInvalidTcpFlags(tcp_flags)) {
+    if (OvsCtInvalidTcpFlags(tcp_flags)) {
         return FALSE;
     }
 

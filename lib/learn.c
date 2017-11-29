@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2011, 2012, 2013, 2014, 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,24 +29,25 @@
 #include "openvswitch/ofp-errors.h"
 #include "openvswitch/ofp-util.h"
 #include "openvswitch/ofpbuf.h"
+#include "vl-mff-map.h"
 #include "unaligned.h"
 
 
 /* Checks that 'learn' is a valid action on 'flow'.  Returns 0 if it is valid,
  * otherwise an OFPERR_*. */
 enum ofperr
-learn_check(const struct ofpact_learn *learn, const struct flow *flow)
+learn_check(const struct ofpact_learn *learn, const struct match *src_match)
 {
     const struct ofpact_learn_spec *spec;
-    struct match match;
+    struct match dst_match;
 
-    match_init_catchall(&match);
+    match_init_catchall(&dst_match);
     OFPACT_LEARN_SPEC_FOR_EACH (spec, learn) {
         enum ofperr error;
 
         /* Check the source. */
         if (spec->src_type == NX_LEARN_SRC_FIELD) {
-            error = mf_check_src(&spec->src, flow);
+            error = mf_check_src(&spec->src, src_match);
             if (error) {
                 return error;
             }
@@ -55,18 +56,19 @@ learn_check(const struct ofpact_learn *learn, const struct flow *flow)
         /* Check the destination. */
         switch (spec->dst_type) {
         case NX_LEARN_DST_MATCH:
-            error = mf_check_src(&spec->dst, &match.flow);
+            error = mf_check_src(&spec->dst, &dst_match);
             if (error) {
                 return error;
             }
             if (spec->src_type & NX_LEARN_SRC_IMMEDIATE) {
                 mf_write_subfield_value(&spec->dst,
-                                        ofpact_learn_spec_imm(spec), &match);
+                                        ofpact_learn_spec_imm(spec),
+                                        &dst_match);
             }
             break;
 
         case NX_LEARN_DST_LOAD:
-            error = mf_check_dst(&spec->dst, &match.flow);
+            error = mf_check_dst(&spec->dst, &dst_match);
             if (error) {
                 return error;
             }
@@ -107,6 +109,7 @@ learn_execute(const struct ofpact_learn *learn, const struct flow *flow,
     fm->importance = 0;
     fm->buffer_id = UINT32_MAX;
     fm->out_port = OFPP_NONE;
+    fm->ofpacts_tlv_bitmap = 0;
     fm->flags = 0;
     if (learn->flags & NX_LEARN_F_SEND_FLOW_REM) {
         fm->flags |= OFPUTIL_FF_SEND_FLOW_REM;
@@ -136,6 +139,9 @@ learn_execute(const struct ofpact_learn *learn, const struct flow *flow,
         switch (spec->dst_type) {
         case NX_LEARN_DST_MATCH:
             mf_write_subfield(&spec->dst, &value, &fm->match);
+            match_add_ethernet_prereq(&fm->match, spec->dst.field);
+            mf_vl_mff_set_tlv_bitmap(
+                spec->dst.field, &fm->match.flow.tunnel.metadata.present.map);
             break;
 
         case NX_LEARN_DST_LOAD:
@@ -145,6 +151,7 @@ learn_execute(const struct ofpact_learn *learn, const struct flow *flow,
                          spec->n_bits);
             bitwise_one(ofpact_set_field_mask(sf), spec->dst.field->n_bytes,
                         spec->dst.ofs, spec->n_bits);
+            mf_vl_mff_set_tlv_bitmap(spec->dst.field, &fm->ofpacts_tlv_bitmap);
             break;
 
         case NX_LEARN_DST_OUTPUT:
@@ -187,24 +194,12 @@ learn_mask(const struct ofpact_learn *learn, struct flow_wildcards *wc)
 /* Returns NULL if successful, otherwise a malloc()'d string describing the
  * error.  The caller is responsible for freeing the returned string. */
 static char * OVS_WARN_UNUSED_RESULT
-learn_parse_load_immediate(const char *s, struct ofpact_learn_spec *spec,
+learn_parse_load_immediate(union mf_subvalue *imm, const char *s,
+                           const char *full_s, struct ofpact_learn_spec *spec,
                            struct ofpbuf *ofpacts)
 {
-    const char *full_s = s;
     struct mf_subfield dst;
-    union mf_subvalue imm;
     char *error;
-    int err;
-
-    err = parse_int_string(s, imm.u8, sizeof imm.u8, (char **) &s);
-    if (err) {
-        return xasprintf("%s: too many bits in immediate value", full_s);
-    }
-
-    if (strncmp(s, "->", 2)) {
-        return xasprintf("%s: missing `->' following value", full_s);
-    }
-    s += 2;
 
     error = mf_parse_subfield(&dst, s);
     if (error) {
@@ -215,8 +210,8 @@ learn_parse_load_immediate(const char *s, struct ofpact_learn_spec *spec,
                          full_s, s);
     }
 
-    if (!bitwise_is_all_zeros(&imm, sizeof imm, dst.n_bits,
-                              (8 * sizeof imm) - dst.n_bits)) {
+    if (!bitwise_is_all_zeros(imm, sizeof *imm, dst.n_bits,
+                              (8 * sizeof *imm) - dst.n_bits)) {
         return xasprintf("%s: value does not fit into %u bits",
                          full_s, dst.n_bits);
     }
@@ -229,7 +224,7 @@ learn_parse_load_immediate(const char *s, struct ofpact_learn_spec *spec,
     /* Push value last, as this may reallocate 'spec'! */
     unsigned int n_bytes = DIV_ROUND_UP(dst.n_bits, 8);
     uint8_t *src_imm = ofpbuf_put_zeros(ofpacts, OFPACT_ALIGN(n_bytes));
-    memcpy(src_imm, &imm.u8[sizeof imm.u8 - n_bytes], n_bytes);
+    memcpy(src_imm, &imm->u8[sizeof imm->u8 - n_bytes], n_bytes);
 
     return NULL;
 }
@@ -238,53 +233,85 @@ learn_parse_load_immediate(const char *s, struct ofpact_learn_spec *spec,
  * error.  The caller is responsible for freeing the returned string. */
 static char * OVS_WARN_UNUSED_RESULT
 learn_parse_spec(const char *orig, char *name, char *value,
+                 const struct ofputil_port_map *port_map,
                  struct ofpact_learn_spec *spec,
                  struct ofpbuf *ofpacts, struct match *match)
 {
-    if (mf_from_name(name)) {
-        const struct mf_field *dst = mf_from_name(name);
-        union mf_value imm;
-        char *error;
+    /* Parse destination and check prerequisites. */
+    struct mf_subfield dst;
 
-        error = mf_parse_value(dst, value, &imm);
-        if (error) {
-            return error;
-        }
+    char *error = mf_parse_subfield(&dst, name);
+    bool parse_error = error != NULL;
+    free(error);
 
-        spec->n_bits = dst->n_bits;
-        spec->src_type = NX_LEARN_SRC_IMMEDIATE;
-        spec->dst_type = NX_LEARN_DST_MATCH;
-        spec->dst.field = dst;
-        spec->dst.ofs = 0;
-        spec->dst.n_bits = dst->n_bits;
-
-        /* Update 'match' to allow for satisfying destination
-         * prerequisites. */
-        mf_set_value(dst, &imm, match, NULL);
-
-        /* Push value last, as this may reallocate 'spec'! */
-        uint8_t *src_imm = ofpbuf_put_zeros(ofpacts,
-                                            OFPACT_ALIGN(dst->n_bytes));
-        memcpy(src_imm, &imm, dst->n_bytes);
-    } else if (strchr(name, '[')) {
-        /* Parse destination and check prerequisites. */
-        char *error;
-
-        error = mf_parse_subfield(&spec->dst, name);
-        if (error) {
-            return error;
-        }
-        if (!mf_nxm_header(spec->dst.field->id)) {
+    if (!parse_error) {
+        if (!mf_nxm_header(dst.field->id)) {
             return xasprintf("%s: experimenter OXM field '%s' not supported",
                              orig, name);
         }
+        spec->dst = dst;
+        spec->n_bits = dst.n_bits;
+        spec->dst_type = NX_LEARN_DST_MATCH;
 
         /* Parse source and check prerequisites. */
         if (value[0] != '\0') {
-            error = mf_parse_subfield(&spec->src, value);
+            struct mf_subfield src;
+            error = mf_parse_subfield(&src, value);
             if (error) {
-                return error;
+                union mf_value imm;
+                char *imm_error = NULL;
+
+                /* Try an immediate value. */
+                if (dst.ofs == 0 && dst.n_bits == dst.field->n_bits) {
+                    /* Full field value. */
+                    imm_error = mf_parse_value(dst.field, value, port_map,
+                                               &imm);
+                } else {
+                    char *tail;
+                    /* Partial field value. */
+                    if (parse_int_string(value, (uint8_t *)&imm,
+                                          dst.field->n_bytes, &tail)
+                        || *tail != 0) {
+                        imm_error = xasprintf("%s: cannot parse integer value", orig);
+                    }
+
+                    if (!imm_error &&
+                        !bitwise_is_all_zeros(&imm, dst.field->n_bytes,
+                                              dst.n_bits,
+                                              dst.field->n_bytes * 8 - dst.n_bits)) {
+                        struct ds ds;
+
+                        ds_init(&ds);
+                        mf_format(dst.field, &imm, NULL, NULL, &ds);
+                        imm_error = xasprintf("%s: value %s does not fit into %d bits",
+                                              orig, ds_cstr(&ds), dst.n_bits);
+                        ds_destroy(&ds);
+                    }
+                }
+                if (imm_error) {
+                    char *err = xasprintf("%s: %s value %s cannot be parsed as a subfield (%s) or an immediate value (%s)",
+                                          orig, name, value, error, imm_error);
+                    free(error);
+                    free(imm_error);
+                    return err;
+                }
+
+                spec->src_type = NX_LEARN_SRC_IMMEDIATE;
+
+                /* Update 'match' to allow for satisfying destination
+                 * prerequisites. */
+                mf_write_subfield_value(&dst, &imm, match);
+
+                /* Push value last, as this may reallocate 'spec'! */
+                unsigned int imm_bytes = DIV_ROUND_UP(dst.n_bits, 8);
+                uint8_t *src_imm = ofpbuf_put_zeros(ofpacts,
+                                                    OFPACT_ALIGN(imm_bytes));
+                memcpy(src_imm, &imm, imm_bytes);
+
+                free(error);
+                return NULL;
             }
+            spec->src = src;
             if (spec->src.n_bits != spec->dst.n_bits) {
                 return xasprintf("%s: bit widths of %s (%u) and %s (%u) "
                                  "differ", orig, name, spec->src.n_bits, value,
@@ -294,18 +321,34 @@ learn_parse_spec(const char *orig, char *name, char *value,
             spec->src = spec->dst;
         }
 
-        spec->n_bits = spec->src.n_bits;
         spec->src_type = NX_LEARN_SRC_FIELD;
-        spec->dst_type = NX_LEARN_DST_MATCH;
     } else if (!strcmp(name, "load")) {
-        if (value[strcspn(value, "[-")] == '-') {
-            char *error = learn_parse_load_immediate(value, spec, ofpacts);
+        union mf_subvalue imm;
+        char *tail;
+        char *dst_value = strstr(value, "->");
+
+        if (dst_value == value) {
+            return xasprintf("%s: missing source before `->' in `%s'", name,
+                             value);
+        }
+        if (!dst_value) {
+            return xasprintf("%s: missing `->' in `%s'", name, value);
+        }
+
+        if (!parse_int_string(value, imm.u8, sizeof imm.u8, (char **) &tail)
+            && tail != value) {
+            if (tail != dst_value) {
+                return xasprintf("%s: garbage before `->' in `%s'",
+                                 name, value);
+            }
+
+            error = learn_parse_load_immediate(&imm, dst_value + 2, value, spec,
+                                               ofpacts);
             if (error) {
                 return error;
             }
         } else {
             struct ofpact_reg_move move;
-            char *error;
 
             error = nxm_parse_reg_move(&move, value);
             if (error) {
@@ -319,7 +362,7 @@ learn_parse_spec(const char *orig, char *name, char *value,
             spec->dst = move.dst;
         }
     } else if (!strcmp(name, "output")) {
-        char *error = mf_parse_subfield(&spec->src, value);
+        error = mf_parse_subfield(&spec->src, value);
         if (error) {
             return error;
         }
@@ -337,7 +380,8 @@ learn_parse_spec(const char *orig, char *name, char *value,
 /* Returns NULL if successful, otherwise a malloc()'d string describing the
  * error.  The caller is responsible for freeing the returned string. */
 static char * OVS_WARN_UNUSED_RESULT
-learn_parse__(char *orig, char *arg, struct ofpbuf *ofpacts)
+learn_parse__(char *orig, char *arg, const struct ofputil_port_map *port_map,
+              struct ofpbuf *ofpacts)
 {
     struct ofpact_learn *learn;
     struct match match;
@@ -373,12 +417,29 @@ learn_parse__(char *orig, char *arg, struct ofpbuf *ofpacts)
             learn->flags |= NX_LEARN_F_SEND_FLOW_REM;
         } else if (!strcmp(name, "delete_learned")) {
             learn->flags |= NX_LEARN_F_DELETE_LEARNED;
+        } else if (!strcmp(name, "limit")) {
+            learn->limit = atoi(value);
+        } else if (!strcmp(name, "result_dst")) {
+            char *error;
+            learn->flags |= NX_LEARN_F_WRITE_RESULT;
+            error = mf_parse_subfield(&learn->result_dst, value);
+            if (error) {
+                return error;
+            }
+            if (!learn->result_dst.field->writable) {
+                return xasprintf("%s is read-only", value);
+            }
+            if (learn->result_dst.n_bits != 1) {
+                return xasprintf("result_dst in 'learn' action must be a "
+                                 "single bit");
+            }
         } else {
             struct ofpact_learn_spec *spec;
             char *error;
 
             spec = ofpbuf_put_zeros(ofpacts, sizeof *spec);
-            error = learn_parse_spec(orig, name, value, spec, ofpacts, &match);
+            error = learn_parse_spec(orig, name, value, port_map,
+                                     spec, ofpacts, &match);
             if (error) {
                 return error;
             }
@@ -403,10 +464,11 @@ learn_parse__(char *orig, char *arg, struct ofpbuf *ofpacts)
  *
  * Modifies 'arg'. */
 char * OVS_WARN_UNUSED_RESULT
-learn_parse(char *arg, struct ofpbuf *ofpacts)
+learn_parse(char *arg, const struct ofputil_port_map *port_map,
+            struct ofpbuf *ofpacts)
 {
     char *orig = xstrdup(arg);
-    char *error = learn_parse__(orig, arg, ofpacts);
+    char *error = learn_parse__(orig, arg, port_map, ofpacts);
     free(orig);
     return error;
 }
@@ -414,7 +476,8 @@ learn_parse(char *arg, struct ofpbuf *ofpacts)
 /* Appends a description of 'learn' to 's', in the format that ovs-ofctl(8)
  * describes. */
 void
-learn_format(const struct ofpact_learn *learn, struct ds *s)
+learn_format(const struct ofpact_learn *learn,
+             const struct ofputil_port_map *port_map, struct ds *s)
 {
     const struct ofpact_learn_spec *spec;
     struct match match;
@@ -454,6 +517,14 @@ learn_format(const struct ofpact_learn *learn, struct ds *s)
         ds_put_format(s, ",%scookie=%s%#"PRIx64,
                       colors.param, colors.end, ntohll(learn->cookie));
     }
+    if (learn->limit != 0) {
+        ds_put_format(s, ",%slimit=%s%"PRIu32,
+                      colors.param, colors.end, learn->limit);
+    }
+    if (learn->flags & NX_LEARN_F_WRITE_RESULT) {
+        ds_put_format(s, ",%sresult_dst=%s", colors.param, colors.end);
+        mf_format_subfield(&learn->result_dst, s);
+    }
 
     OFPACT_LEARN_SPEC_FOR_EACH (spec, learn) {
         unsigned int n_bytes = DIV_ROUND_UP(spec->n_bits, 8);
@@ -470,7 +541,7 @@ learn_format(const struct ofpact_learn *learn, struct ds *s)
                        ofpact_learn_spec_imm(spec), n_bytes);
                 ds_put_format(s, "%s%s=%s", colors.param,
                               spec->dst.field->name, colors.end);
-                mf_format(spec->dst.field, &value, NULL, s);
+                mf_format(spec->dst.field, &value, NULL, port_map, s);
             } else {
                 ds_put_format(s, "%s", colors.param);
                 mf_format_subfield(&spec->dst, s);
