@@ -1,5 +1,13 @@
 # Generated automatically -- do not modify!    -*- buffer-read-only: t -*-
 
+ovn/utilities/ovn-detrace.1: \
+	ovn/utilities/ovn-detrace.1.in \
+	lib/common-syn.man \
+	lib/common.man
+ovn/utilities/ovn-detrace.1.in:
+lib/common-syn.man:
+lib/common.man:
+
 ovn/utilities/ovn-sbctl.8: \
 	ovn/utilities/ovn-sbctl.8.in \
 	lib/common.man \
@@ -8,11 +16,7 @@ ovn/utilities/ovn-sbctl.8: \
 	lib/ssl-peer-ca-cert.man \
 	lib/ssl.man \
 	lib/table.man \
-	lib/vlog.man \
-	ovsdb/remote-active.man \
-	ovsdb/remote-active.man \
-	ovsdb/remote-passive.man \
-	ovsdb/remote-passive.man
+	lib/vlog.man
 ovn/utilities/ovn-sbctl.8.in:
 lib/common.man:
 lib/db-ctl-base.man:
@@ -21,10 +25,6 @@ lib/ssl-peer-ca-cert.man:
 lib/ssl.man:
 lib/table.man:
 lib/vlog.man:
-ovsdb/remote-active.man:
-ovsdb/remote-active.man:
-ovsdb/remote-passive.man:
-ovsdb/remote-passive.man:
 
 ovsdb/ovsdb-client.1: \
 	ovsdb/ovsdb-client.1.in \
@@ -41,8 +41,7 @@ ovsdb/ovsdb-client.1: \
 	lib/table.man \
 	lib/vlog-syn.man \
 	lib/vlog.man \
-	ovsdb/remote-active.man \
-	ovsdb/remote-passive.man
+	ovsdb/ovsdb-schemas.man
 ovsdb/ovsdb-client.1.in:
 lib/common-syn.man:
 lib/common.man:
@@ -57,8 +56,7 @@ lib/ssl.man:
 lib/table.man:
 lib/vlog-syn.man:
 lib/vlog.man:
-ovsdb/remote-active.man:
-ovsdb/remote-passive.man:
+ovsdb/ovsdb-schemas.man:
 
 ovsdb/ovsdb-server.1: \
 	ovsdb/ovsdb-server.1.in \
@@ -82,11 +80,7 @@ ovsdb/ovsdb-server.1: \
 	lib/unixctl.man \
 	lib/vlog-syn.man \
 	lib/vlog-unixctl.man \
-	lib/vlog.man \
-	ovsdb/remote-active.man \
-	ovsdb/remote-passive.man \
-	ovsdb/replication-syn.man \
-	ovsdb/replication.man
+	lib/vlog.man
 ovsdb/ovsdb-server.1.in:
 lib/common-syn.man:
 lib/common.man:
@@ -109,22 +103,20 @@ lib/unixctl.man:
 lib/vlog-syn.man:
 lib/vlog-unixctl.man:
 lib/vlog.man:
-ovsdb/remote-active.man:
-ovsdb/remote-passive.man:
-ovsdb/replication-syn.man:
-ovsdb/replication.man:
 
 ovsdb/ovsdb-tool.1: \
 	ovsdb/ovsdb-tool.1.in \
 	lib/common-syn.man \
 	lib/common.man \
 	lib/vlog-syn.man \
-	lib/vlog.man
+	lib/vlog.man \
+	ovsdb/ovsdb-schemas.man
 ovsdb/ovsdb-tool.1.in:
 lib/common-syn.man:
 lib/common.man:
 lib/vlog-syn.man:
 lib/vlog.man:
+ovsdb/ovsdb-schemas.man:
 
 utilities/bugtool/ovs-bugtool.8: \
 	utilities/bugtool/ovs-bugtool.8.in
@@ -204,16 +196,6 @@ utilities/ovs-tcpundump.1.in:
 lib/common-syn.man:
 lib/common.man:
 
-utilities/ovs-test.8: \
-	utilities/ovs-test.8.in \
-	lib/common-syn.man \
-	lib/common.man \
-	utilities/ovs-vlan-bugs.man
-utilities/ovs-test.8.in:
-lib/common-syn.man:
-lib/common.man:
-utilities/ovs-vlan-bugs.man:
-
 utilities/ovs-testcontroller.8: \
 	utilities/ovs-testcontroller.8.in \
 	lib/common.man \
@@ -244,16 +226,6 @@ utilities/ovs-vlan-bug-workaround.8.in:
 lib/common.man:
 utilities/ovs-vlan-bugs.man:
 
-utilities/ovs-vlan-test.8: \
-	utilities/ovs-vlan-test.8.in \
-	lib/common-syn.man \
-	lib/common.man \
-	utilities/ovs-vlan-bugs.man
-utilities/ovs-vlan-test.8.in:
-lib/common-syn.man:
-lib/common.man:
-utilities/ovs-vlan-bugs.man:
-
 utilities/ovs-vsctl.8: \
 	utilities/ovs-vsctl.8.in \
 	lib/common.man \
@@ -264,11 +236,7 @@ utilities/ovs-vsctl.8: \
 	lib/table.man \
 	lib/vconn-active.man \
 	lib/vconn-passive.man \
-	lib/vlog.man \
-	ovsdb/remote-active.man \
-	ovsdb/remote-active.man \
-	ovsdb/remote-passive.man \
-	ovsdb/remote-passive.man
+	lib/vlog.man
 utilities/ovs-vsctl.8.in:
 lib/common.man:
 lib/db-ctl-base.man:
@@ -279,10 +247,6 @@ lib/table.man:
 lib/vconn-active.man:
 lib/vconn-passive.man:
 lib/vlog.man:
-ovsdb/remote-active.man:
-ovsdb/remote-active.man:
-ovsdb/remote-passive.man:
-ovsdb/remote-passive.man:
 
 vswitchd/ovs-vswitchd.8: \
 	vswitchd/ovs-vswitchd.8.in \
@@ -291,6 +255,7 @@ vswitchd/ovs-vswitchd.8: \
 	lib/daemon.man \
 	lib/dpctl.man \
 	lib/memory-unixctl.man \
+	lib/netdev-dpdk-unixctl.man \
 	lib/service.man \
 	lib/ssl-bootstrap.man \
 	lib/ssl.man \
@@ -299,15 +264,14 @@ vswitchd/ovs-vswitchd.8: \
 	lib/vlog.man \
 	ofproto/ofproto-dpif-unixctl.man \
 	ofproto/ofproto-tnl-unixctl.man \
-	ofproto/ofproto-unixctl.man \
-	ovsdb/remote-active.man \
-	ovsdb/remote-passive.man
+	ofproto/ofproto-unixctl.man
 vswitchd/ovs-vswitchd.8.in:
 lib/common.man:
 lib/coverage-unixctl.man:
 lib/daemon.man:
 lib/dpctl.man:
 lib/memory-unixctl.man:
+lib/netdev-dpdk-unixctl.man:
 lib/service.man:
 lib/ssl-bootstrap.man:
 lib/ssl.man:
@@ -317,8 +281,6 @@ lib/vlog.man:
 ofproto/ofproto-dpif-unixctl.man:
 ofproto/ofproto-tnl-unixctl.man:
 ofproto/ofproto-unixctl.man:
-ovsdb/remote-active.man:
-ovsdb/remote-passive.man:
 
 vtep/vtep-ctl.8: \
 	vtep/vtep-ctl.8.in \
@@ -328,11 +290,7 @@ vtep/vtep-ctl.8: \
 	lib/ssl-peer-ca-cert.man \
 	lib/ssl.man \
 	lib/table.man \
-	lib/vlog.man \
-	ovsdb/remote-active.man \
-	ovsdb/remote-active.man \
-	ovsdb/remote-passive.man \
-	ovsdb/remote-passive.man
+	lib/vlog.man
 vtep/vtep-ctl.8.in:
 lib/common.man:
 lib/db-ctl-base.man:
@@ -341,7 +299,3 @@ lib/ssl-peer-ca-cert.man:
 lib/ssl.man:
 lib/table.man:
 lib/vlog.man:
-ovsdb/remote-active.man:
-ovsdb/remote-active.man:
-ovsdb/remote-passive.man:
-ovsdb/remote-passive.man:

@@ -28,12 +28,12 @@
 
 #include <config.h>
 #include "ovs-lldp.h"
+#include <sys/types.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <inttypes.h>
-#include <netinet/in.h>
 #include <stdbool.h>
 #include <stdlib.h>
-#include <sys/types.h>
 #include "openvswitch/dynamic-string.h"
 #include "flow.h"
 #include "openvswitch/list.h"
@@ -42,7 +42,7 @@
 #include "netdev.h"
 #include "openvswitch/types.h"
 #include "packets.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "smap.h"
 #include "unixctl.h"
 #include "util.h"
@@ -726,8 +726,7 @@ lldp_put_packet(struct lldp *lldp, struct dp_packet *packet,
 {
     struct lldpd *mylldpd = lldp->lldpd;
     struct lldpd_hardware *hw = lldpd_first_hardware(mylldpd);
-    static const struct eth_addr eth_addr_lldp =
-        { { { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0e } } };
+    static const struct eth_addr eth_addr_lldp = ETH_ADDR_C(01,80,c2,00,00,0e);
 
     ovs_mutex_lock(&mutex);
 
@@ -797,8 +796,6 @@ lldp_create(const struct netdev *netdev,
     lchassis->c_id = &mac->ea[0];
 
     ovs_list_init(&lchassis->c_mgmt);
-    lchassis->c_ttl = lldp->lldpd->g_config.c_tx_interval *
-                      lldp->lldpd->g_config.c_tx_hold;
     lchassis->c_ttl = LLDP_CHASSIS_TTL;
     lldpd_assign_cfg_to_protocols(lldp->lldpd);
     ovs_list_init(&lldp->lldpd->g_chassis);

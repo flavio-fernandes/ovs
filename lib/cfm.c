@@ -31,7 +31,7 @@
 #include "netdev.h"
 #include "ovs-atomic.h"
 #include "packets.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "random.h"
 #include "seq.h"
 #include "timer.h"
@@ -45,10 +45,8 @@ VLOG_DEFINE_THIS_MODULE(cfm);
 #define CFM_MAX_RMPS 256
 
 /* Ethernet destination address of CCM packets. */
-static const struct eth_addr eth_addr_ccm = {
-    { { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x30 } } };
-static const struct eth_addr eth_addr_ccm_x = {
-    { { 0x01, 0x23, 0x20, 0x00, 0x00, 0x30 } } };
+static const struct eth_addr eth_addr_ccm = ETH_ADDR_C(01,80,c2,00,00,30);
+static const struct eth_addr eth_addr_ccm_x = ETH_ADDR_C(01,23,20,00,00,30);
 
 #define ETH_TYPE_CFM 0x8902
 
@@ -760,7 +758,7 @@ cfm_process_heartbeat(struct cfm *cfm, const struct dp_packet *p)
 
     atomic_read_relaxed(&cfm->extended, &extended);
 
-    eth = dp_packet_l2(p);
+    eth = dp_packet_eth(p);
     ccm = dp_packet_at(p, (uint8_t *)dp_packet_l3(p) - (uint8_t *)dp_packet_data(p),
                     CCM_ACCEPT_LEN);
 

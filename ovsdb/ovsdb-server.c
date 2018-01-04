@@ -40,7 +40,7 @@
 #include "ovsdb-data.h"
 #include "ovsdb-types.h"
 #include "ovsdb-error.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "process.h"
 #include "replication.h"
 #include "row.h"
@@ -56,18 +56,15 @@
 #include "util.h"
 #include "unixctl.h"
 #include "perf-counter.h"
+#include "ovsdb-util.h"
 #include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(ovsdb_server);
 
 struct db {
-    /* Initialized in main(). */
     char *filename;
     struct ovsdb_file *file;
     struct ovsdb *db;
-
-    /* Only used by update_remote_status(). */
-    struct ovsdb_txn *txn;
 };
 
 /* SSL configuration. */
@@ -145,7 +142,9 @@ ovsdb_replication_init(const char *sync_from, const char *exclude,
     struct shash_node *node;
     SHASH_FOR_EACH (node, all_dbs) {
         struct db *db = node->data;
-        replication_add_local_db(node->name, db->db);
+        if (node->name[0] != '_' && db->db) {
+            replication_add_local_db(node->name, db->db);
+        }
     }
 }
 
@@ -516,7 +515,10 @@ open_db(struct server_config *config, const char *filename)
 
     db_error = ovsdb_file_open(db->filename, false, &db->db, &db->file);
     if (db_error) {
-        error = ovsdb_error_to_string(db_error);
+        error = ovsdb_error_to_string_free(db_error);
+    } else if (db->db->schema->name[0] == '_') {
+        error = xasprintf("%s: names beginning with \"_\" are reserved",
+                          db->db->schema->name);
     } else if (!ovsdb_jsonrpc_server_add_db(config->jsonrpc, db->db)) {
         error = xasprintf("%s: duplicate database name", db->db->schema->name);
     } else {
@@ -524,7 +526,6 @@ open_db(struct server_config *config, const char *filename)
         return NULL;
     }
 
-    ovsdb_error_destroy(db_error);
     close_db(db);
     return error;
 }
@@ -673,172 +674,18 @@ add_remote(struct shash *remotes, const char *target)
     return options;
 }
 
-static struct ovsdb_datum *
-get_datum(struct ovsdb_row *row, const char *column_name,
-          const enum ovsdb_atomic_type key_type,
-          const enum ovsdb_atomic_type value_type,
-          const size_t n_max)
-{
-    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-    const struct ovsdb_table_schema *schema = row->table->schema;
-    const struct ovsdb_column *column;
-
-    column = ovsdb_table_schema_get_column(schema, column_name);
-    if (!column) {
-        VLOG_DBG_RL(&rl, "Table `%s' has no `%s' column",
-                    schema->name, column_name);
-        return NULL;
-    }
-
-    if (column->type.key.type != key_type
-        || column->type.value.type != value_type
-        || column->type.n_max != n_max) {
-        if (!VLOG_DROP_DBG(&rl)) {
-            char *type_name = ovsdb_type_to_english(&column->type);
-            VLOG_DBG("Table `%s' column `%s' has type %s, not expected "
-                     "key type %s, value type %s, max elements %"PRIuSIZE".",
-                     schema->name, column_name, type_name,
-                     ovsdb_atomic_type_to_string(key_type),
-                     ovsdb_atomic_type_to_string(value_type),
-                     n_max);
-            free(type_name);
-        }
-        return NULL;
-    }
-
-    return &row->fields[column->index];
-}
-
-/* Read string-string key-values from a map.  Returns the value associated with
- * 'key', if found, or NULL */
-static const char *
-read_map_string_column(const struct ovsdb_row *row, const char *column_name,
-                       const char *key)
-{
-    const struct ovsdb_datum *datum;
-    union ovsdb_atom *atom_key = NULL, *atom_value = NULL;
-    size_t i;
-
-    datum = get_datum(CONST_CAST(struct ovsdb_row *, row), column_name,
-                      OVSDB_TYPE_STRING, OVSDB_TYPE_STRING, UINT_MAX);
-
-    if (!datum) {
-        return NULL;
-    }
-
-    for (i = 0; i < datum->n; i++) {
-        atom_key = &datum->keys[i];
-        if (!strcmp(atom_key->string, key)){
-            atom_value = &datum->values[i];
-            break;
-        }
-    }
-
-    return atom_value ? atom_value->string : NULL;
-}
-
-static const union ovsdb_atom *
-read_column(const struct ovsdb_row *row, const char *column_name,
-            enum ovsdb_atomic_type type)
-{
-    const struct ovsdb_datum *datum;
-
-    datum = get_datum(CONST_CAST(struct ovsdb_row *, row), column_name, type,
-                      OVSDB_TYPE_VOID, 1);
-    return datum && datum->n ? datum->keys : NULL;
-}
-
-static bool
-read_integer_column(const struct ovsdb_row *row, const char *column_name,
-                    long long int *integerp)
-{
-    const union ovsdb_atom *atom;
-
-    atom = read_column(row, column_name, OVSDB_TYPE_INTEGER);
-    *integerp = atom ? atom->integer : 0;
-    return atom != NULL;
-}
-
-static bool
-read_string_column(const struct ovsdb_row *row, const char *column_name,
-                   const char **stringp)
-{
-    const union ovsdb_atom *atom;
-
-    atom = read_column(row, column_name, OVSDB_TYPE_STRING);
-    *stringp = atom ? atom->string : NULL;
-    return atom != NULL;
-}
-
-static bool
-read_bool_column(const struct ovsdb_row *row, const char *column_name,
-                   bool *boolp)
-{
-    const union ovsdb_atom *atom;
-
-    atom = read_column(row, column_name, OVSDB_TYPE_BOOLEAN);
-    *boolp = atom ? atom->boolean : false;
-    return atom != NULL;
-}
-
 static void
-write_bool_column(struct ovsdb_row *row, const char *column_name, bool value)
+free_remotes(struct shash *remotes)
 {
-    const struct ovsdb_column *column;
-    struct ovsdb_datum *datum;
+    if (remotes) {
+        struct shash_node *node;
 
-    column = ovsdb_table_schema_get_column(row->table->schema, column_name);
-    datum = get_datum(row, column_name, OVSDB_TYPE_BOOLEAN,
-                      OVSDB_TYPE_VOID, 1);
-    if (!datum) {
-        return;
-    }
-
-    if (datum->n != 1) {
-        ovsdb_datum_destroy(datum, &column->type);
-
-        datum->n = 1;
-        datum->keys = xmalloc(sizeof *datum->keys);
-        datum->values = NULL;
-    }
-
-    datum->keys[0].boolean = value;
-}
-
-static void
-write_string_string_column(struct ovsdb_row *row, const char *column_name,
-                           char **keys, char **values, size_t n)
-{
-    const struct ovsdb_column *column;
-    struct ovsdb_datum *datum;
-    size_t i;
-
-    column = ovsdb_table_schema_get_column(row->table->schema, column_name);
-    datum = get_datum(row, column_name, OVSDB_TYPE_STRING, OVSDB_TYPE_STRING,
-                      UINT_MAX);
-    if (!datum) {
-        for (i = 0; i < n; i++) {
-            free(keys[i]);
-            free(values[i]);
+        SHASH_FOR_EACH (node, remotes) {
+            struct ovsdb_jsonrpc_options *options = node->data;
+            free(options->role);
         }
-        return;
+        shash_destroy_free_data(remotes);
     }
-
-    /* Free existing data. */
-    ovsdb_datum_destroy(datum, &column->type);
-
-    /* Allocate space for new values. */
-    datum->n = n;
-    datum->keys = xmalloc(n * sizeof *datum->keys);
-    datum->values = xmalloc(n * sizeof *datum->values);
-
-    for (i = 0; i < n; ++i) {
-        datum->keys[i].string = keys[i];
-        datum->values[i].string = values[i];
-    }
-
-    /* Sort and check constraints. */
-    ovsdb_datum_sort_assert(datum, column->type.key.type);
 }
 
 /* Adds a remote and options to 'remotes', based on the Manager table row in
@@ -850,27 +697,35 @@ add_manager_options(struct shash *remotes, const struct ovsdb_row *row)
     struct ovsdb_jsonrpc_options *options;
     long long int max_backoff, probe_interval;
     bool read_only;
-    const char *target, *dscp_string;
+    const char *target, *dscp_string, *role;
 
-    if (!read_string_column(row, "target", &target) || !target) {
+    if (!ovsdb_util_read_string_column(row, "target", &target) || !target) {
         VLOG_INFO_RL(&rl, "Table `%s' has missing or invalid `target' column",
                      row->table->schema->name);
         return;
     }
 
     options = add_remote(remotes, target);
-    if (read_integer_column(row, "max_backoff", &max_backoff)) {
+    if (ovsdb_util_read_integer_column(row, "max_backoff", &max_backoff)) {
         options->max_backoff = max_backoff;
     }
-    if (read_integer_column(row, "inactivity_probe", &probe_interval)) {
+    if (ovsdb_util_read_integer_column(row, "inactivity_probe",
+                                       &probe_interval)) {
         options->probe_interval = probe_interval;
     }
-    if (read_bool_column(row, "read_only", &read_only)) {
+    if (ovsdb_util_read_bool_column(row, "read_only", &read_only)) {
         options->read_only = read_only;
     }
 
+    free(options->role);
+    options->role = NULL;
+    if (ovsdb_util_read_string_column(row, "role", &role) && role) {
+        options->role = xstrdup(role);
+    }
+
     options->dscp = DSCP_DEFAULT;
-    dscp_string = read_map_string_column(row, "other_config", "dscp");
+    dscp_string = ovsdb_util_read_map_string_column(row, "other_config",
+                                                    "dscp");
     if (dscp_string) {
         int dscp = atoi(dscp_string);
         if (dscp >= 0 && dscp <= 63) {
@@ -939,7 +794,7 @@ update_remote_row(const struct ovsdb_row *row, struct ovsdb_txn *txn,
     size_t n = 0;
 
     /* Get the "target" (protocol/host/port) spec. */
-    if (!read_string_column(row, "target", &target)) {
+    if (!ovsdb_util_read_string_column(row, "target", &target)) {
         /* Bad remote spec or incorrect schema. */
         return;
     }
@@ -947,7 +802,7 @@ update_remote_row(const struct ovsdb_row *row, struct ovsdb_txn *txn,
     ovsdb_jsonrpc_server_get_remote_status(jsonrpc, target, &status);
 
     /* Update status information columns. */
-    write_bool_column(rw_row, "is_connected", status.is_connected);
+    ovsdb_util_write_bool_column(rw_row, "is_connected", status.is_connected);
 
     if (status.state) {
         keys[n] = xstrdup("state");
@@ -986,15 +841,16 @@ update_remote_row(const struct ovsdb_row *row, struct ovsdb_txn *txn,
         keys[n] = xstrdup("bound_port");
         values[n++] = xasprintf("%"PRIu16, ntohs(status.bound_port));
     }
-    write_string_string_column(rw_row, "status", keys, values, n);
+    ovsdb_util_write_string_string_column(rw_row, "status", keys, values, n);
 
     ovsdb_jsonrpc_server_free_remote_status(&status);
 }
 
 static void
-update_remote_rows(const struct shash *all_dbs,
+update_remote_rows(const struct shash *all_dbs, const struct db *db_,
                    const char *remote_name,
-                   const struct ovsdb_jsonrpc_server *jsonrpc)
+                   const struct ovsdb_jsonrpc_server *jsonrpc,
+                   struct ovsdb_txn *txn)
 {
     const struct ovsdb_table *table, *ref_table;
     const struct ovsdb_column *column;
@@ -1012,7 +868,8 @@ update_remote_rows(const struct shash *all_dbs,
         return;
     }
 
-    if (column->type.key.type != OVSDB_TYPE_UUID
+    if (db != db_
+        || column->type.key.type != OVSDB_TYPE_UUID
         || !column->type.key.u.uuid.refTable
         || column->type.value.type != OVSDB_TYPE_VOID) {
         return;
@@ -1030,7 +887,7 @@ update_remote_rows(const struct shash *all_dbs,
 
             ref_row = ovsdb_table_get_row(ref_table, &datum->keys[i].uuid);
             if (ref_row) {
-                update_remote_row(ref_row, db->txn, jsonrpc);
+                update_remote_row(ref_row, txn, jsonrpc);
             }
         }
     }
@@ -1041,30 +898,23 @@ update_remote_status(const struct ovsdb_jsonrpc_server *jsonrpc,
                      const struct sset *remotes,
                      struct shash *all_dbs)
 {
-    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-    const char *remote;
-    struct db *db;
     struct shash_node *node;
+    SHASH_FOR_EACH (node, all_dbs) {
+        struct db *db = node->data;
+        struct ovsdb_txn *txn = ovsdb_txn_create(db->db);
 
-    SHASH_FOR_EACH(node, all_dbs) {
-        db = node->data;
-        db->txn = ovsdb_txn_create(db->db);
-    }
+        /* Iterate over --remote arguments given on command line. */
+        const char *remote;
+        SSET_FOR_EACH (remote, remotes) {
+            update_remote_rows(all_dbs, db, remote, jsonrpc, txn);
+        }
 
-    /* Iterate over --remote arguments given on command line. */
-    SSET_FOR_EACH (remote, remotes) {
-        update_remote_rows(all_dbs, remote, jsonrpc);
-    }
-
-    SHASH_FOR_EACH(node, all_dbs) {
-        struct ovsdb_error *error;
-        db = node->data;
-        error = ovsdb_txn_commit(db->txn, false);
+        struct ovsdb_error *error = ovsdb_txn_commit(txn, false);
         if (error) {
-            char *msg = ovsdb_error_to_string(error);
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+            char *msg = ovsdb_error_to_string_free(error);
             VLOG_ERR_RL(&rl, "Failed to update remote status: %s", msg);
             free(msg);
-            ovsdb_error_destroy(error);
         }
     }
 }
@@ -1088,7 +938,7 @@ reconfigure_remotes(struct ovsdb_jsonrpc_server *jsonrpc,
         }
     }
     ovsdb_jsonrpc_server_set_remotes(jsonrpc, &resolved_remotes);
-    shash_destroy_free_data(&resolved_remotes);
+    free_remotes(&resolved_remotes);
 
     return errors.string;
 }
@@ -1286,26 +1136,33 @@ static void
 ovsdb_server_compact(struct unixctl_conn *conn, int argc,
                      const char *argv[], void *dbs_)
 {
+    const char *db_name = argc < 2 ? NULL : argv[1];
     struct shash *all_dbs = dbs_;
     struct ds reply;
     struct db *db;
     struct shash_node *node;
     int n = 0;
 
+    if (db_name && db_name[0] == '_') {
+        unixctl_command_reply_error(conn, "cannot compact built-in databases");
+        return;
+    }
+
     ds_init(&reply);
     SHASH_FOR_EACH(node, all_dbs) {
         db = node->data;
-        if (argc < 2 || !strcmp(argv[1], node->name)) {
+        if (db_name
+            ? !strcmp(node->name, db_name)
+            : node->name[0] != '_') {
             struct ovsdb_error *error;
 
             VLOG_INFO("compacting %s database by user request", node->name);
 
             error = ovsdb_file_compact(db->file);
             if (error) {
-                char *s = ovsdb_error_to_string(error);
+                char *s = ovsdb_error_to_string_free(error);
                 ds_put_format(&reply, "%s\n", s);
                 free(s);
-                ovsdb_error_destroy(error);
             }
 
             n++;
@@ -1431,21 +1288,12 @@ ovsdb_server_add_database(struct unixctl_conn *conn, int argc OVS_UNUSED,
 }
 
 static void
-ovsdb_server_remove_database(struct unixctl_conn *conn, int argc OVS_UNUSED,
-                             const char *argv[], void *config_)
+remove_db(struct server_config *config, struct shash_node *node)
 {
-    struct server_config *config = config_;
-    struct shash_node *node;
     struct db *db;
     bool ok;
 
-    node = shash_find(config->all_dbs, argv[1]);
-    if (!node)  {
-        unixctl_command_reply_error(conn, "Failed to find the database.");
-        return;
-    }
     db = node->data;
-
     ok = ovsdb_jsonrpc_server_remove_db(config->jsonrpc, db->db);
     ovs_assert(ok);
 
@@ -1459,6 +1307,26 @@ ovsdb_server_remove_database(struct unixctl_conn *conn, int argc OVS_UNUSED,
         ovsdb_replication_init(*config->sync_from, *config->sync_exclude,
                                config->all_dbs, server_uuid);
     }
+}
+
+static void
+ovsdb_server_remove_database(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                             const char *argv[], void *config_)
+{
+    struct server_config *config = config_;
+    struct shash_node *node;
+
+    node = shash_find(config->all_dbs, argv[1]);
+    if (!node) {
+        unixctl_command_reply_error(conn, "Failed to find the database.");
+        return;
+    }
+    if (node->name[0] == '_') {
+        unixctl_command_reply_error(conn, "Cannot remove reserved database.");
+        return;
+    }
+
+    remove_db(config, node);
     unixctl_command_reply(conn, NULL);
 }
 
@@ -1718,7 +1586,9 @@ save_config(struct server_config *config)
     sset_init(&db_filenames);
     SHASH_FOR_EACH (node, config->all_dbs) {
         struct db *db = node->data;
-        sset_add(&db_filenames, db->filename);
+        if (node->name[0] != '_') {
+            sset_add(&db_filenames, db->filename);
+        }
     }
 
     save_config__(config->config_tmpfile, config->remotes, &db_filenames,

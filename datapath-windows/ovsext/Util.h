@@ -39,10 +39,17 @@
 #define OVS_RECIRC_POOL_TAG             'CSVO'
 #define OVS_CT_POOL_TAG                 'CTVO'
 #define OVS_GENEVE_POOL_TAG             'GNVO'
+#define OVS_IPFRAG_POOL_TAG             'FGVO'
 
+_IRQL_requires_max_(DISPATCH_LEVEL)
 VOID *OvsAllocateMemory(size_t size);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
 VOID *OvsAllocateMemoryWithTag(size_t size, ULONG tag);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
 VOID *OvsAllocateAlignedMemory(size_t size, UINT16 align);
+
 VOID *OvsAllocateMemoryPerCpu(size_t size, size_t count, ULONG tag);
 VOID OvsFreeMemory(VOID *ptr);
 VOID OvsFreeMemoryWithTag(VOID *ptr, ULONG tag);
@@ -143,6 +150,21 @@ static __inline
 UINT32 Rand()
 {
     return seed.LowPart *= 0x8088405 + 1;
+}
+
+/*
+ *----------------------------------------------------------------------------
+ *  OvsGetMdlWithLowPriority --
+ *    Return the nonpaged system-space virtual address for the given MDL
+ *    `curMdl` using low page priority and no executable memory.
+ *----------------------------------------------------------------------------
+ */
+
+static __inline
+PVOID OvsGetMdlWithLowPriority(PMDL curMdl)
+{
+return	MmGetSystemAddressForMdlSafe(curMdl,
+                                     LowPagePriority | MdlMappingNoExecute);
 }
 
 #endif /* __UTIL_H_ */

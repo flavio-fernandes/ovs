@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2011, 2013, 2014, 2015, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,12 @@
 
 #ifndef __CHECKER__
 #error "Use this header only with sparse.  It is not a correct implementation."
+#endif
+
+#define NETINET_IN_H_INCLUDED 1
+
+#ifndef SYS_TYPES_H_INCLUDED
+#error "Must include <sys/types.h> before <netinet/in.h> for FreeBSD support"
 #endif
 
 #ifndef _NETINET_IN_H
@@ -75,6 +81,7 @@ struct sockaddr_in6 {
 #define IPPROTO_SCTP 132
 
 #define IPPORT_FTP 21
+#define IPPORT_TFTP 69
 
 /* All the IP options documented in Linux ip(7). */
 #define IP_ADD_MEMBERSHIP 35

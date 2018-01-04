@@ -40,7 +40,8 @@ vtep_vtep_ctl_LDADD = vtep/libvtep.la lib/libopenvswitch.la
 scripts_SCRIPTS += \
     vtep/ovs-vtep
 
-EXTRA_DIST += vtep/ovs-vtep
+EXTRA_DIST += vtep/ovs-vtep.in
+CLEANFILES += vtep/ovs-vtep
 
 FLAKE8_PYFILES += vtep/ovs-vtep
 
@@ -57,7 +58,7 @@ if HAVE_DOT
 vtep/vtep.gv: ovsdb/ovsdb-dot.in vtep/vtep.ovsschema
 	$(AM_V_GEN)$(OVSDB_DOT) --no-arrows $(srcdir)/vtep/vtep.ovsschema > $@
 vtep/vtep.pic: vtep/vtep.gv ovsdb/dot2pic
-	$(AM_V_GEN)(dot -T plain < vtep/vtep.gv | $(PERL) $(srcdir)/ovsdb/dot2pic -f 3) > $@.tmp && \
+	$(AM_V_GEN)(dot -T plain < vtep/vtep.gv | $(PYTHON) $(srcdir)/ovsdb/dot2pic -f 3) > $@.tmp && \
 	mv $@.tmp $@
 VTEP_PIC = vtep/vtep.pic
 VTEP_DOT_DIAGRAM_ARG = --er-diagram=$(VTEP_PIC)

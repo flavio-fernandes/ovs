@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2015 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2015, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,8 +32,8 @@
 #include "ofp-version-opt.h"
 #include "openvswitch/ofpbuf.h"
 #include "openflow/openflow.h"
-#include "poll-loop.h"
-#include "rconn.h"
+#include "openvswitch/poll-loop.h"
+#include "openvswitch/rconn.h"
 #include "simap.h"
 #include "stream-ssl.h"
 #include "timeval.h"
@@ -335,8 +335,8 @@ parse_options(int argc, char *argv[])
             break;
 
         case OPT_WITH_FLOWS:
-            error = parse_ofp_flow_mod_file(optarg, OFPFC_ADD, &default_flows,
-                                            &n_default_flows,
+            error = parse_ofp_flow_mod_file(optarg, NULL, OFPFC_ADD,
+                                            &default_flows, &n_default_flows,
                                             &usable_protocols);
             if (error) {
                 ovs_fatal(0, "%s", error);

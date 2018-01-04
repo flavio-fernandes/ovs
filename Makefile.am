@@ -20,6 +20,7 @@ AM_CPPFLAGS += $(PTHREAD_INCLUDES)
 AM_CPPFLAGS += $(MSVC_CFLAGS)
 AM_LDFLAGS += $(PTHREAD_LDFLAGS)
 AM_LDFLAGS += $(MSVC64_LDFLAGS)
+PLATFORM = $(MSVC_PLATFORM)
 endif
 
 AM_CPPFLAGS += -I $(top_srcdir)/include
@@ -35,12 +36,17 @@ AM_CFLAGS += $(OVS_CFLAGS)
 
 if DPDK_NETDEV
 AM_CFLAGS += -D_FILE_OFFSET_BITS=64
+DPDKSTRIP_FLAGS = --dpdk
+else
+DPDKSTRIP_FLAGS = --nodpdk
 endif
 
 if NDEBUG
 AM_CPPFLAGS += -DNDEBUG
 AM_CFLAGS += -fomit-frame-pointer
 endif
+
+AM_CTAGSFLAGS = $(OVS_CTAGS_IDENTIFIERS_LIST)
 
 if WIN32
 psep=";"
@@ -80,8 +86,9 @@ EXTRA_DIST = \
 	build-aux/cksum-schema-check \
 	build-aux/calculate-schema-cksum \
 	build-aux/dist-docs \
-	build-aux/sodepends.pl \
-	build-aux/soexpand.pl \
+	build-aux/dpdkstrip.py \
+	build-aux/sodepends.py \
+	build-aux/soexpand.py \
 	build-aux/xml2nroff \
 	$(MAN_FRAGMENTS) \
 	$(MAN_ROOTS) \
@@ -106,6 +113,7 @@ MAN_ROOTS =
 noinst_DATA =
 noinst_HEADERS =
 lib_LTLIBRARIES =
+noinst_LTLIBRARIES =
 noinst_man_MANS =
 noinst_PROGRAMS =
 noinst_SCRIPTS =
@@ -136,12 +144,12 @@ ro_shell = printf '\043 Generated automatically -- do not modify!    -*- buffer-
 
 SUFFIXES += .in
 .in:
-	$(AM_V_GEN)$(PERL) $(srcdir)/build-aux/soexpand.pl -I$(srcdir) < $< | \
+	$(AM_V_GEN)PYTHONPATH=$$PYTHONPATH:$(srcdir)/python $(PYTHON) $(srcdir)/build-aux/soexpand.py -I$(srcdir) < $< | \
+	  $(PYTHON) $(srcdir)/build-aux/dpdkstrip.py $(DPDKSTRIP_FLAGS) | \
 	  sed \
 	    -e 's,[@]PKIDIR[@],$(PKIDIR),g' \
 	    -e 's,[@]LOGDIR[@],$(LOGDIR),g' \
 	    -e 's,[@]DBDIR[@],$(DBDIR),g' \
-	    -e 's,[@]PERL[@],$(PERL),g' \
 	    -e 's,[@]PYTHON[@],$(PYTHON),g' \
 	    -e 's,[@]RUNDIR[@],$(RUNDIR),g' \
 	    -e 's,[@]VERSION[@],$(VERSION),g' \
@@ -166,7 +174,6 @@ SUFFIXES += .xml
 	  PKIDIR='$(PKIDIR)' \
 	  LOGDIR='$(LOGDIR)' \
 	  DBDIR='$(DBDIR)' \
-	  PERL='$(PERL)' \
 	  PYTHON='$(PYTHON)' \
 	  RUNDIR='$(RUNDIR)' \
 	  VERSION='$(VERSION)' \
@@ -295,6 +302,17 @@ check-endian:
 	fi
 .PHONY: check-endian
 
+ALL_LOCAL += check-echo-n
+check-echo-n:
+	@if test -e $(srcdir)/.git && (git --version) >/dev/null 2>&1 && \
+	  git --no-pager grep -n 'echo'' -n' $(srcdir); \
+	then \
+	  echo "See above for uses for \"echo"" -n\", which is non-POSIX"; \
+	  echo "and does not work with all shells.  Use \"printf\" instead."; \
+	  exit 1; \
+	fi
+.PHONY: check-echo-n
+
 ALL_LOCAL += thread-safety-check
 thread-safety-check:
 	@cd $(srcdir); \
@@ -310,6 +328,20 @@ thread-safety-check:
 	fi
 EXTRA_DIST += build-aux/thread-safety-blacklist
 .PHONY: thread-safety-check
+
+# Check that "ip" is used in preference to "ifconfig", because
+# "ifconfig" is not installed ubiquitously anymore.
+ALL_LOCAL += check-ifconfig
+check-ifconfig:
+	@if test -e $(srcdir)/.git && (git --version) >/dev/null 2>&1 && \
+	  (cd $(srcdir) && git --no-pager grep -l -E -e 'ifconfig' | \
+           $(EGREP) -v 'Makefile.am|ovs-vsctl-bashcomp|openvswitch-custom\.te'); \
+	then \
+	  echo "See above for list of files that use or reference"; \
+          echo "'ifconfig'.  Please use 'ip' instead."; \
+	  exit 1; \
+	fi
+.PHONY: check-ifconfig
 
 if HAVE_GROFF
 ALL_LOCAL += manpage-check
@@ -351,7 +383,7 @@ ALL_LOCAL += flake8-check
 FLAKE8_SELECT = H231,H232,H233,H238
 FLAKE8_IGNORE = E121,E123,E125,E126,E127,E128,E129,E131,W503,F811,D,H,I
 flake8-check: $(FLAKE8_PYFILES)
-	$(AM_V_GEN) \
+	$(FLAKE8_WERROR)$(AM_V_GEN) \
 	  src='$^' && \
 	  flake8 $$src --select=$(FLAKE8_SELECT) $(FLAKE8_FLAGS) && \
 	  flake8 $$src --ignore=$(FLAKE8_IGNORE) $(FLAKE8_FLAGS) && \
@@ -360,8 +392,8 @@ endif
 CLEANFILES += flake8-check
 
 include $(srcdir)/manpages.mk
-$(srcdir)/manpages.mk: $(MAN_ROOTS) build-aux/sodepends.pl
-	@$(PERL) $(srcdir)/build-aux/sodepends.pl -I. -I$(srcdir) $(MAN_ROOTS) >$(@F).tmp
+$(srcdir)/manpages.mk: $(MAN_ROOTS) build-aux/sodepends.py python/build/soutil.py
+	@PYTHONPATH=$$PYTHONPATH:$(srcdir)/python $(PYTHON) $(srcdir)/build-aux/sodepends.py -I. -I$(srcdir) $(MAN_ROOTS) >$(@F).tmp
 	@if cmp -s $(@F).tmp $@; then \
 	  touch $@; \
 	  rm -f $(@F).tmp; \
@@ -373,13 +405,13 @@ CLEANFILES += manpage-dep-check
 if VSTUDIO_DDK
 ALL_LOCAL += ovsext
 ovsext: datapath-windows/ovsext.sln $(srcdir)/datapath-windows/include/OvsDpInterface.h
-	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
-	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8.1$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
+	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
+	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8.1$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
 
 CLEAN_LOCAL += ovsext_clean
 ovsext_clean: datapath-windows/ovsext.sln
-	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
-	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8.1$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
+	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
+	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8.1$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
 endif
 .PHONY: ovsext
 

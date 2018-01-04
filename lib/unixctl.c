@@ -24,7 +24,7 @@
 #include "openvswitch/json.h"
 #include "jsonrpc.h"
 #include "openvswitch/list.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "openvswitch/shash.h"
 #include "stream.h"
 #include "stream-provider.h"
@@ -287,7 +287,9 @@ process_command(struct unixctl_conn *conn, struct jsonrpc_msg *request)
     params = json_array(request->params);
     command = shash_find_data(&commands, request->method);
     if (!command) {
-        error = xasprintf("\"%s\" is not a valid command", request->method);
+        error = xasprintf("\"%s\" is not a valid command (use "
+                          "\"list-commands\" to see a list of valid commands)",
+                          request->method);
     } else if (params->n < command->min_args) {
         error = xasprintf("\"%s\" command requires at least %d arguments",
                           request->method, command->min_args);
@@ -371,14 +373,11 @@ kill_connection(struct unixctl_conn *conn)
 void
 unixctl_server_run(struct unixctl_server *server)
 {
-    struct unixctl_conn *conn, *next;
-    int i;
-
     if (!server) {
         return;
     }
 
-    for (i = 0; i < 10; i++) {
+    for (int i = 0; i < 10; i++) {
         struct stream *stream;
         int error;
 
@@ -396,6 +395,7 @@ unixctl_server_run(struct unixctl_server *server)
         }
     }
 
+    struct unixctl_conn *conn, *next;
     LIST_FOR_EACH_SAFE (conn, next, node, &server->conns) {
         int error = run_connection(conn);
         if (error && error != EAGAIN) {

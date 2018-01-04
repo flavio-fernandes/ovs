@@ -22,8 +22,9 @@
 #include "openvswitch/json.h"
 #include "jsonrpc.h"
 #include "ovsdb.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "server.h"
+#include "util.h"
 
 static bool ovsdb_trigger_try(struct ovsdb_trigger *, long long int now);
 static void ovsdb_trigger_complete(struct ovsdb_trigger *);
@@ -32,7 +33,8 @@ void
 ovsdb_trigger_init(struct ovsdb_session *session, struct ovsdb *db,
                    struct ovsdb_trigger *trigger,
                    struct json *request, long long int now,
-                   bool read_only)
+                   bool read_only, const char *role,
+                   const char *id)
 {
     trigger->session = session;
     trigger->db = db;
@@ -42,6 +44,8 @@ ovsdb_trigger_init(struct ovsdb_session *session, struct ovsdb *db,
     trigger->created = now;
     trigger->timeout_msec = LLONG_MAX;
     trigger->read_only = read_only;
+    trigger->role = nullable_xstrdup(role);
+    trigger->id = nullable_xstrdup(id);
     ovsdb_trigger_try(trigger, now);
 }
 
@@ -51,6 +55,8 @@ ovsdb_trigger_destroy(struct ovsdb_trigger *trigger)
     ovs_list_remove(&trigger->node);
     json_destroy(trigger->request);
     json_destroy(trigger->result);
+    free(trigger->role);
+    free(trigger->id);
 }
 
 bool
@@ -114,6 +120,7 @@ ovsdb_trigger_try(struct ovsdb_trigger *t, long long int now)
 {
     t->result = ovsdb_execute(t->db, t->session,
                               t->request, t->read_only,
+                              t->role, t->id,
                               now - t->created, &t->timeout_msec);
     if (t->result) {
         ovsdb_trigger_complete(t);

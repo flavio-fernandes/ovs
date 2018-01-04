@@ -178,6 +178,43 @@
         <p>
           The default is 10000.
         </p>
+    </column>
+
+      <column name="other_config" key="hw-offload"
+              type='{"type": "boolean"}'>
+        <p>
+          Set this value to <code>true</code> to enable netdev flow offload.
+        </p>
+        <p>
+          The default value is <code>false</code>. Changing this value requires
+          restarting the daemon
+        </p>
+        <p>
+          Currently Open vSwitch supports hardware offloading on
+          Linux systems.  On other systems, this value is ignored.
+          This functionality is considered 'experimental'. Depending
+          on which OpenFlow matches and actions are configured,
+          which kernel version is used, and what hardware is
+          available, Open vSwitch may not be able to offload
+          functionality to hardware.
+        </p>
+      </column>
+
+      <column name="other_config" key="tc-policy"
+              type='{"type": "string"}'>
+        <p>
+            Specified the policy used with HW offloading.
+            Options:
+                <code>none</code>    - Add software rule and offload rule to HW.
+                <code>skip_sw</code> - Offload rule to HW only.
+                <code>skip_hw</code> - Add software rule without offloading rule to HW.
+        </p>
+        <p>
+            This is only relevant if HW offloading is enabled (hw-offload).
+        </p>
+        <p>
+          The default value is <code>none</code>.
+        </p>
       </column>
 
       <column name="other_config" key="dpdk-init"
@@ -259,8 +296,9 @@
         </p>
         <p>
           The specifier is a comma-separated string, in ascending order of CPU
-          socket (ex: 1024,2048,4096,8192 would set socket 0 to preallocate
-          1024MB, socket 1 to preallocate 2048MB, etc.)
+          socket. E.g. On a four socket system 1024,0,2048 would set socket 0
+          to preallocate 1024MB, socket 1 to preallocate 0MB, socket 2 to
+          preallocate 2048MB and socket 3 (no value given) to preallocate 0MB.
         </p>
         <p>
           If dpdk-socket-mem and dpdk-alloc-mem are not specified, dpdk-socket-mem
@@ -300,6 +338,21 @@
           key="rundir"/> to the vhost-user unix domain socket files.  If this
           value is unset, the sockets are put directly in <ref
           column="external_ids" key="rundir"/>.
+        </p>
+        <p>
+          Changing this value requires restarting the daemon.
+        </p>
+      </column>
+
+      <column name="other_config" key="vhost-iommu-support"
+              type='{"type": "boolean"}'>
+        <p>
+          vHost IOMMU is a security feature, which restricts the vhost memory
+          that a virtio device may access. vHost IOMMU support is disabled by
+          default, due to a bug in QEMU implementations of the vhost REPLY_ACK
+          protocol, (on which vHost IOMMU relies) prior to v2.9.1. Setting this
+          value to <code>true</code> enables vHost IOMMU support for vHost User
+          Client ports in OvS-DPDK, starting from DPDK v17.11.
         </p>
         <p>
           Changing this value requires restarting the daemon.
@@ -829,12 +882,13 @@
       </column>
 
       <column name="other_config" key="datapath-id">
-        Exactly 16 hex digits to set the OpenFlow datapath ID to a specific
-        value.  May not be all-zero.
+        Overrides the default OpenFlow datapath ID, setting it to the specified
+        value specified in hex.  The value must either have a <code>0x</code>
+        prefix or be exactly 16 hex digits long.  May not be all-zero.
       </column>
 
       <column name="other_config" key="dp-desc">
-        Human readable description of datapath.  It it a maximum 256
+        Human readable description of datapath.  It is a maximum 256
         byte-long free-form string to describe the datapath for
         debugging purposes, e.g. <code>switch3 in room 3120</code>.
       </column>
@@ -857,12 +911,12 @@
       <column name="protocols">
         <p>
           List of OpenFlow protocols that may be used when negotiating
-          a connection with a controller.  OpenFlow 1.0, 1.1, 1.2, and
-          1.3 are enabled by default if this column is empty.
+          a connection with a controller.  OpenFlow 1.0, 1.1, 1.2, 1.3, and
+          1.4 are enabled by default if this column is empty.
         </p>
 
         <p>
-          OpenFlow 1.4, 1.5, and 1.6 are not enabled by default because their
+          OpenFlow 1.5 and 1.6 are not enabled by default because their
           implementations are missing features.  In addition, the OpenFlow 1.6
           specification is still under development and thus subject to change.
         </p>
@@ -1531,9 +1585,8 @@
       <dl>
         <dt><code>balance-tcp</code></dt>
         <dd>
-          Balances flows among slaves based on L2, L3, and L4 protocol
-          information such as destination MAC address, IP address, and TCP
-          port.
+          Balances flows among slaves based on L3 and L4 protocol information
+          such as IP addresses and TCP/UDP ports.
         </dd>
       </dl>
 
@@ -2134,8 +2187,8 @@
 
           <dt><code>gre</code></dt>
           <dd>
-            An Ethernet over RFC 2890 Generic Routing Encapsulation over IPv4/IPv6
-            tunnel.
+            Generic Routing Encapsulation (GRE) over IPv4/IPv6 tunnel,
+            configurable to encapsulate layer 2 or layer 3 traffic.
           </dd>
 
           <dt><code>vxlan</code></dt>
@@ -2330,6 +2383,11 @@
         </ul>
       </column>
 
+      <column name="options" key="dst_port">
+        Optional.  The tunnel transport layer destination port, for UDP and TCP
+        based tunnel protocols (Geneve, VXLAN, LISP, and STT).
+      </column>
+
       <column name="options" key="key">
         Optional.  Shorthand to set <code>in_key</code> and
         <code>out_key</code> at the same time.
@@ -2364,6 +2422,31 @@
         including tunnel monitoring.
       </column>
 
+      <group title="Tunnel Options: lisp only">
+        <column name="options" key="packet_type"
+                type='{"type": "string", "enum": ["set",
+                      ["legacy_l3", "ptap"]]}'>
+          <p>
+            A LISP tunnel sends and receives only IPv4 and IPv6 packets.  This
+            option controls what how the tunnel represents the packets that it
+            sends and receives:
+          </p>
+
+          <ul>
+            <li>
+              By default, or if this option is <code>legacy_l3</code>, the
+              tunnel represents packets as Ethernet frames for compatibility
+              with legacy OpenFlow controllers that expect this behavior.
+            </li>
+            <li>
+              If this option is <code>ptap</code>, the tunnel represents
+              packets using the <code>packet_type</code> mechanism introduced
+              in OpenFlow 1.5.
+            </li>
+          </ul>
+        </column>
+      </group>
+
       <group title="Tunnel Options: vxlan only">
 
         <column name="options" key="exts">
@@ -2379,9 +2462,81 @@
               additional information.
               (<code>https://tools.ietf.org/html/draft-smith-vxlan-group-policy</code>)
             </li>
+            <li>
+              <code>gpe</code>: Support for Generic Protocol Encapsulation in
+              accordance with IETF draft
+              <code>https://tools.ietf.org/html/draft-ietf-nvo3-vxlan-gpe</code>.
+              Without this option, a VXLAN packet always encapsulates an
+              Ethernet frame.  With this option, an VXLAN packet may also
+              encapsulate an IPv4, IPv6, NSH, or MPLS packet.
+            </li>
           </ul>
         </column>
 
+        <column name="options" key="packet_type"
+                type='{"type": "string", "enum": ["set",
+                      ["legacy_l2", "legacy_l3", "ptap"]]}'>
+          <p>
+            This option controls what types of packets the tunnel sends and
+            receives and how it represents them:
+          </p>
+
+          <ul>
+            <li>
+              By default, or if this option is <code>legacy_l2</code>, the
+              tunnel sends and receives only Ethernet frames.
+            </li>
+            <li>
+              If this option is <code>legacy_l3</code>, the tunnel sends and
+              receives only non-Ethernet (L3) packet, but the packets are
+              represented as Ethernet frames for compatibility with legacy
+              OpenFlow controllers that expect this behavior.  This requires
+              enabling <code>gpe</code> in <ref column="options" key="exts"/>.
+            </li>
+            <li>
+              If this option is <code>ptap</code>, Open vSwitch represents
+              packets in the tunnel using the <code>packet_type</code>
+              mechanism introduced in OpenFlow 1.5.  This mechanism supports
+              any kind of packet, but actually sending and receiving
+              non-Ethernet packets requires additionally enabling
+              <code>gpe</code> in <ref column="options" key="exts"/>.
+            </li>
+          </ul>
+        </column>
+      </group>
+
+      <group title="Tunnel Options: gre only">
+        <p>
+          <code>gre</code> interfaces support these options.
+        </p>
+
+        <column name="options" key="packet_type"
+                type='{"type": "string", "enum": ["set",
+                      ["legacy_l2", "legacy_l3", "ptap"]]}'>
+          <p>
+            This option controls what types of packets the tunnel sends and
+            receives and how it represents them:
+          </p>
+
+          <ul>
+            <li>
+              By default, or if this option is <code>legacy_l2</code>, the
+              tunnel sends and receives only Ethernet frames.
+            </li>
+            <li>
+              If this option is <code>legacy_l3</code>, the tunnel sends and
+              receives only non-Ethernet (L3) packet, but the packets are
+              represented as Ethernet frames for compatibility with legacy
+              OpenFlow controllers that expect this behavior.
+            </li>
+            <li>
+              If this option is <code>ptap</code>, the tunnel sends and
+              receives any kind of packet.  Open vSwitch represents packets in
+              the tunnel using the <code>packet_type</code> mechanism
+              introduced in OpenFlow 1.5.
+            </li>
+          </ul>
+        </column>
       </group>
 
       <group title="Tunnel Options: gre, geneve, and vxlan">
@@ -2414,8 +2569,36 @@
 
     <group title="Patch Options">
       <p>
-        Only <code>patch</code> interfaces support these options.
+        These options apply only to <dfn>patch ports</dfn>, that is, interfaces
+        whose <ref column="type"/> column is <code>patch</code>.  Patch ports
+        are mainly a way to connect otherwise independent bridges to one
+        another, similar to how one might plug an Ethernet cable (a ``patch
+        cable'') into two physical switches to connect those switches.  The
+        effect of plugging a patch port into two switches is conceptually
+        similar to that of plugging the two ends of a Linux <code>veth</code>
+        device into those switches, but the implementation of patch ports makes
+        them much more efficient.
       </p>
+
+      <p>
+        Patch ports may connect two different bridges (the usual case) or the
+        same bridge.  In the latter case, take special care to avoid loops,
+        e.g. by programming appropriate flows with OpenFlow.  Patch ports do
+        not work if its ends are attached to bridges on different datapaths,
+        e.g. to connect bridges in <code>system</code> and <code>netdev</code>
+        datapaths.
+      </p>
+
+      <p>
+        The following command creates and connects patch ports <code>p0</code>
+        and <code>p1</code> and adds them to bridges <code>br0</code> and
+        <code>br1</code>, respectively:
+      </p>
+
+      <pre>
+ovs-vsctl add-port br0 p0 -- set Interface p0 type=patch options:peer=p1 \
+       -- add-port br1 p1 -- set Interface p1 type=patch options:peer=p0
+      </pre>
 
       <column name="options" key="peer">
         The <ref column="name"/> of the <ref table="Interface"/> for the other
@@ -2447,10 +2630,11 @@
           Specifies the PCI address associated with the port for physical
           devices, or the virtual driver to be used for the port when a virtual
           PMD is intended to be used. For the latter, the argument string
-          typically takes the form of eth_&lt;driver_name&gt;&lt;x&gt; where
-          'driver_name' is a valid virtual DPDK PMD driver name and where 'x'
-          lies in the range of 0 to RTE_MAX_ETHPORTS-1.
-          Only supported by the dpdk port type.
+          typically takes the form of
+          <code>eth_<var>driver_name</var><var>x</var></code>, where
+          <var>driver_name</var> is a valid virtual DPDK PMD driver name and
+          <var>x</var> is a unique identifier of your choice for the given
+          port.  Only supported by the dpdk port type.
         </p>
       </column>
 
@@ -2647,6 +2831,70 @@
         Whether carrier is detected on <ref column="status"
         key="tunnel_egress_iface"/>.
       </column>
+
+      <group title="dpdk">
+        <p>
+          DPDK specific interface status options.
+        </p>
+
+          <column name="status" key="port_no">
+            DPDK port ID.
+          </column>
+
+          <column name="status" key="numa_id">
+            NUMA socket ID to which an Ethernet device is connected.
+          </column>
+
+          <column name="status" key="min_rx_bufsize">
+            Minimum size of RX buffer.
+          </column>
+
+          <column name="status" key="max_rx_pktlen">
+            Maximum configurable length of RX pkt.
+          </column>
+
+          <column name="status" key="max_rx_queues">
+            Maximum number of RX queues.
+          </column>
+
+          <column name="status" key="max_tx_queues">
+            Maximum number of TX queues.
+          </column>
+
+          <column name="status" key="max_mac_addrs">
+            Maximum number of MAC addresses.
+          </column>
+
+          <column name="status" key="max_hash_mac_addrs">
+            Maximum number of hash MAC addresses for MTA and UTA.
+          </column>
+
+          <column name="status" key="max_vfs">
+            Maximum number of hash MAC addresses for MTA and UTA.
+            Maximum number of VFs.
+          </column>
+
+          <column name="status" key="max_vmdq_pools">
+            Maximum number of VMDq pools.
+          </column>
+
+          <column name="status" key="if_type">
+            Interface type ID according to IANA ifTYPE MIB definitions.
+          </column>
+
+          <column name="status" key="if_descr">
+            Interface description string.
+          </column>
+
+          <column name="status" key="pci-vendor_id">
+            Vendor ID of PCI device.
+          </column>
+
+          <column name="status" key="pci-device_id">
+            Device ID of PCI device.
+          </column>
+
+      </group>
     </group>
 
     <group title="Statistics">
@@ -2800,12 +3048,12 @@
         BFD operates by regularly transmitting BFD control messages at a rate
         negotiated independently in each direction.  Each endpoint specifies
         the rate at which it expects to receive control messages, and the rate
-        at which it is willing to transmit them.  Open vSwitch uses a detection
-        multiplier of three, meaning that an endpoint signals a connectivity
-        fault if three consecutive BFD control messages fail to arrive.  In the
-        case of a unidirectional connectivity issue, the system not receiving
-        BFD control messages signals the problem to its peer in the messages it
-        transmits.
+        at which it is willing to transmit them.  By default, Open vSwitch uses
+        a detection multiplier of three, meaning that an endpoint signals a
+        connectivity fault if three consecutive BFD control messages fail to
+        arrive.  In the case of a unidirectional connectivity issue, the system
+        not receiving BFD control messages signals the problem to its peer in
+        the messages it transmits.
       </p>
 
       <p>
@@ -2915,6 +3163,13 @@
           to indicate that the encapsulated packet is an OAM frame. By setting
           this to true, BFD packets will be marked as OAM if encapsulated in
           one of these tunnels.
+        </column>
+
+        <column name="bfd" key="mult"
+                type='{"type": "integer", "minInteger": 1, "maxInteger": 255}'>
+          The BFD detection multiplier, which defaults to 3.  An endpoint
+          signals a connectivity fault if the given number of consecutive BFD
+          control messages fail to arrive.
         </column>
       </group>
 
@@ -3337,20 +3592,6 @@
       </column>
     </group>
 
-    <group title="Rx Checksum Offload Configuration">
-      <p>
-        The checksum validation on the incoming packets are performed on NIC
-        using Rx checksum offload feature. Implemented only for <code>dpdk
-        </code>physical interfaces.
-      </p>
-
-      <column name="options" key="rx-checksum-offload"
-              type='{"type": "boolean"}'>
-        Set to <code>false</code> to disble Rx checksum offloading on <code>
-        dpdk</code>physical ports. By default, Rx checksum offload is enabled.
-      </column>
-    </group>
-
     <group title="Common Columns">
       The overall purpose of these columns is described under <code>Common
       Columns</code> at the beginning of this document.
@@ -3706,6 +3947,25 @@
         be transmitted then the cbs will be decremented by the number of
         bytes/tokens of the packet. If there are not enough tokens in the cbs
         bucket the packet will be dropped.
+      </column>
+    </group>
+
+    <group title="Configuration for linux-sfq">
+      <p>
+        The <code>linux-sfq</code> QoS supports the following key-value pairs:
+      </p>
+
+      <column name="other_config" key="perturb" type='{"type": "integer"}'>
+        Number of seconds between consecutive perturbations in hashing algorithm.
+        Different flows can end up in the same hash bucket causing unfairness.
+        Perturbation's goal is to remove possible unfairness.
+        The default and recommended value is 10. Too low a value is discouraged
+        because each perturbation can cause packet reordering.
+      </column>
+      <column name="other_config" key="quantum" type='{"type": "integer"}'>
+        Number of bytes <code>linux-sfq</code> QoS can dequeue in one turn in
+        round-robin from one flow. The default and recommended value is equal
+        to interface's MTU.
       </column>
     </group>
 

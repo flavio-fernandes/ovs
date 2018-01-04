@@ -451,7 +451,7 @@ int dpif_get_dp_stats(const struct dpif *, struct dpif_dp_stats *);
 const char *dpif_port_open_type(const char *datapath_type,
                                 const char *port_type);
 int dpif_port_add(struct dpif *, struct netdev *, odp_port_t *port_nop);
-int dpif_port_del(struct dpif *, odp_port_t port_no);
+int dpif_port_del(struct dpif *, odp_port_t port_no, bool local_delete);
 
 /* A port within a datapath.
  *
@@ -567,7 +567,8 @@ int dpif_flow_get(struct dpif *,
  *
  * All error reporting is deferred to the call to dpif_flow_dump_destroy().
  */
-struct dpif_flow_dump *dpif_flow_dump_create(const struct dpif *, bool terse);
+struct dpif_flow_dump *dpif_flow_dump_create(const struct dpif *, bool terse,
+                                             char *type);
 int dpif_flow_dump_destroy(struct dpif_flow_dump *);
 
 struct dpif_flow_dump_thread *dpif_flow_dump_thread_create(
@@ -588,6 +589,7 @@ struct dpif_flow {
     bool ufid_present;            /* True if 'ufid' was provided by datapath.*/
     unsigned pmd_id;              /* Datapath poll mode driver id. */
     struct dpif_flow_stats stats; /* Flow statistics. */
+    bool offloaded;               /* True if flow is offloaded */
 };
 int dpif_flow_dump_next(struct dpif_flow_dump_thread *,
                         struct dpif_flow *flows, int max_flows);
@@ -785,9 +787,9 @@ const char *dpif_upcall_type_to_string(enum dpif_upcall_type);
 struct dpif_upcall {
     /* All types. */
     struct dp_packet packet;    /* Packet data,'dp_packet' should be the first
-				   member to avoid a hole. This is because
-				   'rte_mbuf' in dp_packet is aligned atleast
-				   on a 64-byte boundary */
+                                   member to avoid a hole. This is because
+                                   'rte_mbuf' in dp_packet is aligned atleast
+                                   on a 64-byte boundary */
     enum dpif_upcall_type type;
     struct nlattr *key;         /* Flow key. */
     size_t key_len;             /* Length of 'key' in bytes. */
@@ -881,6 +883,34 @@ int dpif_get_pmds_for_port(const struct dpif * dpif, odp_port_t port_no,
 
 char *dpif_get_dp_version(const struct dpif *);
 bool dpif_supports_tnl_push_pop(const struct dpif *);
+
+/* Log functions. */
+struct vlog_module;
+
+void log_flow_message(const struct dpif *dpif, int error,
+                      const struct vlog_module *module,
+                      const char *operation,
+                      const struct nlattr *key, size_t key_len,
+                      const struct nlattr *mask, size_t mask_len,
+                      const ovs_u128 *ufid,
+                      const struct dpif_flow_stats *stats,
+                      const struct nlattr *actions, size_t actions_len);
+void log_flow_put_message(const struct dpif *,
+                          const struct vlog_module *,
+                          const struct dpif_flow_put *,
+                          int error);
+void log_flow_del_message(const struct dpif *,
+                          const struct vlog_module *,
+                          const struct dpif_flow_del *,
+                          int error);
+void log_execute_message(const struct dpif *,
+                         const struct vlog_module *,
+                         const struct dpif_execute *,
+                         bool subexecute, int error);
+void log_flow_get_message(const struct dpif *,
+                          const struct vlog_module *,
+                          const struct dpif_flow_get *,
+                          int error);
 #ifdef  __cplusplus
 }
 #endif

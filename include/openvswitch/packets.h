@@ -17,8 +17,13 @@
 #ifndef OPENVSWITCH_PACKETS_H
 #define OPENVSWITCH_PACKETS_H 1
 
+#include <sys/types.h>
 #include <netinet/in.h>
 #include "openvswitch/tun-metadata.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Tunnel information used in flow key and metadata. */
 struct flow_tnl {
@@ -68,5 +73,25 @@ union flow_vlan_hdr {
         ovs_be16 tci;
     };
 };
+
+/* Network Service Header keys */
+struct flow_nsh {
+    uint8_t flags;
+    uint8_t mdtype;
+    uint8_t np;
+    uint8_t si;
+    ovs_be32 spi;
+    ovs_be32 c[4];
+};
+
+/* NSH flags */
+#define FLOW_NSH_F_OAM (1 << 0)
+#define FLOW_NSH_F_CTX (1 << 1)
+
+#define FLOW_NSH_F_MASK ((1 << 2) - 1)
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* packets.h */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,6 +44,9 @@
 /* -m, --more: Verbosity level for "show-log" command output. */
 static int show_log_verbosity;
 
+/* --role: RBAC role to use for "transact" and "query" commands. */
+static const char *rbac_role;
+
 static const struct ovs_cmdl_command *get_all_commands(void);
 
 OVS_NO_RETURN static void usage(void);
@@ -68,8 +71,12 @@ main(int argc, char *argv[])
 static void
 parse_options(int argc, char *argv[])
 {
+    enum {
+        OPT_RBAC_ROLE = UCHAR_MAX + 1
+    };
     static const struct option long_options[] = {
         {"more", no_argument, NULL, 'm'},
+        {"rbac-role", required_argument, NULL, OPT_RBAC_ROLE},
         {"verbose", optional_argument, NULL, 'v'},
         {"help", no_argument, NULL, 'h'},
         {"option", no_argument, NULL, 'o'},
@@ -89,6 +96,10 @@ parse_options(int argc, char *argv[])
         switch (c) {
         case 'm':
             show_log_verbosity++;
+            break;
+
+        case OPT_RBAC_ROLE:
+            rbac_role = optarg;
             break;
 
         case 'h':
@@ -124,8 +135,10 @@ usage(void)
            "  create [DB [SCHEMA]]    create DB with the given SCHEMA\n"
            "  compact [DB [DST]]      compact DB in-place (or to DST)\n"
            "  convert [DB [SCHEMA [DST]]]   convert DB to SCHEMA (to DST)\n"
+           "  db-name [DB]            report name of schema used by DB\n"
            "  db-version [DB]         report version of schema used by DB\n"
            "  db-cksum [DB]           report checksum of schema used by DB\n"
+           "  schema-name [SCHEMA]    report SCHEMA's name\n"
            "  schema-version [SCHEMA] report SCHEMA's schema version\n"
            "  schema-cksum [SCHEMA]   report SCHEMA's checksum\n"
            "  query [DB] TRNS         execute read-only transaction on DB\n"
@@ -135,10 +148,12 @@ usage(void)
            "The default SCHEMA is %s.\n",
            program_name, program_name, default_db(), default_schema());
     vlog_usage();
-    printf("\nOther options:\n"
-           "  -m, --more                  increase show-log verbosity\n"
-           "  -h, --help                  display this help message\n"
-           "  -V, --version               display version information\n");
+    printf("\
+\nOther options:\n\
+  -m, --more                  increase show-log verbosity\n\
+  --rbac-role=ROLE            RBAC role for transact and query commands\n\
+  -h, --help                  display this help message\n\
+  -V, --version               display version information\n");
     exit(EXIT_SUCCESS);
 }
 
@@ -204,8 +219,8 @@ do_create(struct ovs_cmdl_context *ctx)
     ovsdb_schema_destroy(schema);
 
     /* Create database file. */
-    check_ovsdb_error(ovsdb_log_open(db_file_name, OVSDB_LOG_CREATE,
-                                     -1, &log));
+    check_ovsdb_error(ovsdb_log_open(db_file_name, OVSDB_MAGIC,
+                                     OVSDB_LOG_CREATE_EXCL, -1, &log));
     check_ovsdb_error(ovsdb_log_write(log, json));
     check_ovsdb_error(ovsdb_log_commit(log));
     ovsdb_log_close(log);
@@ -312,6 +327,17 @@ do_needs_conversion(struct ovs_cmdl_context *ctx)
 }
 
 static void
+do_db_name(struct ovs_cmdl_context *ctx)
+{
+    const char *db_file_name = ctx->argc >= 2 ? ctx->argv[1] : default_db();
+    struct ovsdb_schema *schema;
+
+    check_ovsdb_error(ovsdb_file_read_schema(db_file_name, &schema));
+    puts(schema->name);
+    ovsdb_schema_destroy(schema);
+}
+
+static void
 do_db_version(struct ovs_cmdl_context *ctx)
 {
     const char *db_file_name = ctx->argc >= 2 ? ctx->argv[1] : default_db();
@@ -356,6 +382,18 @@ do_schema_cksum(struct ovs_cmdl_context *ctx)
 }
 
 static void
+do_schema_name(struct ovs_cmdl_context *ctx)
+{
+    const char *schema_file_name
+        = ctx->argc >= 2 ? ctx->argv[1] : default_schema();
+    struct ovsdb_schema *schema;
+
+    check_ovsdb_error(ovsdb_schema_from_file(schema_file_name, &schema));
+    puts(schema->name);
+    ovsdb_schema_destroy(schema);
+}
+
+static void
 transact(bool read_only, int argc, char *argv[])
 {
     const char *db_file_name = argc >= 3 ? argv[1] : default_db();
@@ -366,7 +404,7 @@ transact(bool read_only, int argc, char *argv[])
     check_ovsdb_error(ovsdb_file_open(db_file_name, read_only, &db, NULL));
 
     request = parse_json(transaction);
-    result = ovsdb_execute(db, NULL, request, false, 0, NULL);
+    result = ovsdb_execute(db, NULL, request, false, rbac_role, NULL, 0, NULL);
     json_destroy(request);
 
     print_and_free_json(result);
@@ -506,8 +544,8 @@ do_show_log(struct ovs_cmdl_context *ctx)
     struct ovsdb_schema *schema;
     unsigned int i;
 
-    check_ovsdb_error(ovsdb_log_open(db_file_name, OVSDB_LOG_READ_ONLY,
-                                     -1, &log));
+    check_ovsdb_error(ovsdb_log_open(db_file_name, OVSDB_MAGIC,
+                                     OVSDB_LOG_READ_ONLY, -1, &log));
     shash_init(&names);
     schema = NULL;
     for (i = 0; ; i++) {
@@ -577,8 +615,10 @@ static const struct ovs_cmdl_command all_commands[] = {
     { "compact", "[db [dst]]", 0, 2, do_compact, OVS_RW },
     { "convert", "[db [schema [dst]]]", 0, 3, do_convert, OVS_RW },
     { "needs-conversion", NULL, 0, 2, do_needs_conversion, OVS_RO },
+    { "db-name", "[db]",  0, 1, do_db_name, OVS_RO },
     { "db-version", "[db]",  0, 1, do_db_version, OVS_RO },
     { "db-cksum", "[db]", 0, 1, do_db_cksum, OVS_RO },
+    { "schema-name", "[schema]", 0, 1, do_schema_name, OVS_RO },
     { "schema-version", "[schema]", 0, 1, do_schema_version, OVS_RO },
     { "schema-cksum", "[schema]", 0, 1, do_schema_cksum, OVS_RO },
     { "query", "[db] trns", 1, 2, do_query, OVS_RO },

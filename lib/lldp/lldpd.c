@@ -18,6 +18,8 @@
 
 #include <config.h>
 #include "lldpd.h"
+#include <sys/types.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -28,7 +30,6 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #ifndef _WIN32
@@ -339,7 +340,7 @@ lldpd_decode(struct lldpd *cfg, char *frame, int s,
 
     /* No, but do we already know the system? */
     if (!oport) {
-        bool found = false;
+        found = false;
         VLOG_DBG("MSAP is unknown, search for the chassis");
 
         LIST_FOR_EACH (ochassis, list, &cfg->g_chassis) {

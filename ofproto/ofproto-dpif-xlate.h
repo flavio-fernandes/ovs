@@ -155,6 +155,13 @@ struct xlate_in {
 
     /* The frozen state to be resumed, as returned by xlate_lookup(). */
     const struct frozen_state *frozen_state;
+
+    /* If true, the packet to be translated is from a packet_out msg. */
+    bool in_packet_out;
+
+    /* ofproto/trace maintains this queue to trace flows that require
+     * recirculation. */
+    struct ovs_list *recirc_queue;
 };
 
 void xlate_ofproto_set(struct ofproto_dpif *, const char *name, struct dpif *,
@@ -204,6 +211,7 @@ enum xlate_error {
     XLATE_RECIRCULATION_CONFLICT,
     XLATE_TOO_MANY_MPLS_LABELS,
     XLATE_INVALID_TUNNEL_METADATA,
+    XLATE_UNSUPPORTED_PACKET_TYPE,
 };
 
 const char *xlate_strerror(enum xlate_error error);
@@ -226,7 +234,8 @@ void xlate_mac_learning_update(const struct ofproto_dpif *ofproto,
                                ofp_port_t in_port, struct eth_addr dl_src,
                                int vlan, bool is_grat_arp);
 
-void xlate_disable_dp_clone(const struct ofproto_dpif *);
+void xlate_set_support(const struct ofproto_dpif *,
+                       const struct dpif_backer_support *);
 
 void xlate_txn_start(void);
 void xlate_txn_commit(void);

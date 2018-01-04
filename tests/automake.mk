@@ -4,9 +4,11 @@ EXTRA_DIST += \
 	$(SYSTEM_TESTSUITE_AT) \
 	$(SYSTEM_KMOD_TESTSUITE_AT) \
 	$(SYSTEM_USERSPACE_TESTSUITE_AT) \
+	$(SYSTEM_OFFLOADS_TESTSUITE_AT) \
 	$(TESTSUITE) \
 	$(SYSTEM_KMOD_TESTSUITE) \
 	$(SYSTEM_USERSPACE_TESTSUITE) \
+	$(SYSTEM_OFFLOADS_TESTSUITE) \
 	tests/atlocal.in \
 	$(srcdir)/package.m4 \
 	$(srcdir)/tests/testsuite \
@@ -79,9 +81,11 @@ TESTSUITE_AT = \
 	tests/ovsdb-tool.at \
 	tests/ovsdb-replication.at \
 	tests/ovsdb-server.at \
+	tests/ovsdb-client.at \
 	tests/ovsdb-monitor.at \
 	tests/ovsdb-idl.at \
 	tests/ovsdb-lock.at \
+	tests/ovsdb-rbac.at \
 	tests/ovs-vsctl.at \
 	tests/ovs-xapi-sync.at \
 	tests/stp.at \
@@ -91,11 +95,14 @@ TESTSUITE_AT = \
 	tests/vtep-ctl.at \
 	tests/auto-attach.at \
 	tests/ovn.at \
+	tests/ovn-northd.at \
 	tests/ovn-nbctl.at \
 	tests/ovn-sbctl.at \
 	tests/ovn-controller.at \
 	tests/ovn-controller-vtep.at \
-	tests/mcast-snooping.at
+	tests/mcast-snooping.at \
+	tests/packet-type-aware.at \
+	tests/nsh.at
 
 SYSTEM_KMOD_TESTSUITE_AT = \
 	tests/system-common-macros.at \
@@ -105,12 +112,19 @@ SYSTEM_KMOD_TESTSUITE_AT = \
 SYSTEM_USERSPACE_TESTSUITE_AT = \
 	tests/system-userspace-testsuite.at \
 	tests/system-ovn.at \
-	tests/system-userspace-macros.at
+	tests/system-userspace-macros.at \
+	tests/system-userspace-packet-type-aware.at
 
 SYSTEM_TESTSUITE_AT = \
 	tests/system-common-macros.at \
 	tests/system-ovn.at \
+	tests/system-layer3-tunnels.at \
 	tests/system-traffic.at
+
+SYSTEM_OFFLOADS_TESTSUITE_AT = \
+	tests/system-common-macros.at \
+	tests/system-offloads-traffic.at \
+	tests/system-offloads-testsuite.at
 
 check_SCRIPTS += tests/atlocal
 
@@ -118,6 +132,7 @@ TESTSUITE = $(srcdir)/tests/testsuite
 TESTSUITE_PATCH = $(srcdir)/tests/testsuite.patch
 SYSTEM_KMOD_TESTSUITE = $(srcdir)/tests/system-kmod-testsuite
 SYSTEM_USERSPACE_TESTSUITE = $(srcdir)/tests/system-userspace-testsuite
+SYSTEM_OFFLOADS_TESTSUITE = $(srcdir)/tests/system-offloads-testsuite
 DISTCLEANFILES += tests/atconfig tests/atlocal
 
 AUTOTEST_PATH = utilities:vswitchd:ovsdb:vtep:tests:$(PTHREAD_WIN32_DIR_DLL):ovn/controller-vtep:ovn/northd:ovn/utilities:ovn/controller
@@ -153,7 +168,7 @@ check-lcov: all $(check_DATA) clean-lcov
 	find . -name '*.gcda' | xargs -n1 rm -f
 	-set $(SHELL) '$(TESTSUITE)' -C tests AUTOTEST_PATH=$(AUTOTEST_PATH) $(TESTSUITEFLAGS); \
 	"$$@" || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
-	mkdir -p tests/lcov
+	$(MKDIR_P) tests/lcov
 	lcov $(LCOV_OPTS) -o tests/lcov/coverage.info
 	genhtml $(GENHTML_OPTS) -o tests/lcov tests/lcov/coverage.info
 	@echo "coverage report generated at tests/lcov/index.html"
@@ -174,11 +189,12 @@ valgrind_wrappers = \
 	tests/valgrind/ovsdb-tool \
 	tests/valgrind/ovstest \
 	tests/valgrind/test-ovsdb \
+	tests/valgrind/test-skiplist \
 	tests/valgrind/test-strtok_r \
 	tests/valgrind/test-type-props
 
 $(valgrind_wrappers): tests/valgrind-wrapper.in
-	@test -d tests/valgrind || mkdir tests/valgrind
+	@$(MKDIR_P) tests/valgrind
 	$(AM_V_GEN) sed -e 's,[@]wrap_program[@],$@,' \
 		$(top_srcdir)/tests/valgrind-wrapper.in > $@.tmp && \
 	chmod +x $@.tmp && \
@@ -198,6 +214,13 @@ check-valgrind: all $(valgrind_wrappers) $(check_DATA)
 	@echo
 	@echo '----------------------------------------------------------------------'
 	@echo 'Valgrind output can be found in tests/testsuite.dir/*/valgrind.*'
+	@echo '----------------------------------------------------------------------'
+check-kernel-valgrind: all $(valgrind_wrappers) $(check_DATA)
+	set $(SHELL) '$(SYSTEM_KMOD_TESTSUITE)' -C tests VALGRIND='$(VALGRIND)' AUTOTEST_PATH='tests/valgrind:$(AUTOTEST_PATH)' -d $(TESTSUITEFLAGS) -j1; \
+	"$$@" || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
+	@echo
+	@echo '----------------------------------------------------------------------'
+	@echo 'Valgrind output can be found in tests/system-kmod-testsuite.dir/*/valgrind.*'
 	@echo '----------------------------------------------------------------------'
 check-helgrind: all $(valgrind_wrappers) $(check_DATA)
 	-$(SHELL) '$(TESTSUITE)' -C tests CHECK_VALGRIND=true VALGRIND='$(HELGRIND)' AUTOTEST_PATH='tests/valgrind:$(AUTOTEST_PATH)' -d $(TESTSUITEFLAGS)
@@ -229,6 +252,10 @@ check-system-userspace: all
 	set $(SHELL) '$(SYSTEM_USERSPACE_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)' $(TESTSUITEFLAGS) -j1; \
 	"$$@" || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
 
+check-offloads: all
+	set $(SHELL) '$(SYSTEM_OFFLOADS_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)' $(TESTSUITEFLAGS) -j1; \
+	"$$@" || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
+
 clean-local:
 	test ! -f '$(TESTSUITE)' || $(SHELL) '$(TESTSUITE)' -C tests --clean
 
@@ -253,6 +280,10 @@ $(SYSTEM_USERSPACE_TESTSUITE): package.m4 $(SYSTEM_TESTSUITE_AT) $(SYSTEM_USERSP
 	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
 	$(AM_V_at)mv $@.tmp $@
 
+$(SYSTEM_OFFLOADS_TESTSUITE): package.m4 $(SYSTEM_TESTSUITE_AT) $(SYSTEM_OFFLOADS_TESTSUITE_AT) $(COMMON_MACROS_AT)
+	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
+	$(AM_V_at)mv $@.tmp $@
+
 # The `:;' works around a Bash 3.2 bug when the output is not writeable.
 $(srcdir)/package.m4: $(top_srcdir)/configure.ac
 	$(AM_V_GEN):;{ \
@@ -267,7 +298,6 @@ $(srcdir)/package.m4: $(top_srcdir)/configure.ac
 noinst_PROGRAMS += tests/test-ovsdb
 tests_test_ovsdb_SOURCES = tests/test-ovsdb.c
 nodist_tests_test_ovsdb_SOURCES = tests/idltest.c tests/idltest.h
-EXTRA_DIST += tests/uuidfilt.pl tests/ovsdb-monitor-sort.pl
 tests_test_ovsdb_LDADD = ovsdb/libovsdb.la lib/libopenvswitch.la
 
 noinst_PROGRAMS += tests/test-lib
@@ -326,6 +356,7 @@ tests_ovstest_SOURCES = \
 	tests/test-rstp.c \
 	tests/test-sflow.c \
 	tests/test-sha1.c \
+	tests/test-skiplist.c \
 	tests/test-stp.c \
 	tests/test-unixctl.c \
 	tests/test-util.c \
@@ -345,7 +376,6 @@ tests_ovstest_SOURCES += \
 endif
 
 tests_ovstest_LDADD = lib/libopenvswitch.la ovn/lib/libovn.la
-dist_check_SCRIPTS = tests/flowgen.pl
 
 noinst_PROGRAMS += tests/test-strtok_r
 tests_test_strtok_r_SOURCES = tests/test-strtok_r.c
@@ -356,6 +386,8 @@ tests_test_type_props_SOURCES = tests/test-type-props.c
 # Python tests.
 CHECK_PYFILES = \
 	tests/appctl.py \
+	tests/flowgen.py \
+	tests/ovsdb-monitor-sort.py \
 	tests/test-daemon.py \
 	tests/test-json.py \
 	tests/test-jsonrpc.py \
@@ -365,7 +397,8 @@ CHECK_PYFILES = \
 	tests/MockXenAPI.py \
 	tests/test-unix-socket.py \
 	tests/test-unixctl.py \
-	tests/test-vlog.py
+	tests/test-vlog.py \
+	tests/uuidfilt.py
 EXTRA_DIST += $(CHECK_PYFILES)
 PYCOV_CLEAN_FILES += $(CHECK_PYFILES:.py=.py,cover) .coverage
 

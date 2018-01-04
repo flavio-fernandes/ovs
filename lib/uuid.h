@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2009, 2010, 2016 Nicira, Inc.
+/* Copyright (c) 2008, 2009, 2010, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,10 @@
 #define UUID_H 1
 
 #include "openvswitch/uuid.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* An initializer or expression for an all-zero UUID. */
 #define UUID_ZERO ((struct uuid) { .parts = { 0, 0, 0, 0 } })
@@ -59,12 +63,18 @@ uuid_equals(const struct uuid *a, const struct uuid *b)
 
 void uuid_init(void);
 void uuid_generate(struct uuid *);
+struct uuid uuid_random(void);
 void uuid_zero(struct uuid *);
 bool uuid_is_zero(const struct uuid *);
 int uuid_compare_3way(const struct uuid *, const struct uuid *);
 bool uuid_from_string(struct uuid *, const char *);
 bool uuid_from_string_prefix(struct uuid *, const char *);
 int uuid_is_partial_string(const char *);
+int uuid_is_partial_match(const struct uuid *, const char *match);
 void uuid_set_bits_v4(struct uuid *);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* uuid.h */

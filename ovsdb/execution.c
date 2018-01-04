@@ -27,6 +27,7 @@
 #include "ovsdb-parser.h"
 #include "ovsdb.h"
 #include "query.h"
+#include "rbac.h"
 #include "row.h"
 #include "server.h"
 #include "table.h"
@@ -39,6 +40,8 @@ struct ovsdb_execution {
     struct ovsdb_txn *txn;
     struct ovsdb_symbol_table *symtab;
     bool durable;
+    const char *role;
+    const char *id;
 
     /* Triggers. */
     long long int elapsed_msec;
@@ -97,6 +100,7 @@ lookup_executor(const char *name, bool *read_only)
 struct json *
 ovsdb_execute(struct ovsdb *db, const struct ovsdb_session *session,
               const struct json *params, bool read_only,
+              const char *role, const char *id,
               long long int elapsed_msec, long long int *timeout_msec)
 {
     struct ovsdb_execution x;
@@ -116,9 +120,7 @@ ovsdb_execute(struct ovsdb *db, const struct ovsdb_session *session,
                                        "as first parameter");
         }
 
-        results = ovsdb_error_to_json(error);
-        ovsdb_error_destroy(error);
-        return results;
+        return ovsdb_error_to_json_free(error);
     }
 
     x.db = db;
@@ -126,6 +128,8 @@ ovsdb_execute(struct ovsdb *db, const struct ovsdb_session *session,
     x.txn = ovsdb_txn_create(db);
     x.symtab = ovsdb_symbol_table_create();
     x.durable = false;
+    x.role = role;
+    x.id = id;
     x.elapsed_msec = elapsed_msec;
     x.timeout_msec = LLONG_MAX;
     results = NULL;
@@ -169,11 +173,18 @@ ovsdb_execute(struct ovsdb *db, const struct ovsdb_session *session,
             error = parse_error;
         }
         /* Create read-only violation error if there is one. */
-        if (!error && read_only && !ro) {
-            error = ovsdb_error("not allowed",
-                                "%s operation not allowed when "
-                                "database server is in read only mode",
-                                op_name);
+        if (!ro && !error) {
+            if (read_only) {
+                error = ovsdb_error("not allowed",
+                                    "%s operation not allowed when "
+                                    "database server is in read only mode",
+                                    op_name);
+            } else if (db->schema->name[0] == '_') {
+                error = ovsdb_error("not allowed",
+                                    "%s operation not allowed on "
+                                    "table in reserved database %s",
+                                    op_name, db->schema->name);
+            }
         }
         if (error) {
             json_destroy(result);
@@ -342,18 +353,26 @@ ovsdb_execute_insert(struct ovsdb_execution *x, struct ovsdb_parser *parser,
             if (datum->n == 1) {
                 error = ovsdb_datum_check_constraints(datum, &column->type);
                 if (error) {
-                    ovsdb_row_destroy(row);
                     break;
                 }
             }
         }
     }
+
+    if (!error && !ovsdb_rbac_insert(x->db, table, row, x->role, x->id)) {
+        error = ovsdb_perm_error("RBAC rules for client \"%s\" role \"%s\" "
+                                 "prohibit row insertion into table \"%s\".",
+                                 x->id, x->role, table->schema->name);
+    }
+
     if (!error) {
         *ovsdb_row_get_uuid_rw(row) = row_uuid;
         ovsdb_txn_row_insert(x->txn, row);
         json_object_put(result, "uuid",
                         ovsdb_datum_to_json(&row->fields[OVSDB_COL_UUID],
                                             &ovsdb_type_uuid));
+    } else {
+        ovsdb_row_destroy(row);
     }
     return error;
 }
@@ -410,6 +429,8 @@ struct update_row_cbdata {
     struct ovsdb_txn *txn;
     const struct ovsdb_row *row;
     const struct ovsdb_column_set *columns;
+    const char *role;
+    const char *id;
 };
 
 static bool
@@ -470,7 +491,15 @@ ovsdb_execute_update(struct ovsdb_execution *x, struct ovsdb_parser *parser,
         ur.txn = x->txn;
         ur.row = row;
         ur.columns = &columns;
-        ovsdb_query(table, &condition, update_row_cb, &ur);
+        if (ovsdb_rbac_update(x->db, table, &columns, &condition, x->role,
+                              x->id)) {
+            ovsdb_query(table, &condition, update_row_cb, &ur);
+        } else {
+            error = ovsdb_perm_error("RBAC rules for client \"%s\" role "
+                                     "\"%s\" prohibit modification of "
+                                     "table \"%s\".",
+                                     x->id, x->role, table->schema->name);
+        }
         json_object_put(result, "count", json_integer_create(ur.n_matches));
     }
 
@@ -529,7 +558,15 @@ ovsdb_execute_mutate(struct ovsdb_execution *x, struct ovsdb_parser *parser,
         mr.txn = x->txn;
         mr.mutations = &mutations;
         mr.error = &error;
-        ovsdb_query(table, &condition, mutate_row_cb, &mr);
+        if (ovsdb_rbac_mutate(x->db, table, &mutations, &condition, x->role,
+                              x->id)) {
+            ovsdb_query(table, &condition, mutate_row_cb, &mr);
+        } else {
+            error = ovsdb_perm_error("RBAC rules for client \"%s\" role "
+                                     "\"%s\" prohibit mutate operation on "
+                                     "table \"%s\".",
+                                     x->id, x->role, table->schema->name);
+        }
         json_object_put(result, "count", json_integer_create(mr.n_matches));
     }
 
@@ -579,8 +616,15 @@ ovsdb_execute_delete(struct ovsdb_execution *x, struct ovsdb_parser *parser,
         dr.n_matches = 0;
         dr.table = table;
         dr.txn = x->txn;
-        ovsdb_query(table, &condition, delete_row_cb, &dr);
 
+        if (ovsdb_rbac_delete(x->db, table, &condition, x->role, x->id)) {
+            ovsdb_query(table, &condition, delete_row_cb, &dr);
+        } else {
+            error = ovsdb_perm_error("RBAC rules for client \"%s\" role "
+                                     "\"%s\" prohibit row deletion from "
+                                     "table \"%s\".",
+                                     x->id, x->role, table->schema->name);
+        }
         json_object_put(result, "count", json_integer_create(dr.n_matches));
     }
 

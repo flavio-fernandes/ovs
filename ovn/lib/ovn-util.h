@@ -57,6 +57,7 @@ bool is_dynamic_lsp_address(const char *address);
 bool extract_addresses(const char *address, struct lport_addresses *,
                        int *ofs);
 bool extract_lsp_addresses(const char *address, struct lport_addresses *);
+bool extract_ip_addresses(const char *address, struct lport_addresses *);
 bool extract_lrp_networks(const struct nbrec_logical_router_port *,
                           struct lport_addresses *);
 void destroy_lport_addresses(struct lport_addresses *);
@@ -65,5 +66,7 @@ char *alloc_nat_zone_key(const struct uuid *key, const char *type);
 
 const char *default_nb_db(void);
 const char *default_sb_db(void);
+
+bool ovn_is_known_nb_lsp_type(const char *type);
 
 #endif

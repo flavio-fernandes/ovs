@@ -32,7 +32,7 @@
 #include "openvswitch/ofpbuf.h"
 #include "ofproto.h"
 #include "packets.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "ovs-router.h"
 #include "route-table.h"
 #include "sflow_api.h"
@@ -901,7 +901,7 @@ sflow_read_tnl_push_action(const struct nlattr *attr,
     const struct ip_header *ip
         = ALIGNED_CAST(const struct ip_header *, eth + 1);
 
-    sflow_actions->out_port = u32_to_odp(data->out_port);
+    sflow_actions->out_port = data->out_port;
 
     /* Ethernet. */
     /* TODO: SFlow does not currently define a MAC-in-MAC
@@ -1049,6 +1049,8 @@ sflow_read_set_action(const struct nlattr *attr,
     case OVS_KEY_ATTR_CT_ORIG_TUPLE_IPV4:
     case OVS_KEY_ATTR_CT_ORIG_TUPLE_IPV6:
     case OVS_KEY_ATTR_UNSPEC:
+    case OVS_KEY_ATTR_PACKET_TYPE:
+    case OVS_KEY_ATTR_NSH:
     case __OVS_KEY_ATTR_MAX:
     default:
         break;
@@ -1188,15 +1190,17 @@ dpif_sflow_read_actions(const struct flow *flow,
 	    dpif_sflow_pop_mpls_lse(sflow_actions);
 	    break;
 	}
-        case OVS_ACTION_ATTR_PUSH_ETH:
-        case OVS_ACTION_ATTR_POP_ETH:
-            /* TODO: SFlow does not currently define a MAC-in-MAC
-             * encapsulation structure.  We could use an extension
-             * structure to report this.
-             */
-            break;
+	case OVS_ACTION_ATTR_PUSH_ETH:
+	case OVS_ACTION_ATTR_POP_ETH:
+	    /* TODO: SFlow does not currently define a MAC-in-MAC
+	     * encapsulation structure.  We could use an extension
+	     * structure to report this.
+	     */
+	    break;
 	case OVS_ACTION_ATTR_SAMPLE:
 	case OVS_ACTION_ATTR_CLONE:
+        case OVS_ACTION_ATTR_ENCAP_NSH:
+        case OVS_ACTION_ATTR_DECAP_NSH:
 	case OVS_ACTION_ATTR_UNSPEC:
 	case __OVS_ACTION_ATTR_MAX:
 	default:

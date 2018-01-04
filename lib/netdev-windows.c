@@ -26,7 +26,7 @@
 #include "netdev-provider.h"
 #include "openvswitch/ofpbuf.h"
 #include "packets.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "openvswitch/shash.h"
 #include "svec.h"
 #include "openvswitch/vlog.h"
@@ -394,12 +394,7 @@ netdev_windows_arp_lookup(const struct netdev *netdev,
         return ENXIO;
     }
 
-    arp_table = (MIB_IPNETTABLE *) malloc(buffer_length);
-
-    if (arp_table == NULL) {
-        VLOG_ERR("Could not allocate memory for all the interfaces");
-        return ENXIO;
-    }
+    arp_table = (MIB_IPNETTABLE *) xmalloc(buffer_length);
 
     ret_val = GetIpNetTable(arp_table, &buffer_length, false);
 
@@ -443,12 +438,7 @@ netdev_windows_get_next_hop(const struct in_addr *host,
         return ENXIO;
     }
 
-    all_addr = (IP_ADAPTER_ADDRESSES *) malloc(buffer_length);
-
-    if (all_addr == NULL) {
-        VLOG_ERR("Could not allocate memory for all the interfaces");
-        return ENXIO;
-    }
+    all_addr = (IP_ADAPTER_ADDRESSES *) xmalloc(buffer_length);
 
     ret_val = GetAdaptersAddresses(AF_INET,
                                    GAA_FLAG_INCLUDE_PREFIX |

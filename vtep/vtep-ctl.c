@@ -37,7 +37,7 @@
 #include "openvswitch/json.h"
 #include "ovsdb-data.h"
 #include "ovsdb-idl.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "process.h"
 #include "stream.h"
 #include "stream-ssl.h"
@@ -542,6 +542,7 @@ del_cached_port(struct vtep_ctl_context *vtepctl_ctx,
     ovs_list_remove(&port->ports_node);
     shash_find_and_delete(&vtepctl_ctx->ports, cache_name);
     vteprec_physical_port_delete(port->port_cfg);
+    shash_destroy(&port->bindings);
     free(cache_name);
     free(port);
 }
@@ -1085,7 +1086,6 @@ vtep_ctl_context_populate_cache(struct ctl_context *ctx)
             port = add_port_to_cache(vtepctl_ctx, ps, port_cfg);
 
             for (k = 0; k < port_cfg->n_vlan_bindings; k++) {
-                struct vteprec_logical_switch *ls_cfg;
                 struct vtep_ctl_lswitch *ls;
                 char *vlan;
 
@@ -2178,20 +2178,19 @@ cmd_set_manager(struct ctl_context *ctx)
 /* Parameter commands. */
 static const struct ctl_table_class tables[VTEPREC_N_TABLES] = {
     [VTEPREC_TABLE_LOGICAL_SWITCH].row_ids[0]
-    = {&vteprec_table_logical_switch, &vteprec_logical_switch_col_name, NULL},
+    = {&vteprec_logical_switch_col_name, NULL, NULL},
 
     [VTEPREC_TABLE_MANAGER].row_ids[0]
-    = {&vteprec_table_manager, &vteprec_manager_col_target, NULL},
+    = {&vteprec_manager_col_target, NULL, NULL},
 
     [VTEPREC_TABLE_PHYSICAL_PORT].row_ids[0]
-    = {&vteprec_table_physical_port, &vteprec_physical_port_col_name, NULL},
+    = {&vteprec_physical_port_col_name, NULL, NULL},
 
     [VTEPREC_TABLE_PHYSICAL_SWITCH].row_ids[0]
-    = {&vteprec_table_physical_switch, &vteprec_physical_switch_col_name,
-       NULL},
+    = {&vteprec_physical_switch_col_name, NULL, NULL},
 
     [VTEPREC_TABLE_LOGICAL_ROUTER].row_ids[0]
-    = {&vteprec_table_logical_router, &vteprec_logical_router_col_name, NULL},
+    = {&vteprec_logical_router_col_name, NULL, NULL},
 };
 
 

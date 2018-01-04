@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,6 +40,7 @@
 #include "random.h"
 #include "unaligned.h"
 #include "util.h"
+#include "openvswitch/nsh.h"
 
 COVERAGE_DEFINE(flow_extract);
 COVERAGE_DEFINE(miniflow_malloc);
@@ -125,7 +126,7 @@ struct mf_ctx {
  * away.  Some GCC versions gave warnings on ALWAYS_INLINE, so these are
  * defined as macros. */
 
-#if (FLOW_WC_SEQ != 38)
+#if (FLOW_WC_SEQ != 40)
 #define MINIFLOW_ASSERT(X) ovs_assert(X)
 BUILD_MESSAGE("FLOW_WC_SEQ changed: miniflow_extract() will have runtime "
                "assertions enabled. Consider updating FLOW_WC_SEQ after "
@@ -415,8 +416,8 @@ parse_icmpv6(const void **datap, size_t *sizep, const struct icmp6_hdr *icmp,
     while (*sizep >= 8) {
         /* The minimum size of an option is 8 bytes, which also is
          * the size of Ethernet link-layer options. */
-        const struct ovs_nd_opt *nd_opt = *datap;
-        int opt_len = nd_opt->nd_opt_len * ND_OPT_LEN;
+        const struct ovs_nd_lla_opt *lla_opt = *datap;
+        int opt_len = lla_opt->len * ND_LLA_OPT_LEN;
 
         if (!opt_len || opt_len > *sizep) {
             return true;
@@ -425,17 +426,15 @@ parse_icmpv6(const void **datap, size_t *sizep, const struct icmp6_hdr *icmp,
         /* Store the link layer address if the appropriate option is
          * provided.  It is considered an error if the same link
          * layer option is specified twice. */
-        if (nd_opt->nd_opt_type == ND_OPT_SOURCE_LINKADDR
-            && opt_len == 8) {
+        if (lla_opt->type == ND_OPT_SOURCE_LINKADDR && opt_len == 8) {
             if (OVS_LIKELY(eth_addr_is_zero(arp_buf[0]))) {
-                arp_buf[0] = nd_opt->nd_opt_mac;
+                arp_buf[0] = lla_opt->mac;
             } else {
                 goto invalid;
             }
-        } else if (nd_opt->nd_opt_type == ND_OPT_TARGET_LINKADDR
-                   && opt_len == 8) {
+        } else if (lla_opt->type == ND_OPT_TARGET_LINKADDR && opt_len == 8) {
             if (OVS_LIKELY(eth_addr_is_zero(arp_buf[1]))) {
-                arp_buf[1] = nd_opt->nd_opt_mac;
+                arp_buf[1] = lla_opt->mac;
             } else {
                 goto invalid;
             }
@@ -530,22 +529,87 @@ parse_ipv6_ext_hdrs(const void **datap, size_t *sizep, uint8_t *nw_proto,
     return parse_ipv6_ext_hdrs__(datap, sizep, nw_proto, nw_frag);
 }
 
-/* Initializes 'flow' members from 'packet' and 'md'
+bool
+parse_nsh(const void **datap, size_t *sizep, struct flow_nsh *key)
+{
+    const struct nsh_hdr *nsh = (const struct nsh_hdr *) *datap;
+    uint16_t ver_flags_len;
+    uint8_t version, length, flags;
+    uint32_t path_hdr;
+
+    /* Check if it is long enough for NSH header, doesn't support
+     * MD type 2 yet
+     */
+    if (OVS_UNLIKELY(*sizep < NSH_BASE_HDR_LEN)) {
+        return false;
+    }
+
+    memset(key, 0, sizeof(struct flow_nsh));
+
+    ver_flags_len = ntohs(nsh->ver_flags_ttl_len);
+    version = (ver_flags_len & NSH_VER_MASK) >> NSH_VER_SHIFT;
+    flags = (ver_flags_len & NSH_FLAGS_MASK) >> NSH_FLAGS_SHIFT;
+
+    /* NSH header length is in 4 byte words. */
+    length = ((ver_flags_len & NSH_LEN_MASK) >> NSH_LEN_SHIFT) << 2;
+
+    if (length > *sizep || version != 0) {
+        return false;
+    }
+
+    key->flags = flags;
+    key->mdtype = nsh->md_type;
+    key->np = nsh->next_proto;
+
+    path_hdr = ntohl(get_16aligned_be32(&nsh->path_hdr));
+    key->si = (path_hdr & NSH_SI_MASK) >> NSH_SI_SHIFT;
+    key->spi = htonl((path_hdr & NSH_SPI_MASK) >> NSH_SPI_SHIFT);
+
+    switch (key->mdtype) {
+        case NSH_M_TYPE1:
+            if (length != NSH_M_TYPE1_LEN) {
+                return false;
+            }
+            for (size_t i = 0; i < 4; i++) {
+                key->c[i] = get_16aligned_be32(&nsh->md1.c[i]);
+            }
+            break;
+        case NSH_M_TYPE2:
+        default:
+            /* We don't parse other context headers yet. */
+            break;
+    }
+
+    data_pull(datap, sizep, length);
+
+    return true;
+}
+
+/* Initializes 'flow' members from 'packet' and 'md', taking the packet type
+ * into account.
  *
- * Initializes 'packet' header l2 pointer to the start of the Ethernet
- * header, and the layer offsets as follows:
+ * Initializes the layer offsets as follows:
  *
- *    - packet->l2_5_ofs to the start of the MPLS shim header, or UINT16_MAX
- *      when there is no MPLS shim header.
+ *    - packet->l2_5_ofs to the
+ *          * the start of the MPLS shim header. Can be zero, if the
+ *            packet is of type (OFPHTN_ETHERTYPE, ETH_TYPE_MPLS).
+ *          * UINT16_MAX when there is no MPLS shim header.
  *
- *    - packet->l3_ofs to just past the Ethernet header, or just past the
- *      vlan_header if one is present, to the first byte of the payload of the
- *      Ethernet frame.  UINT16_MAX if the frame is too short to contain an
- *      Ethernet header.
+ *    - packet->l3_ofs is set to
+ *          * zero if the packet_type is in name space OFPHTN_ETHERTYPE
+ *            and there is no MPLS shim header.
+ *          * just past the Ethernet header, or just past the vlan_header if
+ *            one is present, to the first byte of the payload of the
+ *            Ethernet frame if the packet type is Ethernet and there is
+ *            no MPLS shim header.
+ *          * just past the MPLS label stack to the first byte of the MPLS
+ *            payload if there is at least one MPLS shim header.
+ *          * UINT16_MAX if the packet type is Ethernet and the frame is
+ *            too short to contain an Ethernet header.
  *
- *    - packet->l4_ofs to just past the IPv4 header, if one is present and
- *      has at least the content used for the fields of interest for the flow,
- *      otherwise UINT16_MAX.
+ *    - packet->l4_ofs is set to just past the IPv4 or IPv6 header, if one is
+ *      present and the packet has at least the content used for the fields
+ *      of interest for the flow, otherwise UINT16_MAX.
  */
 void
 flow_extract(struct dp_packet *packet, struct flow *flow)
@@ -569,11 +633,12 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
     const struct pkt_metadata *md = &packet->md;
     const void *data = dp_packet_data(packet);
     size_t size = dp_packet_size(packet);
+    ovs_be32 packet_type = packet->packet_type;
     uint64_t *values = miniflow_values(dst);
     struct mf_ctx mf = { FLOWMAP_EMPTY_INITIALIZER, values,
                          values + FLOW_U64S };
-    const char *l2;
-    ovs_be16 dl_type;
+    const char *frame;
+    ovs_be16 dl_type = OVS_BE16_MAX;
     uint8_t nw_frag, nw_tos, nw_ttl, nw_proto;
     uint8_t *ct_nw_proto_p = NULL;
     ovs_be16 ct_tp_src = 0, ct_tp_dst = 0;
@@ -607,47 +672,62 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
     }
     miniflow_push_uint32(mf, dp_hash, md->dp_hash);
     miniflow_push_uint32(mf, in_port, odp_to_u32(md->in_port.odp_port));
-    if (md->recirc_id || md->ct_state) {
+    if (md->ct_state) {
         miniflow_push_uint32(mf, recirc_id, md->recirc_id);
         miniflow_push_uint8(mf, ct_state, md->ct_state);
         ct_nw_proto_p = miniflow_pointer(mf, ct_nw_proto);
         miniflow_push_uint8(mf, ct_nw_proto, 0);
         miniflow_push_uint16(mf, ct_zone, md->ct_zone);
+    } else if (md->recirc_id) {
+        miniflow_push_uint32(mf, recirc_id, md->recirc_id);
+        miniflow_pad_to_64(mf, recirc_id);
     }
 
     if (md->ct_state) {
         miniflow_push_uint32(mf, ct_mark, md->ct_mark);
-        miniflow_pad_to_64(mf, ct_mark);
+        miniflow_push_be32(mf, packet_type, packet_type);
 
         if (!ovs_u128_is_zero(md->ct_label)) {
             miniflow_push_words(mf, ct_label, &md->ct_label,
                                 sizeof md->ct_label / sizeof(uint64_t));
         }
+    } else {
+        miniflow_pad_from_64(mf, packet_type);
+        miniflow_push_be32(mf, packet_type, packet_type);
     }
 
     /* Initialize packet's layer pointer and offsets. */
-    l2 = data;
+    frame = data;
     dp_packet_reset_offsets(packet);
 
-    /* Must have full Ethernet header to proceed. */
-    if (OVS_UNLIKELY(size < sizeof(struct eth_header))) {
-        goto out;
-    } else {
-        /* Link layer. */
-        ASSERT_SEQUENTIAL(dl_dst, dl_src);
-        miniflow_push_macs(mf, dl_dst, data);
+    if (packet_type == htonl(PT_ETH)) {
+        /* Must have full Ethernet header to proceed. */
+        if (OVS_UNLIKELY(size < sizeof(struct eth_header))) {
+            goto out;
+        } else {
+            /* Link layer. */
+            ASSERT_SEQUENTIAL(dl_dst, dl_src);
+            miniflow_push_macs(mf, dl_dst, data);
 
-        /* VLAN */
-        union flow_vlan_hdr vlans[FLOW_MAX_VLAN_HEADERS];
-        size_t num_vlans = parse_vlan(&data, &size, vlans);
+            /* VLAN */
+            union flow_vlan_hdr vlans[FLOW_MAX_VLAN_HEADERS];
+            size_t num_vlans = parse_vlan(&data, &size, vlans);
 
-        /* dl_type */
-        dl_type = parse_ethertype(&data, &size);
-        miniflow_push_be16(mf, dl_type, dl_type);
-        miniflow_pad_to_64(mf, dl_type);
-        if (num_vlans > 0) {
-            miniflow_push_words_32(mf, vlans, vlans, num_vlans);
+            dl_type = parse_ethertype(&data, &size);
+            miniflow_push_be16(mf, dl_type, dl_type);
+            miniflow_pad_to_64(mf, dl_type);
+            if (num_vlans > 0) {
+                miniflow_push_words_32(mf, vlans, vlans, num_vlans);
+            }
+
         }
+    } else {
+        /* Take dl_type from packet_type. */
+        dl_type = pt_ns_type_be(packet_type);
+        miniflow_pad_from_64(mf, dl_type);
+        miniflow_push_be16(mf, dl_type, dl_type);
+        /* Do not push vlan_tci, pad instead */
+        miniflow_pad_to_64(mf, dl_type);
     }
 
     /* Parse mpls. */
@@ -655,13 +735,13 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
         int count;
         const void *mpls = data;
 
-        packet->l2_5_ofs = (char *)data - l2;
+        packet->l2_5_ofs = (char *)data - frame;
         count = parse_mpls(&data, &size);
         miniflow_push_words_32(mf, mpls_lse, mpls, count);
     }
 
     /* Network layer. */
-    packet->l3_ofs = (char *)data - l2;
+    packet->l3_ofs = (char *)data - frame;
 
     nw_frag = 0;
     if (OVS_LIKELY(dl_type == htons(ETH_TYPE_IP))) {
@@ -794,13 +874,28 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
                 miniflow_push_macs(mf, arp_sha, arp_buf);
                 miniflow_pad_to_64(mf, arp_tha);
             }
+        } else if (dl_type == htons(ETH_TYPE_NSH)) {
+            struct flow_nsh nsh;
+
+            if (OVS_LIKELY(parse_nsh(&data, &size, &nsh))) {
+                if (nsh.mdtype == NSH_M_TYPE1) {
+                    miniflow_push_words(mf, nsh, &nsh,
+                                        sizeof(struct flow_nsh) /
+                                        sizeof(uint64_t));
+                }
+                else if (nsh.mdtype == NSH_M_TYPE2) {
+                    /* parse_nsh has stopped it from arriving here for
+                     * MD type 2, will add MD type 2 support code here later
+                     */
+                }
+            }
         }
         goto out;
     }
 
-    packet->l4_ofs = (char *)data - l2;
+    packet->l4_ofs = (char *)data - frame;
     miniflow_push_be32(mf, nw_frag,
-                       BYTES_TO_BE32(nw_frag, nw_tos, nw_ttl, nw_proto));
+                       bytes_to_be32(nw_frag, nw_tos, nw_ttl, nw_proto));
 
     if (OVS_LIKELY(!(nw_frag & FLOW_NW_FRAG_LATER))) {
         if (OVS_LIKELY(nw_proto == IPPROTO_TCP)) {
@@ -927,7 +1022,7 @@ flow_get_metadata(const struct flow *flow, struct match *flow_metadata)
 {
     int i;
 
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 38);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 40);
 
     match_init_catchall(flow_metadata);
     if (flow->tunnel.tun_id != htonll(0)) {
@@ -971,8 +1066,15 @@ flow_get_metadata(const struct flow *flow, struct match *flow_metadata)
     }
 
     match_set_in_port(flow_metadata, flow->in_port.ofp_port);
+    if (flow->packet_type != htonl(PT_ETH)) {
+        match_set_packet_type(flow_metadata, flow->packet_type);
+    }
+
     if (flow->ct_state != 0) {
         match_set_ct_state(flow_metadata, flow->ct_state);
+        /* Match dl_type since it is required for the later interpretation of
+         * the conntrack metadata. */
+        match_set_dl_type(flow_metadata, flow->dl_type);
         if (is_ct_valid(flow, NULL, NULL) && flow->ct_nw_proto != 0) {
             if (flow->dl_type == htons(ETH_TYPE_IP)) {
                 match_set_ct_nw_src(flow_metadata, flow->ct_nw_src);
@@ -1000,35 +1102,125 @@ flow_get_metadata(const struct flow *flow, struct match *flow_metadata)
     }
 }
 
-const char *ct_state_to_string(uint32_t state)
+const char *
+ct_state_to_string(uint32_t state)
 {
     switch (state) {
-    case CS_REPLY_DIR:
-        return "rpl";
-    case CS_TRACKED:
-        return "trk";
-    case CS_NEW:
-        return "new";
-    case CS_ESTABLISHED:
-        return "est";
-    case CS_RELATED:
-        return "rel";
-    case CS_INVALID:
-        return "inv";
-    case CS_SRC_NAT:
-        return "snat";
-    case CS_DST_NAT:
-        return "dnat";
+#define CS_STATE(ENUM, INDEX, NAME) case CS_##ENUM: return NAME;
+        CS_STATES
+#undef CS_STATE
     default:
         return NULL;
     }
 }
 
+uint32_t
+ct_state_from_string(const char *s)
+{
+#define CS_STATE(ENUM, INDEX, NAME) \
+    if (!strcmp(s, NAME)) {         \
+        return CS_##ENUM;           \
+    }
+    CS_STATES
+#undef CS_STATE
+    return 0;
+}
+
+/* Parses conntrack state from 'state_str'.  If it is parsed successfully,
+ * stores the parsed ct_state in 'ct_state', and returns true.  Otherwise,
+ * returns false, and reports error message in 'ds'. */
+bool
+parse_ct_state(const char *state_str, uint32_t default_state,
+               uint32_t *ct_state, struct ds *ds)
+{
+    uint32_t state = default_state;
+    char *state_s = xstrdup(state_str);
+    char *save_ptr = NULL;
+
+    for (char *cs = strtok_r(state_s, ", ", &save_ptr); cs;
+         cs = strtok_r(NULL, ", ", &save_ptr)) {
+        uint32_t bit = ct_state_from_string(cs);
+        if (!bit) {
+            ds_put_format(ds, "%s: unknown connection tracking state flag",
+                          cs);
+            return false;
+        }
+        state |= bit;
+    }
+
+    *ct_state = state;
+    free(state_s);
+
+    return true;
+}
+
+/* Checks the given conntrack state 'state' according to the constraints
+ * listed in ovs-fields (7).  Returns true if it is valid.  Otherwise, returns
+ * false, and reports error in 'ds'. */
+bool
+validate_ct_state(uint32_t state, struct ds *ds)
+{
+    bool valid_ct_state = true;
+    struct ds d_str = DS_EMPTY_INITIALIZER;
+
+    format_flags(&d_str, ct_state_to_string, state, '|');
+
+    if (state && !(state & CS_TRACKED)) {
+        ds_put_format(ds, "%s: invalid connection state: "
+                      "If \"trk\" is unset, no other flags are set\n",
+                      ds_cstr(&d_str));
+        valid_ct_state = false;
+    }
+    if (state & CS_INVALID && state & ~(CS_TRACKED | CS_INVALID)) {
+        ds_put_format(ds, "%s: invalid connection state: "
+                      "when \"inv\" is set, only \"trk\" may also be set\n",
+                      ds_cstr(&d_str));
+        valid_ct_state = false;
+    }
+    if (state & CS_NEW && state & CS_ESTABLISHED) {
+        ds_put_format(ds, "%s: invalid connection state: "
+                      "\"new\" and \"est\" are mutually exclusive\n",
+                      ds_cstr(&d_str));
+        valid_ct_state = false;
+    }
+    if (state & CS_NEW && state & CS_REPLY_DIR) {
+        ds_put_format(ds, "%s: invalid connection state: "
+                      "\"new\" and \"rpy\" are mutually exclusive\n",
+                      ds_cstr(&d_str));
+        valid_ct_state = false;
+    }
+
+    ds_destroy(&d_str);
+    return valid_ct_state;
+}
+
+/* Clears the fields in 'flow' associated with connection tracking. */
+void
+flow_clear_conntrack(struct flow *flow)
+{
+    flow->ct_state = 0;
+    flow->ct_zone = 0;
+    flow->ct_mark = 0;
+    flow->ct_label = OVS_U128_ZERO;
+
+    flow->ct_nw_proto = 0;
+    flow->ct_tp_src = 0;
+    flow->ct_tp_dst = 0;
+    if (flow->dl_type == htons(ETH_TYPE_IP)) {
+        flow->ct_nw_src = 0;
+        flow->ct_nw_dst = 0;
+    } else if (flow->dl_type == htons(ETH_TYPE_IPV6)) {
+        memset(&flow->ct_ipv6_src, 0, sizeof flow->ct_ipv6_src);
+        memset(&flow->ct_ipv6_dst, 0, sizeof flow->ct_ipv6_dst);
+    }
+}
+
 char *
-flow_to_string(const struct flow *flow)
+flow_to_string(const struct flow *flow,
+               const struct ofputil_port_map *port_map)
 {
     struct ds ds = DS_EMPTY_INITIALIZER;
-    flow_format(&ds, flow);
+    flow_format(&ds, flow, port_map);
     return ds_cstr(&ds);
 }
 
@@ -1105,6 +1297,38 @@ format_flags_masked(struct ds *ds, const char *name,
         ds_put_format(ds, "%s%s", (flags & bit) ? "+" : "-",
                       s ? s : "[Unknown]");
         mask &= ~bit;
+    }
+}
+
+static void
+put_u16_masked(struct ds *s, uint16_t value, uint16_t mask)
+{
+    if (!mask) {
+        ds_put_char(s, '*');
+    } else {
+        if (value > 9) {
+            ds_put_format(s, "0x%"PRIx16, value);
+        } else {
+            ds_put_format(s, "%"PRIu16, value);
+        }
+
+        if (mask != UINT16_MAX) {
+            ds_put_format(s, "/0x%"PRIx16, mask);
+        }
+    }
+}
+
+void
+format_packet_type_masked(struct ds *s, ovs_be32 value, ovs_be32 mask)
+{
+    if (value == htonl(PT_ETH) && mask == OVS_BE32_MAX) {
+        ds_put_cstr(s, "eth");
+    } else {
+        ds_put_cstr(s, "packet_type=(");
+        put_u16_masked(s, pt_ns(value), pt_ns(mask));
+        ds_put_char(s, ',');
+        put_u16_masked(s, pt_ns_type(value), pt_ns_type(mask));
+        ds_put_char(s, ')');
     }
 }
 
@@ -1268,7 +1492,8 @@ unknown:
 }
 
 void
-flow_format(struct ds *ds, const struct flow *flow)
+flow_format(struct ds *ds,
+            const struct flow *flow, const struct ofputil_port_map *port_map)
 {
     struct match match;
     struct flow_wildcards *wc = &match.wc;
@@ -1330,13 +1555,14 @@ flow_format(struct ds *ds, const struct flow *flow)
         WC_UNMASK_FIELD(wc, metadata);
     }
 
-    match_format(&match, ds, OFP_DEFAULT_PRIORITY);
+    match_format(&match, port_map, ds, OFP_DEFAULT_PRIORITY);
 }
 
 void
-flow_print(FILE *stream, const struct flow *flow)
+flow_print(FILE *stream,
+           const struct flow *flow, const struct ofputil_port_map *port_map)
 {
-    char *s = flow_to_string(flow);
+    char *s = flow_to_string(flow, port_map);
     fputs(s, stream);
     free(s);
 }
@@ -1358,10 +1584,12 @@ void
 flow_wildcards_init_for_packet(struct flow_wildcards *wc,
                                const struct flow *flow)
 {
+    ovs_be16 dl_type = OVS_BE16_MAX;
+
     memset(&wc->masks, 0x0, sizeof wc->masks);
 
     /* Update this function whenever struct flow changes. */
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 38);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 40);
 
     if (flow_tnl_dst_is_set(&flow->tunnel)) {
         if (flow->tunnel.flags & FLOW_TNL_F_KEY) {
@@ -1409,25 +1637,30 @@ flow_wildcards_init_for_packet(struct flow_wildcards *wc,
 
     /* actset_output wildcarded. */
 
-    WC_MASK_FIELD(wc, dl_dst);
-    WC_MASK_FIELD(wc, dl_src);
-    WC_MASK_FIELD(wc, dl_type);
-
-    /* No need to set mask of inner VLANs that don't exist. */
-    for (int i = 0; i < FLOW_MAX_VLAN_HEADERS; i++) {
-        /* Always show the first zero VLAN. */
-        WC_MASK_FIELD(wc, vlans[i]);
-        if (flow->vlans[i].tci == htons(0)) {
-            break;
+    WC_MASK_FIELD(wc, packet_type);
+    if (flow->packet_type == htonl(PT_ETH)) {
+        WC_MASK_FIELD(wc, dl_dst);
+        WC_MASK_FIELD(wc, dl_src);
+        WC_MASK_FIELD(wc, dl_type);
+        /* No need to set mask of inner VLANs that don't exist. */
+        for (int i = 0; i < FLOW_MAX_VLAN_HEADERS; i++) {
+            /* Always show the first zero VLAN. */
+            WC_MASK_FIELD(wc, vlans[i]);
+            if (flow->vlans[i].tci == htons(0)) {
+                break;
+            }
         }
+        dl_type = flow->dl_type;
+    } else {
+        dl_type = pt_ns_type_be(flow->packet_type);
     }
 
-    if (flow->dl_type == htons(ETH_TYPE_IP)) {
+    if (dl_type == htons(ETH_TYPE_IP)) {
         WC_MASK_FIELD(wc, nw_src);
         WC_MASK_FIELD(wc, nw_dst);
         WC_MASK_FIELD(wc, ct_nw_src);
         WC_MASK_FIELD(wc, ct_nw_dst);
-    } else if (flow->dl_type == htons(ETH_TYPE_IPV6)) {
+    } else if (dl_type == htons(ETH_TYPE_IPV6)) {
         WC_MASK_FIELD(wc, ipv6_src);
         WC_MASK_FIELD(wc, ipv6_dst);
         WC_MASK_FIELD(wc, ipv6_label);
@@ -1439,15 +1672,15 @@ flow_wildcards_init_for_packet(struct flow_wildcards *wc,
             WC_MASK_FIELD(wc, ct_ipv6_src);
             WC_MASK_FIELD(wc, ct_ipv6_dst);
         }
-    } else if (flow->dl_type == htons(ETH_TYPE_ARP) ||
-               flow->dl_type == htons(ETH_TYPE_RARP)) {
+    } else if (dl_type == htons(ETH_TYPE_ARP) ||
+               dl_type == htons(ETH_TYPE_RARP)) {
         WC_MASK_FIELD(wc, nw_src);
         WC_MASK_FIELD(wc, nw_dst);
         WC_MASK_FIELD(wc, nw_proto);
         WC_MASK_FIELD(wc, arp_sha);
         WC_MASK_FIELD(wc, arp_tha);
         return;
-    } else if (eth_type_mpls(flow->dl_type)) {
+    } else if (eth_type_mpls(dl_type)) {
         for (int i = 0; i < FLOW_MAX_MPLS_LABELS; i++) {
             WC_MASK_FIELD(wc, mpls_lse[i]);
             if (flow->mpls_lse[i] & htonl(MPLS_BOS_MASK)) {
@@ -1455,6 +1688,13 @@ flow_wildcards_init_for_packet(struct flow_wildcards *wc,
             }
         }
         return;
+    } else if (flow->dl_type == htons(ETH_TYPE_NSH)) {
+        WC_MASK_FIELD(wc, nsh.flags);
+        WC_MASK_FIELD(wc, nsh.mdtype);
+        WC_MASK_FIELD(wc, nsh.np);
+        WC_MASK_FIELD(wc, nsh.spi);
+        WC_MASK_FIELD(wc, nsh.si);
+        WC_MASK_FIELD(wc, nsh.c);
     } else {
         return; /* Unknown ethertype. */
     }
@@ -1496,7 +1736,7 @@ void
 flow_wc_map(const struct flow *flow, struct flowmap *map)
 {
     /* Update this function whenever struct flow changes. */
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 38);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 40);
 
     flowmap_init(map);
 
@@ -1527,6 +1767,7 @@ flow_wc_map(const struct flow *flow, struct flowmap *map)
     FLOWMAP_SET(map, ct_zone);
     FLOWMAP_SET(map, ct_mark);
     FLOWMAP_SET(map, ct_label);
+    FLOWMAP_SET(map, packet_type);
 
     /* Ethertype-dependent fields. */
     if (OVS_LIKELY(flow->dl_type == htons(ETH_TYPE_IP))) {
@@ -1581,6 +1822,13 @@ flow_wc_map(const struct flow *flow, struct flowmap *map)
         FLOWMAP_SET(map, nw_proto);
         FLOWMAP_SET(map, arp_sha);
         FLOWMAP_SET(map, arp_tha);
+    } else if (flow->dl_type == htons(ETH_TYPE_NSH)) {
+        FLOWMAP_SET(map, nsh.flags);
+        FLOWMAP_SET(map, nsh.mdtype);
+        FLOWMAP_SET(map, nsh.np);
+        FLOWMAP_SET(map, nsh.spi);
+        FLOWMAP_SET(map, nsh.si);
+        FLOWMAP_SET(map, nsh.c);
     }
 }
 
@@ -1590,7 +1838,7 @@ void
 flow_wildcards_clear_non_packet_fields(struct flow_wildcards *wc)
 {
     /* Update this function whenever struct flow changes. */
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 38);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 40);
 
     memset(&wc->masks.metadata, 0, sizeof wc->masks.metadata);
     memset(&wc->masks.regs, 0, sizeof wc->masks.regs);
@@ -1734,7 +1982,7 @@ flow_wildcards_set_xxreg_mask(struct flow_wildcards *wc, int idx,
 uint32_t
 miniflow_hash_5tuple(const struct miniflow *flow, uint32_t basis)
 {
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 38);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 40);
     uint32_t hash = basis;
 
     if (flow) {
@@ -1781,7 +2029,7 @@ ASSERT_SEQUENTIAL(ipv6_src, ipv6_dst);
 uint32_t
 flow_hash_5tuple(const struct flow *flow, uint32_t basis)
 {
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 38);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 40);
     uint32_t hash = basis;
 
     if (flow) {
@@ -1885,7 +2133,7 @@ flow_hash_symmetric_l3l4(const struct flow *flow, uint32_t basis,
         const uint64_t *a = ALIGNED_CAST(uint64_t *, flow->ipv6_src.s6_addr);
         const uint64_t *b = ALIGNED_CAST(uint64_t *, flow->ipv6_dst.s6_addr);
 
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < sizeof flow->ipv6_src / sizeof *a; i++) {
             hash = hash_add64(hash, a[i] ^ b[i]);
         }
     } else {
@@ -1983,7 +2231,7 @@ flow_mask_hash_fields(const struct flow *flow, struct flow_wildcards *wc,
             memset(&wc->masks.tp_src, 0xff, sizeof wc->masks.tp_src);
             memset(&wc->masks.tp_dst, 0xff, sizeof wc->masks.tp_dst);
         }
-        /* no break */
+        /* fall through */
     case NX_HASH_FIELDS_SYMMETRIC_L3L4:
         if (flow->dl_type == htons(ETH_TYPE_IP)) {
             memset(&wc->masks.nw_src, 0xff, sizeof wc->masks.nw_src);
@@ -2205,16 +2453,17 @@ void
 flow_pop_vlan(struct flow *flow, struct flow_wildcards *wc)
 {
     int n = flow_count_vlan_headers(flow);
-    if (n == 0) {
-        return;
+    if (n > 1) {
+        if (wc) {
+            memset(&wc->masks.vlans[1], 0xff,
+                   sizeof(union flow_vlan_hdr) * (n - 1));
+        }
+        memmove(&flow->vlans[0], &flow->vlans[1],
+                sizeof(union flow_vlan_hdr) * (n - 1));
     }
-    if (wc) {
-        memset(&wc->masks.vlans[1], 0xff,
-               sizeof(union flow_vlan_hdr) * (n - 1));
+    if (n > 0) {
+        memset(&flow->vlans[n - 1], 0, sizeof(union flow_vlan_hdr));
     }
-    memmove(&flow->vlans[0], &flow->vlans[1],
-            sizeof(union flow_vlan_hdr) * (n - 1));
-    memset(&flow->vlans[n - 1], 0, sizeof(union flow_vlan_hdr));
 }
 
 void
@@ -2369,7 +2618,7 @@ flow_push_mpls(struct flow *flow, int n, ovs_be16 mpls_eth_type,
 
         if (clear_flow_L3) {
             /* Clear all L3 and L4 fields and dp_hash. */
-            BUILD_ASSERT(FLOW_WC_SEQ == 38);
+            BUILD_ASSERT(FLOW_WC_SEQ == 40);
             memset((char *) flow + FLOW_SEGMENT_2_ENDS_AT, 0,
                    sizeof(struct flow) - FLOW_SEGMENT_2_ENDS_AT);
             flow->dp_hash = 0;
@@ -2509,7 +2758,7 @@ flow_compose_l4(struct dp_packet *p, const struct flow *flow)
                 (icmp->icmp6_type == ND_NEIGHBOR_SOLICIT ||
                  icmp->icmp6_type == ND_NEIGHBOR_ADVERT)) {
                 struct in6_addr *nd_target;
-                struct ovs_nd_opt *nd_opt;
+                struct ovs_nd_lla_opt *lla_opt;
 
                 l4_len += sizeof *nd_target;
                 nd_target = dp_packet_put_zeros(p, sizeof *nd_target);
@@ -2517,17 +2766,17 @@ flow_compose_l4(struct dp_packet *p, const struct flow *flow)
 
                 if (!eth_addr_is_zero(flow->arp_sha)) {
                     l4_len += 8;
-                    nd_opt = dp_packet_put_zeros(p, 8);
-                    nd_opt->nd_opt_len = 1;
-                    nd_opt->nd_opt_type = ND_OPT_SOURCE_LINKADDR;
-                    nd_opt->nd_opt_mac = flow->arp_sha;
+                    lla_opt = dp_packet_put_zeros(p, 8);
+                    lla_opt->len = 1;
+                    lla_opt->type = ND_OPT_SOURCE_LINKADDR;
+                    lla_opt->mac = flow->arp_sha;
                 }
                 if (!eth_addr_is_zero(flow->arp_tha)) {
                     l4_len += 8;
-                    nd_opt = dp_packet_put_zeros(p, 8);
-                    nd_opt->nd_opt_len = 1;
-                    nd_opt->nd_opt_type = ND_OPT_TARGET_LINKADDR;
-                    nd_opt->nd_opt_mac = flow->arp_tha;
+                    lla_opt = dp_packet_put_zeros(p, 8);
+                    lla_opt->len = 1;
+                    lla_opt->type = ND_OPT_TARGET_LINKADDR;
+                    lla_opt->mac = flow->arp_tha;
                 }
             }
         }
@@ -2546,37 +2795,81 @@ flow_compose_l4_csum(struct dp_packet *p, const struct flow *flow,
         if (flow->nw_proto == IPPROTO_TCP) {
             struct tcp_header *tcp = dp_packet_l4(p);
 
-            /* Checksum has already been zeroed by put_zeros call in
-             * flow_compose_l4(). */
+            tcp->tcp_csum = 0;
             tcp->tcp_csum = csum_finish(csum_continue(pseudo_hdr_csum,
                                                       tcp, l4_len));
         } else if (flow->nw_proto == IPPROTO_UDP) {
             struct udp_header *udp = dp_packet_l4(p);
 
-            /* Checksum has already been zeroed by put_zeros call in
-             * flow_compose_l4(). */
+            udp->udp_csum = 0;
             udp->udp_csum = csum_finish(csum_continue(pseudo_hdr_csum,
                                                       udp, l4_len));
         } else if (flow->nw_proto == IPPROTO_ICMP) {
             struct icmp_header *icmp = dp_packet_l4(p);
 
-            /* Checksum has already been zeroed by put_zeros call in
-             * flow_compose_l4(). */
+            icmp->icmp_csum = 0;
             icmp->icmp_csum = csum(icmp, l4_len);
         } else if (flow->nw_proto == IPPROTO_IGMP) {
             struct igmp_header *igmp = dp_packet_l4(p);
 
-            /* Checksum has already been zeroed by put_zeros call in
-             * flow_compose_l4(). */
+            igmp->igmp_csum = 0;
             igmp->igmp_csum = csum(igmp, l4_len);
         } else if (flow->nw_proto == IPPROTO_ICMPV6) {
             struct icmp6_hdr *icmp = dp_packet_l4(p);
 
-            /* Checksum has already been zeroed by put_zeros call in
-             * flow_compose_l4(). */
+            icmp->icmp6_cksum = 0;
             icmp->icmp6_cksum = (OVS_FORCE uint16_t)
                 csum_finish(csum_continue(pseudo_hdr_csum, icmp, l4_len));
         }
+    }
+}
+
+/* Increase the size of packet composed by 'flow_compose_minimal'
+ * up to 'size' bytes.  Fixes all the required packet headers like
+ * ip/udp lengths and l3/l4 checksums.
+ *
+ * 'size' needs to be larger then the current packet size.  */
+static void
+packet_expand(struct dp_packet *p, const struct flow *flow, size_t size)
+{
+    size_t extra_size;
+
+    ovs_assert(size > dp_packet_size(p));
+
+    extra_size = size - dp_packet_size(p);
+    dp_packet_put_zeros(p, extra_size);
+
+    if (flow->dl_type == htons(FLOW_DL_TYPE_NONE)) {
+        struct eth_header *eth = dp_packet_eth(p);
+
+        eth->eth_type = htons(dp_packet_size(p));
+    } else if (dl_type_is_ip_any(flow->dl_type)) {
+        uint32_t pseudo_hdr_csum;
+        size_t l4_len = (char *) dp_packet_tail(p) - (char *) dp_packet_l4(p);
+
+        if (flow->dl_type == htons(ETH_TYPE_IP)) {
+            struct ip_header *ip = dp_packet_l3(p);
+
+            ip->ip_tot_len = htons(p->l4_ofs - p->l3_ofs + l4_len);
+            ip->ip_csum = 0;
+            ip->ip_csum = csum(ip, sizeof *ip);
+
+            pseudo_hdr_csum = packet_csum_pseudoheader(ip);
+        } else { /* ETH_TYPE_IPV6 */
+            struct ovs_16aligned_ip6_hdr *nh = dp_packet_l3(p);
+
+            nh->ip6_plen = htons(l4_len);
+            pseudo_hdr_csum = packet_csum_pseudoheader6(nh);
+        }
+
+        if ((!(flow->nw_frag & FLOW_NW_FRAG_ANY)
+             || !(flow->nw_frag & FLOW_NW_FRAG_LATER))
+            && flow->nw_proto == IPPROTO_UDP) {
+            struct udp_header *udp = dp_packet_l4(p);
+
+            udp->udp_len = htons(l4_len + extra_size);
+        }
+        flow_compose_l4_csum(p, flow, pseudo_hdr_csum);
     }
 }
 
@@ -2584,9 +2877,12 @@ flow_compose_l4_csum(struct dp_packet *p, const struct flow *flow,
  * 'flow'.
  *
  * (This is useful only for testing, obviously, and the packet isn't really
- * valid.  Lots of fields are just zeroed.) */
-void
-flow_compose(struct dp_packet *p, const struct flow *flow)
+ * valid.  Lots of fields are just zeroed.)
+ *
+ * The created packet has minimal packet size, just big enough to hold
+ * the packet header fields.  */
+static void
+flow_compose_minimal(struct dp_packet *p, const struct flow *flow)
 {
     uint32_t pseudo_hdr_csum;
     size_t l4_len;
@@ -2594,7 +2890,7 @@ flow_compose(struct dp_packet *p, const struct flow *flow)
     /* eth_compose() sets l3 pointer and makes sure it is 32-bit aligned. */
     eth_compose(p, flow->dl_dst, flow->dl_src, ntohs(flow->dl_type), 0);
     if (flow->dl_type == htons(FLOW_DL_TYPE_NONE)) {
-        struct eth_header *eth = dp_packet_l2(p);
+        struct eth_header *eth = dp_packet_eth(p);
         eth->eth_type = htons(dp_packet_size(p));
         return;
     }
@@ -2690,6 +2986,33 @@ flow_compose(struct dp_packet *p, const struct flow *flow)
             push_mpls(p, flow->dl_type, flow->mpls_lse[--n]);
         }
     }
+}
+
+/* Puts into 'p' a Ethernet frame of size 'size' that flow_extract() would
+ * parse as having the given 'flow'.
+ *
+ * When 'size' is zero, 'p' is a minimal size packet that only big enough
+ * to contains all packet headers.
+ *
+ * When 'size' is larger than the minimal packet size, the packet will
+ * be expended to 'size' with the payload set to zero.
+ *
+ * Return 'true' if the packet is successfully created. 'false' otherwise.
+ * Note, when 'size' is set to zero, this function always returns true.  */
+bool
+flow_compose(struct dp_packet *p, const struct flow *flow, size_t size)
+{
+    flow_compose_minimal(p, flow);
+
+    if (size && size < dp_packet_size(p)) {
+        return false;
+    }
+
+    if (size > dp_packet_size(p)) {
+        packet_expand(p, flow, size);
+    }
+
+    return true;
 }
 
 /* Compressed flow. */

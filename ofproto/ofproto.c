@@ -50,7 +50,7 @@
 #include "ovs-rcu.h"
 #include "packets.h"
 #include "pinsched.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "random.h"
 #include "seq.h"
 #include "openvswitch/shash.h"
@@ -281,7 +281,8 @@ static uint64_t pick_fallback_dpid(void);
 static void ofproto_destroy__(struct ofproto *);
 static void update_mtu(struct ofproto *, struct ofport *);
 static void update_mtu_ofproto(struct ofproto *);
-static void meter_delete(struct ofproto *, uint32_t first, uint32_t last);
+static void meter_delete(struct ofproto *, uint32_t);
+static void meter_delete_all(struct ofproto *);
 static void meter_insert_rule(struct rule *);
 
 /* unixctl. */
@@ -566,8 +567,9 @@ ofproto_create(const char *datapath_name, const char *datapath_type,
     } else {
         memset(&ofproto->meter_features, 0, sizeof ofproto->meter_features);
     }
-    ofproto->meters = xzalloc((ofproto->meter_features.max_meters + 1)
-                              * sizeof(struct meter *));
+    hmap_init(&ofproto->meters);
+    ofproto->slowpath_meter_id = UINT32_MAX;
+    ofproto->controller_meter_id = UINT32_MAX;
 
     /* Set the initial tables version. */
     ofproto_bump_tables_version(ofproto);
@@ -1635,12 +1637,8 @@ ofproto_destroy(struct ofproto *p, bool del)
         return;
     }
 
-    if (p->meters) {
-        meter_delete(p, 1, p->meter_features.max_meters);
-        p->meter_features.max_meters = 0;
-        free(p->meters);
-        p->meters = NULL;
-    }
+    meter_delete_all(p);
+    hmap_destroy(&p->meters);
 
     ofproto_flush__(p);
     HMAP_FOR_EACH_SAFE (ofport, next_ofport, hmap_node, &p->ports) {
@@ -1651,7 +1649,7 @@ ofproto_destroy(struct ofproto *p, bool del)
         free(usage);
     }
 
-    p->ofproto_class->destruct(p);
+    p->ofproto_class->destruct(p, del);
 
     /* We should not postpone this because it involves deleting a listening
      * socket which we may want to reopen soon. 'connmgr' may be used by other
@@ -2473,9 +2471,6 @@ ofport_modified(struct ofport *port, struct ofputil_phy_port *pp)
     port->pp.peer = pp->peer;
     port->pp.curr_speed = pp->curr_speed;
     port->pp.max_speed = pp->max_speed;
-
-    connmgr_send_port_status(port->ofproto->connmgr, NULL,
-                             &port->pp, OFPPR_MODIFY);
 }
 
 /* Update OpenFlow 'state' in 'port' and notify controller. */
@@ -2516,8 +2511,7 @@ ofport_destroy__(struct ofport *port)
     const char *name = netdev_get_name(port->netdev);
 
     hmap_remove(&ofproto->ports, &port->hmap_node);
-    shash_delete(&ofproto->port_by_name,
-                 shash_find(&ofproto->port_by_name, name));
+    shash_find_and_delete(&ofproto->port_by_name, name);
 
     netdev_close(port->netdev);
     ofproto->ofproto_class->port_dealloc(port);
@@ -2633,7 +2627,8 @@ update_port(struct ofproto *ofproto, const char *name)
             struct netdev *old_netdev = port->netdev;
 
             /* 'name' hasn't changed location.  Any properties changed? */
-            if (!ofport_equal(&port->pp, &pp)) {
+            bool port_changed = !ofport_equal(&port->pp, &pp);
+            if (port_changed) {
                 ofport_modified(port, &pp);
             }
 
@@ -2647,6 +2642,12 @@ update_port(struct ofproto *ofproto, const char *name)
 
             if (port->ofproto->ofproto_class->port_modified) {
                 port->ofproto->ofproto_class->port_modified(port);
+            }
+
+            /* Send status update, if any port property changed */
+            if (port_changed) {
+                connmgr_send_port_status(port->ofproto->connmgr, NULL,
+                                         &port->pp, OFPPR_MODIFY);
             }
 
             netdev_close(old_netdev);
@@ -2720,18 +2721,20 @@ init_ports(struct ofproto *p)
 }
 
 static bool
-ofport_is_internal(const struct ofproto *p, const struct ofport *port)
+ofport_is_internal_or_patch(const struct ofproto *p, const struct ofport *port)
 {
     return !strcmp(netdev_get_type(port->netdev),
-                   ofproto_port_open_type(p->type, "internal"));
+                   ofproto_port_open_type(p->type, "internal")) ||
+           !strcmp(netdev_get_type(port->netdev),
+                   ofproto_port_open_type(p->type, "patch"));
 }
 
-/* If 'port' is internal and if the user didn't explicitly specify an mtu
- * through the database, we have to override it. */
+/* If 'port' is internal or patch and if the user didn't explicitly specify an
+ * mtu through the database, we have to override it. */
 static bool
 ofport_is_mtu_overridden(const struct ofproto *p, const struct ofport *port)
 {
-    return ofport_is_internal(p, port)
+    return ofport_is_internal_or_patch(p, port)
            && !netdev_mtu_is_user_config(port->netdev);
 }
 
@@ -3456,9 +3459,13 @@ ofproto_packet_out_init(struct ofproto *ofproto,
 {
     enum ofperr error;
     struct match match;
+    struct {
+        struct miniflow mf;
+        uint64_t buf[FLOW_U64S];
+    } m;
 
-    if (ofp_to_u16(po->in_port) >= ofproto->max_ports
-        && ofp_to_u16(po->in_port) < ofp_to_u16(OFPP_MAX)) {
+    uint16_t in_port = ofp_to_u16(po->flow_metadata.flow.in_port.ofp_port);
+    if (in_port >= ofproto->max_ports && in_port < ofp_to_u16(OFPP_MAX)) {
         return OFPERR_OFPBRC_BAD_PORT;
     }
 
@@ -3470,10 +3477,14 @@ ofproto_packet_out_init(struct ofproto *ofproto,
     /* Ensure that the L3 header is 32-bit aligned. */
     opo->packet = dp_packet_clone_data_with_headroom(po->packet,
                                                      po->packet_len, 2);
+    /* Take the received packet_tpye as packet_type of the packet. */
+    opo->packet->packet_type = po->flow_metadata.flow.packet_type;
+
     /* Store struct flow. */
     opo->flow = xmalloc(sizeof *opo->flow);
-    flow_extract(opo->packet, opo->flow);
-    opo->flow->in_port.ofp_port = po->in_port;
+    *opo->flow = po->flow_metadata.flow;
+    miniflow_extract(opo->packet, &m.mf);
+    flow_union_with_miniflow(opo->flow, &m.mf);
 
     /* Check actions like for flow mods.  We pass a 'table_id' of 0 to
      * ofproto_check_consistency(), which isn't strictly correct because these
@@ -3549,7 +3560,8 @@ handle_packet_out(struct ofconn *ofconn, const struct ofp_header *oh)
 
     /* Decode message. */
     ofpbuf_use_stub(&ofpacts, ofpacts_stub, sizeof ofpacts_stub);
-    error = ofputil_decode_packet_out(&po, oh, &ofpacts);
+    error = ofputil_decode_packet_out(&po, oh, ofproto_get_tun_tab(p),
+                                      &ofpacts);
     if (error) {
         ofpbuf_uninit(&ofpacts);
         return error;
@@ -4377,11 +4389,11 @@ flow_stats_ds(struct ofproto *ofproto, struct rule *rule, struct ds *results)
     ds_put_format(results, "duration=%llds, ", (time_msec() - created) / 1000);
     ds_put_format(results, "n_packets=%"PRIu64", ", packet_count);
     ds_put_format(results, "n_bytes=%"PRIu64", ", byte_count);
-    cls_rule_format(&rule->cr, ofproto_get_tun_tab(ofproto), results);
+    cls_rule_format(&rule->cr, ofproto_get_tun_tab(ofproto), NULL, results);
     ds_put_char(results, ',');
 
     ds_put_cstr(results, "actions=");
-    ofpacts_format(actions->ofpacts, actions->ofpacts_len, results);
+    ofpacts_format(actions->ofpacts, actions->ofpacts_len, NULL, results);
 
     ds_put_cstr(results, "\n");
 }
@@ -6211,13 +6223,60 @@ handle_flow_monitor_cancel(struct ofconn *ofconn, const struct ofp_header *oh)
  * 'provider_meter_id' is for the provider's private use.
  */
 struct meter {
+    struct hmap_node node;      /* In ofproto->meters. */
     long long int created;      /* Time created. */
     struct ovs_list rules;      /* List of "struct rule_dpif"s. */
+    uint32_t id;                /* OpenFlow meter_id. */
     ofproto_meter_id provider_meter_id;
     uint16_t flags;             /* Meter flags. */
     uint16_t n_bands;           /* Number of meter bands. */
     struct ofputil_meter_band *bands;
 };
+
+static struct meter *
+ofproto_get_meter(const struct ofproto *ofproto, uint32_t meter_id)
+{
+    struct meter *meter;
+    uint32_t hash = hash_int(meter_id, 0);
+
+    HMAP_FOR_EACH_WITH_HASH (meter, node, hash, &ofproto->meters) {
+        if (meter->id == meter_id) {
+            return meter;
+        }
+    }
+
+    return NULL;
+}
+
+static uint32_t *
+ofproto_upcall_meter_ptr(struct ofproto *ofproto, uint32_t meter_id)
+{
+    switch(meter_id) {
+    case OFPM13_SLOWPATH:
+        return &ofproto->slowpath_meter_id;
+        break;
+    case OFPM13_CONTROLLER:
+        return &ofproto->controller_meter_id;
+        break;
+    case OFPM13_ALL:
+        OVS_NOT_REACHED();
+    default:
+        return NULL;
+    }
+}
+
+static void
+ofproto_add_meter(struct ofproto *ofproto, struct meter *meter)
+{
+    uint32_t *upcall_meter_ptr = ofproto_upcall_meter_ptr(ofproto, meter->id);
+
+    /* Cache datapath meter IDs of special meters. */
+    if (upcall_meter_ptr) {
+        *upcall_meter_ptr = meter->provider_meter_id.uint32;
+    }
+
+    hmap_insert(&ofproto->meters, &meter->node, hash_int(meter->id, 0));
+}
 
 /*
  * This is used in instruction validation at flow set-up time, to map
@@ -6229,8 +6288,8 @@ static bool
 ofproto_fix_meter_action(const struct ofproto *ofproto,
                          struct ofpact_meter *ma)
 {
-    if (ma->meter_id && ma->meter_id <= ofproto->meter_features.max_meters) {
-        const struct meter *meter = ofproto->meters[ma->meter_id];
+    if (ma->meter_id) {
+        const struct meter *meter = ofproto_get_meter(ofproto, ma->meter_id);
 
         if (meter && meter->provider_meter_id.uint32 != UINT32_MAX) {
             /* Update the action with the provider's meter ID, so that we
@@ -6250,7 +6309,7 @@ meter_insert_rule(struct rule *rule)
 {
     const struct rule_actions *a = rule_get_actions(rule);
     uint32_t meter_id = ofpacts_get_meter(a->ofpacts, a->ofpacts_len);
-    struct meter *meter = rule->ofproto->meters[meter_id];
+    struct meter *meter = ofproto_get_meter(rule->ofproto, meter_id);
 
     ovs_list_insert(&meter->rules, &rule->meter_list_node);
 }
@@ -6275,6 +6334,7 @@ meter_create(const struct ofputil_meter_config *config,
     meter = xzalloc(sizeof *meter);
     meter->provider_meter_id = provider_meter_id;
     meter->created = time_msec();
+    meter->id = config->meter_id;
     ovs_list_init(&meter->rules);
 
     meter_update(meter, config);
@@ -6283,31 +6343,52 @@ meter_create(const struct ofputil_meter_config *config,
 }
 
 static void
-meter_delete(struct ofproto *ofproto, uint32_t first, uint32_t last)
+meter_destroy(struct ofproto *ofproto, struct meter *meter)
     OVS_REQUIRES(ofproto_mutex)
 {
-    for (uint32_t mid = first; mid <= last; ++mid) {
-        struct meter *meter = ofproto->meters[mid];
-        if (meter) {
-            /* First delete the rules that use this meter. */
-            if (!ovs_list_is_empty(&meter->rules)) {
-                struct rule_collection rules;
-                struct rule *rule;
+    uint32_t *upcall_meter_ptr;
+    upcall_meter_ptr = ofproto_upcall_meter_ptr(ofproto, meter->id);
+    if (upcall_meter_ptr) {
+        *upcall_meter_ptr = UINT32_MAX;
+    }
 
-                rule_collection_init(&rules);
+    if (!ovs_list_is_empty(&meter->rules)) {
+        struct rule_collection rules;
+        struct rule *rule;
 
-                LIST_FOR_EACH (rule, meter_list_node, &meter->rules) {
-                    rule_collection_add(&rules, rule);
-                }
-                delete_flows__(&rules, OFPRR_METER_DELETE, NULL);
-            }
-
-            ofproto->meters[mid] = NULL;
-            ofproto->ofproto_class->meter_del(ofproto,
-                                              meter->provider_meter_id);
-            free(meter->bands);
-            free(meter);
+        rule_collection_init(&rules);
+        LIST_FOR_EACH (rule, meter_list_node, &meter->rules) {
+            rule_collection_add(&rules, rule);
         }
+        delete_flows__(&rules, OFPRR_METER_DELETE, NULL);
+    }
+
+    ofproto->ofproto_class->meter_del(ofproto, meter->provider_meter_id);
+    free(meter->bands);
+    free(meter);
+}
+
+static void
+meter_delete(struct ofproto *ofproto, uint32_t meter_id)
+    OVS_REQUIRES(ofproto_mutex)
+{
+    struct meter *meter = ofproto_get_meter(ofproto, meter_id);
+
+    if (meter) {
+        hmap_remove(&ofproto->meters, &meter->node);
+        meter_destroy(ofproto, meter);
+    }
+}
+
+static void
+meter_delete_all(struct ofproto *ofproto)
+    OVS_REQUIRES(ofproto_mutex)
+{
+    struct meter *meter, *next;
+
+    HMAP_FOR_EACH_SAFE (meter, next, node, &ofproto->meters) {
+        hmap_remove(&ofproto->meters, &meter->node);
+        meter_destroy(ofproto, meter);
     }
 }
 
@@ -6315,10 +6396,10 @@ static enum ofperr
 handle_add_meter(struct ofproto *ofproto, struct ofputil_meter_mod *mm)
 {
     ofproto_meter_id provider_meter_id = { UINT32_MAX };
-    struct meter **meterp = &ofproto->meters[mm->meter.meter_id];
+    struct meter *meter = ofproto_get_meter(ofproto, mm->meter.meter_id);
     enum ofperr error;
 
-    if (*meterp) {
+    if (meter) {
         return OFPERR_OFPMMFC_METER_EXISTS;
     }
 
@@ -6326,7 +6407,8 @@ handle_add_meter(struct ofproto *ofproto, struct ofputil_meter_mod *mm)
                                               &mm->meter);
     if (!error) {
         ovs_assert(provider_meter_id.uint32 != UINT32_MAX);
-        *meterp = meter_create(&mm->meter, provider_meter_id);
+        meter = meter_create(&mm->meter, provider_meter_id);
+        ofproto_add_meter(ofproto, meter);
     }
     return error;
 }
@@ -6334,7 +6416,7 @@ handle_add_meter(struct ofproto *ofproto, struct ofputil_meter_mod *mm)
 static enum ofperr
 handle_modify_meter(struct ofproto *ofproto, struct ofputil_meter_mod *mm)
 {
-    struct meter *meter = ofproto->meters[mm->meter.meter_id];
+    struct meter *meter = ofproto_get_meter(ofproto, mm->meter.meter_id);
     enum ofperr error;
     uint32_t provider_meter_id;
 
@@ -6359,25 +6441,21 @@ handle_delete_meter(struct ofconn *ofconn, struct ofputil_meter_mod *mm)
 {
     struct ofproto *ofproto = ofconn_get_ofproto(ofconn);
     uint32_t meter_id = mm->meter.meter_id;
-    enum ofperr error = 0;
-    uint32_t first, last;
 
-    if (meter_id == OFPM13_ALL) {
-        first = 1;
-        last = ofproto->meter_features.max_meters;
-    } else {
-        if (!meter_id || meter_id > ofproto->meter_features.max_meters) {
-            return 0;
+    /* OpenFlow does not support Meter ID 0. */
+    if (meter_id) {
+        ovs_mutex_lock(&ofproto_mutex);
+
+        if (meter_id == OFPM13_ALL) {
+            meter_delete_all(ofproto);
+        } else {
+            meter_delete(ofproto, meter_id);
         }
-        first = last = meter_id;
+
+        ovs_mutex_unlock(&ofproto_mutex);
     }
 
-    /* Delete the meters. */
-    ovs_mutex_lock(&ofproto_mutex);
-    meter_delete(ofproto, first, last);
-    ovs_mutex_unlock(&ofproto_mutex);
-
-    return error;
+    return 0;
 }
 
 static enum ofperr
@@ -6406,12 +6484,24 @@ handle_meter_mod(struct ofconn *ofconn, const struct ofp_header *oh)
 
     if (mm.command != OFPMC13_DELETE) {
         /* Fails also when meters are not implemented by the provider. */
-        if (meter_id == 0 || meter_id > OFPM13_MAX) {
+        if (ofproto->meter_features.max_meters == 0) {
             error = OFPERR_OFPMMFC_INVALID_METER;
             goto exit_free_bands;
-        } else if (meter_id > ofproto->meter_features.max_meters) {
-            error = OFPERR_OFPMMFC_OUT_OF_METERS;
+        }
+
+        if (meter_id == 0) {
+            error = OFPERR_OFPMMFC_INVALID_METER;
             goto exit_free_bands;
+        } else if (meter_id > OFPM13_MAX) {
+            switch(meter_id) {
+            case OFPM13_SLOWPATH:
+            case OFPM13_CONTROLLER:
+                break;
+            case OFPM13_ALL:
+            default:
+                error = OFPERR_OFPMMFC_INVALID_METER;
+                goto exit_free_bands;
+            }
         }
         if (mm.meter.n_bands > ofproto->meter_features.max_bands) {
             error = OFPERR_OFPMMFC_OUT_OF_BANDS;
@@ -6469,70 +6559,90 @@ handle_meter_features_request(struct ofconn *ofconn,
     return 0;
 }
 
+static void
+meter_request_reply(struct ofproto *ofproto, struct meter *meter,
+                    enum ofptype type, struct ovs_list *replies)
+{
+    uint64_t bands_stub[256 / 8];
+    struct ofpbuf bands;
+
+    ofpbuf_use_stub(&bands, bands_stub, sizeof bands_stub);
+
+    if (type == OFPTYPE_METER_STATS_REQUEST) {
+        struct ofputil_meter_stats stats;
+
+        stats.meter_id = meter->id;
+
+        /* Provider sets the packet and byte counts, we do the rest. */
+        stats.flow_count = ovs_list_size(&meter->rules);
+        calc_duration(meter->created, time_msec(),
+                      &stats.duration_sec, &stats.duration_nsec);
+        stats.n_bands = meter->n_bands;
+        ofpbuf_clear(&bands);
+        stats.bands = ofpbuf_put_uninit(&bands, meter->n_bands
+                                                * sizeof *stats.bands);
+
+        if (!ofproto->ofproto_class->meter_get(ofproto,
+                                               meter->provider_meter_id,
+                                               &stats, meter->n_bands)) {
+            ofputil_append_meter_stats(replies, &stats);
+        }
+    } else { /* type == OFPTYPE_METER_CONFIG_REQUEST */
+        struct ofputil_meter_config config;
+
+        config.meter_id = meter->id;
+        config.flags = meter->flags;
+        config.n_bands = meter->n_bands;
+        config.bands = meter->bands;
+        ofputil_append_meter_config(replies, &config);
+    }
+
+    ofpbuf_uninit(&bands);
+}
+
+static void
+meter_request_reply_all(struct ofproto *ofproto, enum ofptype type,
+                        struct ovs_list *replies)
+{
+    struct meter *meter;
+
+    HMAP_FOR_EACH (meter, node, &ofproto->meters) {
+        meter_request_reply(ofproto, meter, type, replies);
+    }
+}
+
 static enum ofperr
 handle_meter_request(struct ofconn *ofconn, const struct ofp_header *request,
                      enum ofptype type)
 {
     struct ofproto *ofproto = ofconn_get_ofproto(ofconn);
     struct ovs_list replies;
-    uint64_t bands_stub[256 / 8];
-    struct ofpbuf bands;
-    uint32_t meter_id, first, last;
+    uint32_t meter_id;
+    struct meter *meter;
 
     ofputil_decode_meter_request(request, &meter_id);
 
-    if (meter_id == OFPM13_ALL) {
-        first = 1;
-        last = ofproto->meter_features.max_meters;
-    } else {
-        if (!meter_id || meter_id > ofproto->meter_features.max_meters ||
-            !ofproto->meters[meter_id]) {
+    if (meter_id != OFPM13_ALL) {
+        meter = ofproto_get_meter(ofproto, meter_id);
+        if (!meter) {
+            /* Meter does not exist. */
             return OFPERR_OFPMMFC_UNKNOWN_METER;
         }
-        first = last = meter_id;
+    } else {
+        /* GCC 4.9.2 complains about 'meter' can potentially be used
+         * uninitialized. Logically, this is a false alarm since
+         * meter is only used when meter_id != OFPM13_ALL.
+         * Set NULL to make compiler happy.  */
+        meter = NULL;
     }
 
-    ofpbuf_use_stub(&bands, bands_stub, sizeof bands_stub);
     ofpmp_init(&replies, request);
-
-    for (meter_id = first; meter_id <= last; ++meter_id) {
-        struct meter *meter = ofproto->meters[meter_id];
-        if (!meter) {
-            continue; /* Skip non-existing meters. */
-        }
-        if (type == OFPTYPE_METER_STATS_REQUEST) {
-            struct ofputil_meter_stats stats;
-
-            stats.meter_id = meter_id;
-
-            /* Provider sets the packet and byte counts, we do the rest. */
-            stats.flow_count = ovs_list_size(&meter->rules);
-            calc_duration(meter->created, time_msec(),
-                          &stats.duration_sec, &stats.duration_nsec);
-            stats.n_bands = meter->n_bands;
-            ofpbuf_clear(&bands);
-            stats.bands
-                = ofpbuf_put_uninit(&bands,
-                                    meter->n_bands * sizeof *stats.bands);
-
-            if (!ofproto->ofproto_class->meter_get(ofproto,
-                                                   meter->provider_meter_id,
-                                                   &stats, meter->n_bands)) {
-                ofputil_append_meter_stats(&replies, &stats);
-            }
-        } else { /* type == OFPTYPE_METER_CONFIG_REQUEST */
-            struct ofputil_meter_config config;
-
-            config.meter_id = meter_id;
-            config.flags = meter->flags;
-            config.n_bands = meter->n_bands;
-            config.bands = meter->bands;
-            ofputil_append_meter_config(&replies, &config);
-        }
+    if (meter_id == OFPM13_ALL) {
+        meter_request_reply_all(ofproto, type, &replies);
+    } else {
+        meter_request_reply(ofproto, meter, type, &replies);
     }
-
     ofconn_send_replies(ofconn, &replies);
-    ofpbuf_uninit(&bands);
     return 0;
 }
 
@@ -6641,7 +6751,10 @@ handle_group_request(struct ofconn *ofconn,
     ovs_mutex_lock(&ofproto_mutex);
     if (group_id == OFPG_ALL) {
         CMAP_FOR_EACH (group, cmap_node, &ofproto->groups) {
-            cb(group, &replies);
+            if (versions_visible_in_version(&group->versions,
+                                            OVS_VERSION_MAX)) {
+                cb(group, &replies);
+            }
         }
     } else {
         group = ofproto_group_lookup__(ofproto, group_id, OVS_VERSION_MAX);
@@ -6792,6 +6905,13 @@ handle_queue_get_config_request(struct ofconn *ofconn,
     return error;
 }
 
+/* Allocates, initializes, and constructs a new group in 'ofproto', obtaining
+ * all the attributes for it from 'gm', and stores a pointer to it in
+ * '*ofgroup'.  Makes the new group visible from the flow table starting from
+ * 'version'.
+ *
+ * Returns 0 if successful, otherwise an error code.  If there is an error then
+ * '*ofgroup' is indeterminate upon return. */
 static enum ofperr
 init_group(struct ofproto *ofproto, const struct ofputil_group_mod *gm,
            ovs_version_t version, struct ofgroup **ofgroup)
@@ -6998,6 +7118,16 @@ modify_group_start(struct ofproto *ofproto, struct ofproto_group_mod *ogm)
                                        OVS_VERSION_MAX);
     if (!old_group) {
         return OFPERR_OFPGMFC_UNKNOWN_GROUP;
+    }
+
+    /* Inserting or deleting a bucket should not change the group's type or
+     * properties, so change the group mod so that these aspects match the old
+     * group.  (See EXT-570.)  */
+    if (ogm->gm.command == OFPGC15_INSERT_BUCKET ||
+        ogm->gm.command == OFPGC15_REMOVE_BUCKET) {
+        ogm->gm.type = old_group->type;
+        ofputil_group_properties_destroy(&ogm->gm.props);
+        ofputil_group_properties_copy(&ogm->gm.props, &old_group->props);
     }
 
     if (old_group->type != ogm->gm.type
@@ -7815,7 +7945,9 @@ handle_bundle_add(struct ofconn *ofconn, const struct ofp_header *oh)
         COVERAGE_INC(ofproto_packet_out);
 
         /* Decode message. */
-        error = ofputil_decode_packet_out(&po, badd.msg, &ofpacts);
+        error = ofputil_decode_packet_out(&po, badd.msg,
+                                          ofproto_get_tun_tab(ofproto),
+                                          &ofpacts);
         if (!error) {
             po.ofpacts = ofpbuf_steal_data(&ofpacts);   /* Move to heap. */
             error = ofproto_packet_out_init(ofproto, ofconn, &bmsg->opo, &po);
@@ -7866,6 +7998,8 @@ handle_tlv_table_mod(struct ofconn *ofconn, const struct ofp_header *oh)
         if (!error) {
             ovsrcu_set(&ofproto->metadata_tab, new_tab);
             tun_metadata_postpone_free(old_tab);
+        } else {
+            tun_metadata_free(new_tab);
         }
     }
 

@@ -16,6 +16,8 @@
 
 #include <config.h>
 #include "netflow.h"
+#include <sys/types.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -29,7 +31,7 @@
 #include "ofproto.h"
 #include "ofproto/netflow.h"
 #include "packets.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "socket-util.h"
 #include "timeval.h"
 #include "util.h"
@@ -413,6 +415,14 @@ netflow_unref(struct netflow *nf)
         atomic_count_dec(&netflow_count);
         collectors_destroy(nf->collectors);
         ofpbuf_uninit(&nf->packet);
+
+        struct netflow_flow *nf_flow, *next;
+        HMAP_FOR_EACH_SAFE (nf_flow, next, hmap_node, &nf->flows) {
+            hmap_remove(&nf->flows, &nf_flow->hmap_node);
+            free(nf_flow);
+        }
+        hmap_destroy(&nf->flows);
+
         free(nf);
     }
 }

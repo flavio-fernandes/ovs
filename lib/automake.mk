@@ -149,6 +149,7 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/odp-util.c \
 	lib/odp-util.h \
 	lib/ofp-actions.c \
+	lib/ofp-ed-props.c \
 	lib/ofp-errors.c \
 	lib/ofp-msgs.c \
 	lib/ofp-parse.c \
@@ -158,6 +159,7 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/ofp-version-opt.h \
 	lib/ofp-version-opt.c \
 	lib/ofpbuf.c \
+	lib/ovs-atomic-c++.h \
 	lib/ovs-atomic-c11.h \
 	lib/ovs-atomic-clang.h \
 	lib/ovs-atomic-flag-gcc4.7+.h \
@@ -204,7 +206,6 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/perf-counter.h \
 	lib/perf-counter.c \
 	lib/poll-loop.c \
-	lib/poll-loop.h \
 	lib/process.c \
 	lib/process.h \
 	lib/pvector.c \
@@ -212,7 +213,6 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/random.c \
 	lib/random.h \
 	lib/rconn.c \
-	lib/rconn.h \
 	lib/rculist.h \
 	lib/reconnect.c \
 	lib/reconnect.h \
@@ -229,6 +229,8 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/shash.c \
 	lib/simap.c \
 	lib/simap.h \
+	lib/skiplist.c \
+	lib/skiplist.h \
 	lib/smap.c \
 	lib/smap.h \
 	lib/socket-util.c \
@@ -352,10 +354,14 @@ if LINUX
 lib_libopenvswitch_la_SOURCES += \
 	lib/dpif-netlink.c \
 	lib/dpif-netlink.h \
+	lib/dpif-netlink-rtnl.c \
+	lib/dpif-netlink-rtnl.h \
 	lib/if-notifier.c \
 	lib/if-notifier.h \
 	lib/netdev-linux.c \
 	lib/netdev-linux.h \
+	lib/netdev-tc-offloads.c \
+	lib/netdev-tc-offloads.h \
 	lib/netlink-conntrack.c \
 	lib/netlink-conntrack.h \
 	lib/netlink-notifier.c \
@@ -366,7 +372,9 @@ lib_libopenvswitch_la_SOURCES += \
 	lib/rtnetlink.c \
 	lib/rtnetlink.h \
 	lib/route-table.c \
-	lib/route-table.h
+	lib/route-table.h \
+	lib/tc.c \
+	lib/tc.h
 endif
 
 if DPDK_NETDEV
@@ -382,6 +390,7 @@ if WIN32
 lib_libopenvswitch_la_SOURCES += \
 	lib/dpif-netlink.c \
 	lib/dpif-netlink.h \
+	lib/dpif-netlink-rtnl.h \
 	lib/netdev-windows.c \
 	lib/netlink-conntrack.c \
 	lib/netlink-conntrack.h \
@@ -456,6 +465,7 @@ MAN_FRAGMENTS += \
 	lib/db-ctl-base.man \
 	lib/dpctl.man \
 	lib/memory-unixctl.man \
+	lib/netdev-dpdk-unixctl.man \
 	lib/ofp-version.man \
 	lib/ovs.tmac \
 	lib/service.man \
@@ -534,10 +544,7 @@ EXTRA_DIST += build-aux/extract-ofp-msgs
 
 INSTALL_DATA_LOCAL += lib-install-data-local
 lib-install-data-local:
-	$(MKDIR_P) $(DESTDIR)$(RUNDIR)
 	$(MKDIR_P) $(DESTDIR)$(PKIDIR)
-	$(MKDIR_P) $(DESTDIR)$(LOGDIR)
-	$(MKDIR_P) $(DESTDIR)$(DBDIR)
 	$(MKDIR_P) $(DESTDIR)$(sysconfdir)/openvswitch
 
 man_MANS += lib/ovs-fields.7

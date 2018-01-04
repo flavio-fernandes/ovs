@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <sys/wait.h>
+
 #include "command-line.h"
 #include "dp-packet.h"
 #include "fatal-signal.h"
@@ -31,7 +32,7 @@
 #include "ovn/expr.h"
 #include "ovn/lex.h"
 #include "ovn/lib/logical-fields.h"
-#include "ovn/lib/ovn-dhcp.h"
+#include "ovn/lib/ovn-l7.h"
 #include "ovs-thread.h"
 #include "ovstest.h"
 #include "openvswitch/shash.h"
@@ -154,7 +155,8 @@ create_symtab(struct shash *symtab)
 }
 
 static void
-create_dhcp_opts(struct hmap *dhcp_opts, struct hmap *dhcpv6_opts)
+create_gen_opts(struct hmap *dhcp_opts, struct hmap *dhcpv6_opts,
+                struct hmap *nd_ra_opts)
 {
     hmap_init(dhcp_opts);
     dhcp_opt_add(dhcp_opts, "offerip", 0, "ipv4");
@@ -186,6 +188,10 @@ create_dhcp_opts(struct hmap *dhcp_opts, struct hmap *dhcpv6_opts)
     dhcp_opt_add(dhcpv6_opts, "ia_addr",  5, "ipv6");
     dhcp_opt_add(dhcpv6_opts, "dns_server",  23, "ipv6");
     dhcp_opt_add(dhcpv6_opts, "domain_search",  24, "str");
+
+    /* IPv6 ND RA options. */
+    hmap_init(nd_ra_opts);
+    nd_ra_opts_init(nd_ra_opts);
 }
 
 static void
@@ -202,10 +208,12 @@ create_addr_sets(struct shash *addr_sets)
     static const char *const addrs3[] = {
         "00:00:00:00:00:01", "00:00:00:00:00:02", "00:00:00:00:00:03",
     };
+    static const char *const addrs4[] = { NULL };
 
     expr_addr_sets_add(addr_sets, "set1", addrs1, 3);
     expr_addr_sets_add(addr_sets, "set2", addrs2, 3);
     expr_addr_sets_add(addr_sets, "set3", addrs3, 3);
+    expr_addr_sets_add(addr_sets, "set4", addrs4, 0);
 }
 
 static bool
@@ -373,7 +381,6 @@ test_evaluate_expr(struct ovs_cmdl_context *ctx)
     ds_init(&input);
     while (!ds_get_test_line(&input, stdin)) {
         struct expr *expr;
-        char *error;
 
         expr = expr_parse_string(ds_cstr(&input), &symtab, NULL, &error);
         if (!error) {
@@ -1164,7 +1171,7 @@ test_expr_to_packets(struct ovs_cmdl_context *ctx OVS_UNUSED)
         uint64_t packet_stub[128 / 8];
         struct dp_packet packet;
         dp_packet_use_stub(&packet, packet_stub, sizeof packet_stub);
-        flow_compose(&packet, &uflow);
+        flow_compose(&packet, &uflow, 0);
 
         struct ds output = DS_EMPTY_INITIALIZER;
         const uint8_t *buf = dp_packet_data(&packet);
@@ -1191,12 +1198,13 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
     struct shash symtab;
     struct hmap dhcp_opts;
     struct hmap dhcpv6_opts;
-    struct simap ports, ct_zones;
+    struct hmap nd_ra_opts;
+    struct simap ports;
     struct ds input;
     bool ok = true;
 
     create_symtab(&symtab);
-    create_dhcp_opts(&dhcp_opts, &dhcpv6_opts);
+    create_gen_opts(&dhcp_opts, &dhcpv6_opts, &nd_ra_opts);
 
     /* Initialize group ids. */
     struct group_table group_table;
@@ -1209,7 +1217,6 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
     simap_put(&ports, "eth0", 5);
     simap_put(&ports, "eth1", 6);
     simap_put(&ports, "LOCAL", ofp_to_u16(OFPP_LOCAL));
-    simap_init(&ct_zones);
 
     ds_init(&input);
     while (!ds_get_test_line(&input, stdin)) {
@@ -1225,7 +1232,8 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
             .symtab = &symtab,
             .dhcp_opts = &dhcp_opts,
             .dhcpv6_opts = &dhcpv6_opts,
-            .n_tables = 16,
+            .nd_ra_opts = &nd_ra_opts,
+            .n_tables = 24,
             .cur_ltable = 10,
         };
         error = ovnacts_parse_string(ds_cstr(&input), &pp, &ovnacts, &prereqs);
@@ -1243,12 +1251,11 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
                 .lookup_port = lookup_port_cb,
                 .aux = &ports,
                 .is_switch = true,
-                .ct_zones = &ct_zones,
                 .group_table = &group_table,
 
                 .pipeline = OVNACT_P_INGRESS,
-                .ingress_ptable = 16,
-                .egress_ptable = 48,
+                .ingress_ptable = 8,
+                .egress_ptable = 40,
                 .output_ptable = 64,
                 .mac_bind_ptable = 65,
             };
@@ -1256,7 +1263,7 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
             ofpbuf_init(&ofpacts, 0);
             ovnacts_encode(ovnacts.data, ovnacts.size, &ep, &ofpacts);
             struct ds ofpacts_s = DS_EMPTY_INITIALIZER;
-            ofpacts_format(ofpacts.data, ofpacts.size, &ofpacts_s);
+            ofpacts_format(ofpacts.data, ofpacts.size, NULL, &ofpacts_s);
             printf("    encodes as %s\n", ds_cstr(&ofpacts_s));
             ds_destroy(&ofpacts_s);
             ofpbuf_uninit(&ofpacts);
@@ -1306,12 +1313,11 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
     ds_destroy(&input);
 
     simap_destroy(&ports);
-    simap_destroy(&ct_zones);
     expr_symtab_destroy(&symtab);
     shash_destroy(&symtab);
     dhcp_opts_destroy(&dhcp_opts);
     dhcp_opts_destroy(&dhcpv6_opts);
-
+    nd_ra_opts_destroy(&nd_ra_opts);
     exit(ok ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
@@ -1492,6 +1498,7 @@ test_ovn_main(int argc, char *argv[])
 
         case 'h':
             usage();
+            /* fall through */
 
         case '?':
             exit(1);
