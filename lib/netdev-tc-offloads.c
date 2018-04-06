@@ -428,6 +428,27 @@ parse_tc_flower_to_match(struct tc_flower *flower,
 
         match_set_nw_ttl_masked(match, key->ip_ttl, mask->ip_ttl);
 
+        if (mask->flags) {
+            uint8_t flags = 0;
+            uint8_t flags_mask = 0;
+
+            if (mask->flags & TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT) {
+                if (key->flags & TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT) {
+                    flags |= FLOW_NW_FRAG_ANY;
+                }
+                flags_mask |= FLOW_NW_FRAG_ANY;
+            }
+
+            if (mask->flags & TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST) {
+                if (!(key->flags & TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST)) {
+                    flags |= FLOW_NW_FRAG_LATER;
+                }
+                flags_mask |= FLOW_NW_FRAG_LATER;
+            }
+
+            match_set_nw_frag_masked(match, flags, flags_mask);
+        }
+
         match_set_nw_src_masked(match, key->ipv4.ipv4_src, mask->ipv4.ipv4_src);
         match_set_nw_dst_masked(match, key->ipv4.ipv4_dst, mask->ipv4.ipv4_dst);
 
@@ -581,18 +602,17 @@ parse_put_flow_set_masked_action(struct tc_flower *flower,
                                  bool hasmask)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
-    char *set_buff[128], *set_data, *set_mask;
+    uint64_t set_stub[1024 / 8];
+    struct ofpbuf set_buf = OFPBUF_STUB_INITIALIZER(set_stub);
+    char *set_data, *set_mask;
     char *key = (char *) &flower->rewrite.key;
     char *mask = (char *) &flower->rewrite.mask;
     const struct nlattr *attr;
     int i, j, type;
     size_t size;
 
-    ovs_assert(set_len <= 128);
-
     /* copy so we can set attr mask to 0 for used ovs key struct members  */
-    memcpy(set_buff, set, set_len);
-    attr = (struct nlattr *) set_buff;
+    attr = ofpbuf_put(&set_buf, set, set_len);
 
     type = nl_attr_type(attr);
     size = nl_attr_get_size(attr) / 2;
@@ -602,6 +622,7 @@ parse_put_flow_set_masked_action(struct tc_flower *flower,
     if (type >= ARRAY_SIZE(set_flower_map)
         || !set_flower_map[type][0].size) {
         VLOG_DBG_RL(&rl, "unsupported set action type: %d", type);
+        ofpbuf_uninit(&set_buf);
         return EOPNOTSUPP;
     }
 
@@ -634,9 +655,11 @@ parse_put_flow_set_masked_action(struct tc_flower *flower,
     if (hasmask && !is_all_zeros(set_mask, size)) {
         VLOG_DBG_RL(&rl, "unsupported sub attribute of set action type %d",
                     type);
+        ofpbuf_uninit(&set_buf);
         return EOPNOTSUPP;
     }
 
+    ofpbuf_uninit(&set_buf);
     return 0;
 }
 
@@ -775,11 +798,6 @@ test_key_and_mask(struct match *match)
 
     if (mask->nw_tos) {
         VLOG_DBG_RL(&rl, "offloading attribute nw_tos isn't supported");
-        return EOPNOTSUPP;
-    }
-
-    if (mask->nw_frag) {
-        VLOG_DBG_RL(&rl, "offloading attribute nw_frag isn't supported");
         return EOPNOTSUPP;
     }
 
@@ -930,6 +948,24 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
         flower.key.ip_ttl = key->nw_ttl;
         flower.mask.ip_ttl = mask->nw_ttl;
 
+        if (mask->nw_frag & FLOW_NW_FRAG_ANY) {
+            flower.mask.flags |= TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT;
+
+            if (key->nw_frag & FLOW_NW_FRAG_ANY) {
+                flower.key.flags |= TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT;
+
+                if (mask->nw_frag & FLOW_NW_FRAG_LATER) {
+                    flower.mask.flags |= TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST;
+
+                    if (!(key->nw_frag & FLOW_NW_FRAG_LATER)) {
+                        flower.key.flags |= TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST;
+                    }
+                }
+            }
+
+            mask->nw_frag = 0;
+        }
+
         if (key->nw_proto == IPPROTO_TCP) {
             flower.key.tcp_dst = key->tp_dst;
             flower.mask.tcp_dst = mask->tp_dst;
@@ -956,7 +992,6 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
             mask->tp_dst = 0;
         }
 
-        mask->nw_frag = 0;
         mask->nw_tos = 0;
         mask->nw_proto = 0;
         mask->nw_ttl = 0;

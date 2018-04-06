@@ -28,6 +28,7 @@
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/json.h"
 #include "openvswitch/ofp-actions.h"
+#include "openvswitch/ofp-flow.h"
 #include "openvswitch/ofp-print.h"
 #include "openvswitch/vconn.h"
 #include "openvswitch/vlog.h"
@@ -1535,6 +1536,57 @@ execute_nd_ns(const struct ovnact_nest *on, const struct ovntrace_datapath *dp,
 }
 
 static void
+execute_icmp4(const struct ovnact_nest *on,
+              const struct ovntrace_datapath *dp,
+              const struct flow *uflow, uint8_t table_id,
+              enum ovnact_pipeline pipeline, struct ovs_list *super)
+{
+    struct flow icmp4_flow = *uflow;
+
+    /* Update fields for ICMP. */
+    icmp4_flow.dl_dst = uflow->dl_dst;
+    icmp4_flow.dl_src = uflow->dl_src;
+    icmp4_flow.nw_dst = uflow->nw_dst;
+    icmp4_flow.nw_src = uflow->nw_src;
+    icmp4_flow.nw_proto = IPPROTO_ICMP;
+    icmp4_flow.nw_ttl = 255;
+    icmp4_flow.tp_src = htons(ICMP4_DST_UNREACH); /* icmp type */
+    icmp4_flow.tp_dst = htons(1); /* icmp code */
+
+    struct ovntrace_node *node = ovntrace_node_append(
+        super, OVNTRACE_NODE_TRANSFORMATION, "icmp4");
+
+    trace_actions(on->nested, on->nested_len, dp, &icmp4_flow,
+                  table_id, pipeline, &node->subs);
+}
+
+static void
+execute_tcp_reset(const struct ovnact_nest *on,
+                  const struct ovntrace_datapath *dp,
+                  const struct flow *uflow, uint8_t table_id,
+                  enum ovnact_pipeline pipeline, struct ovs_list *super)
+{
+    struct flow tcp_flow = *uflow;
+
+    /* Update fields for TCP segment. */
+    tcp_flow.dl_dst = uflow->dl_dst;
+    tcp_flow.dl_src = uflow->dl_src;
+    tcp_flow.nw_dst = uflow->nw_dst;
+    tcp_flow.nw_src = uflow->nw_src;
+    tcp_flow.nw_proto = IPPROTO_TCP;
+    tcp_flow.nw_ttl = 255;
+    tcp_flow.tp_src = uflow->tp_src;
+    tcp_flow.tp_dst = uflow->tp_dst;
+    tcp_flow.tcp_flags = htons(TCP_RST);
+
+    struct ovntrace_node *node = ovntrace_node_append(
+        super, OVNTRACE_NODE_TRANSFORMATION, "tcp_reset");
+
+    trace_actions(on->nested, on->nested_len, dp, &tcp_flow,
+                  table_id, pipeline, &node->subs);
+}
+
+static void
 execute_get_mac_bind(const struct ovnact_get_mac_bind *bind,
                      const struct ovntrace_datapath *dp,
                      struct flow *uflow, struct ovs_list *super)
@@ -1888,6 +1940,20 @@ trace_actions(const struct ovnact *ovnacts, size_t ovnacts_len,
         case OVNACT_LOG:
             execute_log(ovnact_get_LOG(a), uflow, super);
             break;
+
+        case OVNACT_SET_METER:
+            /* Nothing to do. */
+            break;
+
+        case OVNACT_ICMP4:
+            execute_icmp4(ovnact_get_ICMP4(a), dp, uflow, table_id, pipeline,
+                          super);
+            break;
+
+        case OVNACT_TCP_RESET:
+            execute_tcp_reset(ovnact_get_TCP_RESET(a), dp, uflow, table_id,
+                              pipeline, super);
+            break;
         }
 
     }
@@ -1932,7 +1998,7 @@ trace_openflow(const struct ovntrace_flow *f, struct ovs_list *super)
         struct ds s = DS_EMPTY_INITIALIZER;
         for (size_t i = 0; i < n_fses; i++) {
             ds_clear(&s);
-            ofp_print_flow_stats(&s, &fses[i], NULL, true);
+            ofputil_flow_stats_format(&s, &fses[i], NULL, NULL, true);
             ovntrace_node_append(super, OVNTRACE_NODE_ACTION,
                                  "%s", ds_cstr(&s));
         }

@@ -42,6 +42,7 @@
 #include "openvswitch/vlog.h"
 #include "ovn/actions.h"
 #include "ovn/lib/chassis-index.h"
+#include "ovn/lib/extend-table.h"
 #include "ovn/lib/ovn-sb-idl.h"
 #include "ovn/lib/ovn-util.h"
 #include "patch.h"
@@ -56,6 +57,9 @@
 #include "stream.h"
 #include "unixctl.h"
 #include "util.h"
+#include "timeval.h"
+#include "timer.h"
+#include "stopwatch.h"
 
 VLOG_DEFINE_THIS_MODULE(main);
 
@@ -65,6 +69,8 @@ static unixctl_cb_func inject_pkt;
 
 #define DEFAULT_BRIDGE_NAME "br-int"
 #define DEFAULT_PROBE_INTERVAL_MSEC 5000
+
+#define CONTROLLER_LOOP_STOPWATCH_NAME "ovn-controller-flow-generation"
 
 static void update_probe_interval(struct controller_ctx *,
                                   const char *ovnsb_remote);
@@ -593,15 +599,16 @@ main(int argc, char *argv[])
     unixctl_command_register("exit", "", 0, 0, ovn_controller_exit, &exiting);
 
     /* Initialize group ids for loadbalancing. */
-    struct group_table group_table;
-    group_table.group_ids = bitmap_allocate(MAX_OVN_GROUPS);
-    bitmap_set1(group_table.group_ids, 0); /* Group id 0 is invalid. */
-    hmap_init(&group_table.desired_groups);
-    hmap_init(&group_table.existing_groups);
+    struct ovn_extend_table group_table;
+    ovn_extend_table_init(&group_table);
+
+    /* Initialize meter ids for QoS. */
+    struct ovn_extend_table meter_table;
+    ovn_extend_table_init(&meter_table);
 
     daemonize_complete();
 
-    ofctrl_init(&group_table);
+    ofctrl_init(&group_table, &meter_table);
     pinctrl_init();
     lflow_init();
 
@@ -615,6 +622,7 @@ main(int argc, char *argv[])
     char *ovnsb_remote = get_ovnsb_remote(ovs_idl_loop.idl);
     struct ovsdb_idl_loop ovnsb_idl_loop = OVSDB_IDL_LOOP_INITIALIZER(
         ovsdb_idl_create(ovnsb_remote, &sbrec_idl_class, true, true));
+    ovsdb_idl_set_leader_only(ovnsb_idl_loop.idl, false);
 
     create_ovnsb_indexes(ovnsb_idl_loop.idl);
     lport_init(ovnsb_idl_loop.idl);
@@ -637,6 +645,7 @@ main(int argc, char *argv[])
     unixctl_command_register("inject-pkt", "MICROFLOW", 1, 1, inject_pkt,
                              &pending_pkt);
 
+    stopwatch_create(CONTROLLER_LOOP_STOPWATCH_NAME, SW_MS);
     /* Main loop. */
     exiting = false;
     while (!exiting) {
@@ -706,13 +715,16 @@ main(int argc, char *argv[])
                             ct_zone_bitmap, &pending_ct_zones);
             if (ctx.ovs_idl_txn) {
                 if (ofctrl_can_put()) {
+                    stopwatch_start(CONTROLLER_LOOP_STOPWATCH_NAME,
+                                    time_msec());
+
                     commit_ct_zones(br_int, &pending_ct_zones);
 
                     struct hmap flow_table = HMAP_INITIALIZER(&flow_table);
                     lflow_run(&ctx, chassis,
                               &chassis_index, &local_datapaths, &group_table,
-                              &addr_sets, &flow_table, &active_tunnels,
-                              &local_lport_ids);
+                              &meter_table, &addr_sets, &flow_table,
+                              &active_tunnels, &local_lport_ids);
 
                     if (chassis_id) {
                         bfd_run(&ctx, br_int, chassis, &local_datapaths,
@@ -722,6 +734,9 @@ main(int argc, char *argv[])
                                  br_int, chassis, &ct_zones,
                                  &flow_table, &local_datapaths, &local_lports,
                                  &chassis_index, &active_tunnels);
+
+                    stopwatch_stop(CONTROLLER_LOOP_STOPWATCH_NAME,
+                                   time_msec());
 
                     ofctrl_put(&flow_table, &pending_ct_zones,
                                get_nb_cfg(ctx.ovnsb_idl));
@@ -790,6 +805,7 @@ main(int argc, char *argv[])
             ofctrl_wait();
             pinctrl_wait(&ctx);
         }
+
         ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
 
         if (ovsdb_idl_loop_commit_and_wait(&ovs_idl_loop) == 1) {
@@ -845,17 +861,8 @@ main(int argc, char *argv[])
     simap_destroy(&ct_zones);
     shash_destroy(&pending_ct_zones);
 
-    bitmap_free(group_table.group_ids);
-    hmap_destroy(&group_table.desired_groups);
-
-    struct group_info *installed, *next_group;
-    HMAP_FOR_EACH_SAFE(installed, next_group, hmap_node,
-                       &group_table.existing_groups) {
-        hmap_remove(&group_table.existing_groups, &installed->hmap_node);
-        ds_destroy(&installed->group);
-        free(installed);
-    }
-    hmap_destroy(&group_table.existing_groups);
+    ovn_extend_table_destroy(&group_table);
+    ovn_extend_table_destroy(&meter_table);
 
     ovsdb_idl_loop_destroy(&ovs_idl_loop);
     ovsdb_idl_loop_destroy(&ovnsb_idl_loop);

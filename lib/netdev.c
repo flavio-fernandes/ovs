@@ -19,6 +19,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <sys/types.h>
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,7 +29,6 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
-#include <sys/types.h>
 #endif
 
 #include "cmap.h"
@@ -45,6 +45,7 @@
 #include "odp-netlink.h"
 #include "openflow/openflow.h"
 #include "packets.h"
+#include "openvswitch/ofp-print.h"
 #include "openvswitch/poll-loop.h"
 #include "seq.h"
 #include "openvswitch/shash.h"
@@ -771,9 +772,8 @@ netdev_get_pt_mode(const struct netdev *netdev)
  * If the function returns a non-zero value, some of the packets might have
  * been sent anyway.
  *
- * If 'may_steal' is false, the caller retains ownership of all the packets.
- * If 'may_steal' is true, the caller transfers ownership of all the packets
- * to the network device, regardless of success.
+ * The caller transfers ownership of all the packets to the network device,
+ * regardless of success.
  *
  * If 'concurrent_txq' is true, the caller may perform concurrent calls
  * to netdev_send() with the same 'qid'. The netdev provider is responsible
@@ -787,15 +787,12 @@ netdev_get_pt_mode(const struct netdev *netdev)
  * queues. */
 int
 netdev_send(struct netdev *netdev, int qid, struct dp_packet_batch *batch,
-            bool may_steal, bool concurrent_txq)
+            bool concurrent_txq)
 {
-    int error = netdev->netdev_class->send(netdev, qid, batch, may_steal,
+    int error = netdev->netdev_class->send(netdev, qid, batch,
                                            concurrent_txq);
     if (!error) {
         COVERAGE_INC(netdev_sent);
-        if (!may_steal) {
-            dp_packet_batch_reset_cutlen(batch);
-        }
     }
     return error;
 }
@@ -858,7 +855,7 @@ netdev_push_header(const struct netdev *netdev,
                    const struct ovs_action_push_tnl *data)
 {
     struct dp_packet *packet;
-    DP_PACKET_BATCH_FOR_EACH (packet, batch) {
+    DP_PACKET_BATCH_FOR_EACH (i, packet, batch) {
         netdev->netdev_class->push_header(packet, data);
         pkt_metadata_init(&packet->md, data->out_port);
     }
@@ -897,7 +894,13 @@ netdev_set_etheraddr(struct netdev *netdev, const struct eth_addr mac)
 int
 netdev_get_etheraddr(const struct netdev *netdev, struct eth_addr *mac)
 {
-    return netdev->netdev_class->get_etheraddr(netdev, mac);
+    int error;
+
+    error = netdev->netdev_class->get_etheraddr(netdev, mac);
+    if (error) {
+        memset(mac, 0, sizeof *mac);
+    }
+    return error;
 }
 
 /* Returns the name of the network device that 'netdev' represents,
@@ -1091,6 +1094,40 @@ netdev_set_advertisements(struct netdev *netdev,
             ? netdev->netdev_class->set_advertisements(
                     netdev, advertise)
             : EOPNOTSUPP);
+}
+
+static const char *
+netdev_feature_to_name(uint32_t bit)
+{
+    enum netdev_features f = bit;
+
+    switch (f) {
+    case NETDEV_F_10MB_HD:    return "10MB-HD";
+    case NETDEV_F_10MB_FD:    return "10MB-FD";
+    case NETDEV_F_100MB_HD:   return "100MB-HD";
+    case NETDEV_F_100MB_FD:   return "100MB-FD";
+    case NETDEV_F_1GB_HD:     return "1GB-HD";
+    case NETDEV_F_1GB_FD:     return "1GB-FD";
+    case NETDEV_F_10GB_FD:    return "10GB-FD";
+    case NETDEV_F_40GB_FD:    return "40GB-FD";
+    case NETDEV_F_100GB_FD:   return "100GB-FD";
+    case NETDEV_F_1TB_FD:     return "1TB-FD";
+    case NETDEV_F_OTHER:      return "OTHER";
+    case NETDEV_F_COPPER:     return "COPPER";
+    case NETDEV_F_FIBER:      return "FIBER";
+    case NETDEV_F_AUTONEG:    return "AUTO_NEG";
+    case NETDEV_F_PAUSE:      return "AUTO_PAUSE";
+    case NETDEV_F_PAUSE_ASYM: return "AUTO_PAUSE_ASYM";
+    }
+
+    return NULL;
+}
+
+void
+netdev_features_format(struct ds *s, enum netdev_features features)
+{
+    ofp_print_bit_names(s, features, netdev_feature_to_name, ' ');
+    ds_put_char(s, '\n');
 }
 
 /* Assigns 'addr' as 'netdev''s IPv4 address and 'mask' as its netmask.  If
@@ -1418,6 +1455,21 @@ netdev_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
     }
     return error;
 }
+
+/* Retrieves current device custom stats for 'netdev'. */
+int
+netdev_get_custom_stats(const struct netdev *netdev,
+                        struct netdev_custom_stats *custom_stats)
+{
+    int error;
+    memset(custom_stats, 0, sizeof *custom_stats);
+    error = (netdev->netdev_class->get_custom_stats
+             ? netdev->netdev_class->get_custom_stats(netdev, custom_stats)
+             : EOPNOTSUPP);
+
+    return error;
+}
+
 
 /* Attempts to set input rate limiting (policing) policy, such that up to
  * 'kbits_rate' kbps of traffic is accepted, with a maximum accumulative burst
@@ -2372,6 +2424,18 @@ netdev_ports_flow_get(const struct dpif_class *dpif_class, struct match *match,
     }
     ovs_mutex_unlock(&netdev_hmap_mutex);
     return ENOENT;
+}
+
+void
+netdev_free_custom_stats_counters(struct netdev_custom_stats *custom_stats)
+{
+    if (custom_stats) {
+        if (custom_stats->counters) {
+            free(custom_stats->counters);
+            custom_stats->counters = NULL;
+            custom_stats->size = 0;
+        }
+    }
 }
 
 #ifdef __linux__

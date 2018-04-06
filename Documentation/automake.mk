@@ -27,6 +27,7 @@ DOC_SOURCE = \
 	Documentation/tutorials/ovs-advanced.rst \
 	Documentation/tutorials/ovn-openstack.rst \
 	Documentation/tutorials/ovn-sandbox.rst \
+	Documentation/tutorials/ovs-conntrack.rst \
 	Documentation/topics/index.rst \
 	Documentation/topics/bonding.rst \
 	Documentation/topics/idl-compound-indexes.rst \
@@ -145,7 +146,10 @@ endif
 # rST formatted manpages under Documentation/ref.
 RST_MANPAGES = \
 	ovs-test.8.rst \
-	ovs-vlan-test.8.rst
+	ovs-vlan-test.8.rst \
+	ovsdb-server.7.rst \
+	ovsdb.5.rst \
+	ovsdb.7.rst
 
 # The GNU standards say that these variables should control
 # installation directories for manpages in each section.  Automake

@@ -18,19 +18,7 @@ m4_define([OVN_NBCTL_TEST_START],
 
 # OVN_NBCTL_TEST_STOP
 m4_define([OVN_NBCTL_TEST_STOP],
-  [# removes all 'Broken pipe' warning logs from ovsdb-server.log.  this is in
-   # that *ctl command (e.g. ovn-nbctl) exits right after committing the change
-   # to database.  however, in reaction, some daemon (e.g. ovn-controller-vtep)
-   # may immediately update the database.  this later update may cause database
-   # sending update back to *ctl command if *ctl has not proceeded to exit yet.
-   # and if *ctl command exits before database calling send, the send from
-   # database will fail with 'Broken pipe' error. Also removes all "connection
-   # reset" warning logs by a similar rationale (either EPIPE or ECONNRESET can
-   # be returned on a send depending on whether the peer had unconsumed data when
-   # it closed the socket).
-   AT_CHECK([check_logs "$1
-/reset by peer/d
-/Broken pipe/d"])
+  [AT_CHECK([check_logs "$1"])
    OVS_APP_EXIT_AND_WAIT([ovsdb-server])])
 
 
@@ -236,6 +224,80 @@ AT_CHECK([ovn-nbctl acl-del ls0 from-lport 400 tcp])
 AT_CHECK([ovn-nbctl acl-list ls0], [0], [dnl
 from-lport   600 (udp) drop
 from-lport   200 (ip) drop
+])
+
+OVN_NBCTL_TEST_STOP
+AT_CLEANUP
+
+dnl ---------------------------------------------------------------------
+
+AT_SETUP([ovn-nbctl - QoS])
+OVN_NBCTL_TEST_START
+
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 tcp dscp=63])
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 500 udp rate=100 burst=1000])
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 400 tcp dscp=0 rate=300 burst=3000])
+AT_CHECK([ovn-nbctl qos-add ls0 to-lport 300 tcp dscp=48])
+AT_CHECK([ovn-nbctl qos-add ls0 to-lport 200 ip rate=101])
+AT_CHECK([ovn-nbctl qos-add ls0 to-lport 100 ip4 dscp=13 rate=301 burst=30000])
+
+dnl Add duplicated qos
+AT_CHECK([ovn-nbctl qos-add ls0 to-lport 100 ip4 dscp=11 rate=302 burst=30002], [1], [], [stderr])
+AT_CHECK([grep 'already existed' stderr], [0], [ignore])
+AT_CHECK([ovn-nbctl --may-exist qos-add ls0 to-lport 100 ip4 dscp=11 rate=302 burst=30002])
+
+AT_CHECK([ovn-nbctl qos-list ls0], [0], [dnl
+from-lport   600 (tcp) dscp=63
+from-lport   500 (udp) rate=100 burst=1000
+from-lport   400 (tcp) rate=300 burst=3000 dscp=0
+  to-lport   300 (tcp) dscp=48
+  to-lport   200 (ip) rate=101
+  to-lport   100 (ip4) rate=301 burst=30000 dscp=13
+])
+
+dnl Delete in one direction.
+AT_CHECK([ovn-nbctl qos-del ls0 to-lport])
+AT_CHECK([ovn-nbctl qos-list ls0], [0], [dnl
+from-lport   600 (tcp) dscp=63
+from-lport   500 (udp) rate=100 burst=1000
+from-lport   400 (tcp) rate=300 burst=3000 dscp=0
+])
+
+dnl Delete all qos_rules.
+AT_CHECK([ovn-nbctl qos-del ls0])
+AT_CHECK([ovn-nbctl qos-list ls0], [0], [dnl
+])
+
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 ip rate=1000101])
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 400 tcp dscp=44])
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 200 ip burst=1000102 rate=301 dscp=19])
+
+dnl Delete a single flow.
+AT_CHECK([ovn-nbctl qos-del ls0 from-lport 400 tcp])
+AT_CHECK([ovn-nbctl qos-list ls0], [0], [dnl
+from-lport   600 (ip) rate=1000101
+from-lport   200 (ip) rate=301 burst=1000102 dscp=19
+])
+
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 ip rate=100010111111], [1], [],
+[ovn-nbctl: 100010111111: rate must in range 1...4294967295.
+])
+
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 ip burst=100010111112 rate=100010], [1], [],
+[ovn-nbctl: 100010111112: burst must in range 1...4294967295.
+])
+
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 ip dscp=-1], [1], [],
+[ovn-nbctl: -1: dscp must in range 0...63.
+])
+
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 ip dscpa=-1], [1], [],
+[ovn-nbctl: dscpa=-1: must be start of "dscp=", "rate=", "burst=".
+])
+
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 ip burst=123], [1], [],
+[ovn-nbctl: One of the rate or dscp must be configured.
 ])
 
 OVN_NBCTL_TEST_STOP
@@ -1279,6 +1341,20 @@ dnl Empty string should work too
 AT_CHECK([ovn-nbctl lsp-set-type lp0 ""])
 AT_CHECK([ovn-nbctl lsp-get-type lp0], [0], [dnl
 
+])
+
+OVN_NBCTL_TEST_STOP
+AT_CLEANUP
+
+dnl ---------------------------------------------------------------------
+
+AT_SETUP([ovn-nbctl - connection])
+OVN_NBCTL_TEST_START
+
+AT_CHECK([ovn-nbctl --inactivity-probe=30000 set-connection ptcp:6641:127.0.0.1 punix:$OVS_RUNDIR/ovnnb_db.sock])
+AT_CHECK([ovn-nbctl list connection | grep inactivity_probe], [0], [dnl
+inactivity_probe    : 30000
+inactivity_probe    : 30000
 ])
 
 OVN_NBCTL_TEST_STOP

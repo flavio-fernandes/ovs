@@ -18,6 +18,7 @@
 #ifndef TC_H
 #define TC_H 1
 
+#include <sys/types.h>
 #include <netinet/in.h> /* Must happen before linux/pkt_cls.h - Glibc #20215 */
 #include <linux/pkt_cls.h>
 #include <linux/pkt_sched.h>
@@ -91,6 +92,7 @@ struct tc_flower_key {
 
     ovs_be16 encap_eth_type;
 
+    uint8_t flags;
     uint8_t ip_ttl;
 
     struct {

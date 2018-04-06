@@ -241,6 +241,14 @@
       read-only. See <code>ovn-controller</code>(8) for more information.
     </column>
 
+    <column name="external_ids" key="ovn-cms-options">
+      <code>ovn-controller</code> populates this key with the set of options
+      configured in the <ref table="Open_vSwitch"
+      column="external_ids:ovn-cms-options"/> column of the Open_vSwitch
+      database's <ref table="Open_vSwitch" db="Open_vSwitch"/> table.
+      See <code>ovn-controller</code>(8) for more information.
+    </column>
+
     <group title="Common Columns">
       The overall purpose of these columns is described under <code>Common
       Columns</code> at the beginning of this document.
@@ -634,7 +642,7 @@
           </p>
 
           <p>
-            Any use of a nominal field may specify a single bit or a range of
+            Any use of a ordinal field may specify a single bit or a range of
             bits, e.g. <code>vlan.tci[13..15]</code> refers to the PCP field
             within the VLAN TCI, and <code>eth.dst[40]</code> refers to the
             multicast bit in the Ethernet destination address.
@@ -1634,6 +1642,21 @@
             </code>
           </p>
         </dd>
+
+        <dt><code>set_meter(<var>rate</var>);</code></dt>
+        <dt><code>set_meter(<var>rate</var>, <var>burst</var>);</code></dt>
+        <dd>
+          <p>
+            <b>Parameters</b>: rate limit int field <var>rate</var> in kbps,
+            burst rate limits int field <var>burst</var> in kbps.
+          </p>
+
+          <p>
+            This action sets the rate limit for a flow.
+          </p>
+
+          <p><b>Example:</b> <code>set_meter(100, 1000);</code></p>
+        </dd>
       </dl>
 
       <dl>
@@ -1702,13 +1725,10 @@
           <ul>
             <li><code>ip.proto = 1</code> (ICMPv4)</li>
             <li><code>ip.frag = 0</code> (not a fragment)</li>
+            <li><code>ip.ttl = 255</code></li>
             <li><code>icmp4.type = 3</code> (destination unreachable)</li>
             <li><code>icmp4.code = 1</code> (host unreachable)</li>
           </ul>
-
-          <p>
-            Details TBD.
-          </p>
 
           <p><b>Prerequisite:</b> <code>ip4</code></p>
         </dd>
@@ -1732,11 +1752,7 @@ tcp.flags = RST;
 
           <p>
             Then, the action drops all TCP options and payload data, and
-            updates the TCP checksum.
-          </p>
-
-          <p>
-            Details TBD.
+            updates the TCP checksum. IP ttl is set to 255.
           </p>
 
           <p><b>Prerequisite:</b> <code>tcp</code></p>
