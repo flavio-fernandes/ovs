@@ -72,6 +72,7 @@ PYCOV_CLEAN_FILES = build-aux/check-structs,cover
 EXTRA_DIST = \
 	AUTHORS.rst \
 	CONTRIBUTING.rst \
+	LICENSE \
 	MAINTAINERS.rst \
 	README.rst \
 	NOTICE \
@@ -84,6 +85,7 @@ EXTRA_DIST = \
 	boot.sh \
 	poc/builders/Vagrantfile \
 	poc/playbook-centos-builder.yml \
+	poc/playbook-fedora-builder.yml \
 	poc/playbook-ubuntu-builder.yml \
 	$(MAN_FRAGMENTS) \
 	$(MAN_ROOTS) \

@@ -34,12 +34,20 @@ DOC_SOURCE = \
 	Documentation/topics/datapath.rst \
 	Documentation/topics/design.rst \
 	Documentation/topics/dpdk/index.rst \
+	Documentation/topics/dpdk/bridge.rst \
+	Documentation/topics/dpdk/jumbo-frames.rst \
+	Documentation/topics/dpdk/pdump.rst \
+	Documentation/topics/dpdk/phy.rst \
+	Documentation/topics/dpdk/pmd.rst \
+	Documentation/topics/dpdk/qos.rst \
 	Documentation/topics/dpdk/ring.rst \
+	Documentation/topics/dpdk/vdev.rst \
 	Documentation/topics/dpdk/vhost-user.rst \
 	Documentation/topics/testing.rst \
 	Documentation/topics/high-availability.rst \
 	Documentation/topics/integration.rst \
 	Documentation/topics/language-bindings.rst \
+	Documentation/topics/networking-namespaces.rst \
 	Documentation/topics/openflow.rst \
 	Documentation/topics/ovn-news-2.8.rst \
 	Documentation/topics/ovsdb-replication.rst \

@@ -368,13 +368,33 @@
 
   <table name="Address_Set" title="Address Sets">
     <p>
-      See the documentation for the <ref table="Address_Set"
+      This table contains address sets synced from the <ref table="Address_Set"
       db="OVN_Northbound"/> table in the <ref db="OVN_Northbound"/> database
-      for details.
+      and address sets generated from the <ref table="Port_Group"
+      db="OVN_Northbound"/> table in the <ref db="OVN_Northbound"/> database.
+    </p>
+
+    <p>
+      See the documentation for the <ref table="Address_Set"
+      db="OVN_Northbound"/> table and <ref table="Port_Group"
+      db="OVN_Northbound"/> table in the <ref db="OVN_Northbound"/>
+      database for details.
     </p>
 
     <column name="name"/>
     <column name="addresses"/>
+  </table>
+
+  <table name="Port_Group" title="Port Groups">
+    <p>
+      This table contains names for the logical switch ports in the
+      <ref db="OVN_Northbound"/> database that belongs to the same group
+      that is defined in <ref table="Port_Group" db="OVN_Northbound"/>
+      in the <ref db="OVN_Northbound"/> database.
+    </p>
+
+    <column name="name"/>
+    <column name="ports"/>
   </table>
 
   <table name="Logical_Flow" title="Logical Network Flows">
@@ -770,6 +790,25 @@
         <code>$set1</code>.
       </p>
 
+      <p>
+        You may refer to a group of logical switch ports stored in the
+        <ref table="Port_Group"/> table by its <ref column="name"
+        table="Port_Group"/>.  An <ref table="Port_Group"/> with a name
+        of <code>port_group1</code> can be referred to as
+        <code>@port_group1</code>.
+      </p>
+
+      <p>
+        Additionally, you may refer to the set of addresses belonging to a
+        group of logical switch ports stored in the <ref table="Port_Group"/>
+        table by its <ref column="name" table="Port_Group"/> followed by
+        a suffix '_ip4'/'_ip6'.  The IPv4 address set of a
+        <ref table="Port_Group"/> with a name of <code>port_group1</code>
+        can be referred to as <code>$port_group1_ip4</code>, and the IPv6
+        address set of the same <ref table="Port_Group"/> can be referred to
+        as <code>$port_group1_ip6</code>
+      </p>
+
       <p><em>Miscellaneous</em></p>
 
       <p>
@@ -1151,25 +1190,10 @@
           <p>
             <code>ct_snat</code> sends the packet through the SNAT zone to
             unSNAT any packet that was SNATed in the opposite direction.  The
-            behavior on gateway routers differs from the behavior on a
-            distributed router:
+            packet is automatically sent to the next tables as if followed by
+            the <code>next;</code> action.   The next tables will see the
+            changes in the packet caused by the connection tracker.
           </p>
-          <ul>
-            <li>
-              On a gateway router, if the packet needs to be sent to the next
-              tables, then it should be followed by a <code>next;</code>
-              action.  The next tables will not see the changes in the packet
-              caused by the connection tracker.
-            </li>
-            <li>
-              On a distributed router, if the connection tracker finds a
-              connection that was SNATed in the opposite direction, then the
-              destination IP address of the packet is UNSNATed.  The packet is
-              automatically sent to the next tables as if followed by the
-              <code>next;</code> action.  The next tables will see the changes
-              in the packet caused by the connection tracker.
-            </li>
-          </ul>
           <p>
             <code>ct_snat(<var>IP</var>)</code> sends the packet through the
             SNAT zone to change the source IP address of the packet to
@@ -1731,6 +1755,32 @@
           </ul>
 
           <p><b>Prerequisite:</b> <code>ip4</code></p>
+        </dd>
+
+        <dt><code>icmp6 { <var>action</var>; </code>...<code> };</code></dt>
+        <dd>
+          <p>
+            Temporarily replaces the IPv6 packet being processed by an ICMPv6
+            packet and executes each nested <var>action</var> on the ICMPv6
+            packet. Actions following the <var>icmp6</var> action, if any,
+            apply to the original, unmodified packet.
+          </p>
+
+          <p>
+            The ICMPv6 packet that this action operates on is initialized based
+            on the IPv6 packet being processed, as follows. These are default
+            values that the nested actions will probably want to change.
+            Ethernet and IPv6 fields not listed here are not changed:
+          </p>
+
+          <ul>
+            <li><code>ip.proto = 58</code> (ICMPv6)</li>
+            <li><code>ip.ttl = 255</code></li>
+            <li><code>icmp6.type = 1</code> (destination unreachable)</li>
+            <li><code>icmp6.code = 1</code> (administratively prohibited)</li>
+          </ul>
+
+          <p><b>Prerequisite:</b> <code>ip6</code></p>
         </dd>
 
         <dt><code>tcp_reset;</code></dt>
