@@ -458,6 +458,19 @@ struct netdev_class {
      * (UINT64_MAX). */
     int (*get_stats)(const struct netdev *netdev, struct netdev_stats *);
 
+    /* Retrieves current device custom stats for 'netdev' into 'custom_stats'.
+     *
+     * A network device should return only available statistics (if any).
+     * If there are not statistics available, empty array should be
+     * returned.
+     *
+     * The caller initializes 'custom_stats' before calling this function.
+     * The caller takes ownership over allocated array of counters inside
+     * structure netdev_custom_stats.
+     * */
+    int (*get_custom_stats)(const struct netdev *netdev,
+                            struct netdev_custom_stats *custom_stats);
+
     /* Stores the features supported by 'netdev' into each of '*current',
      * '*advertised', '*supported', and '*peer'.  Each value is a bitmap of
      * NETDEV_F_* bits.
@@ -776,9 +789,15 @@ struct netdev_class {
      * Implementations should allocate buffers with DP_NETDEV_HEADROOM bytes of
      * headroom.
      *
+     * If the caller provides a non-NULL qfill pointer, the implementation
+     * should return the number (zero or more) of remaining packets in the
+     * queue after the reception the current batch, if it supports that,
+     * or -ENOTSUP otherwise.
+     *
      * Returns EAGAIN immediately if no packet is ready to be received or
      * another positive errno value if an error was encountered. */
-    int (*rxq_recv)(struct netdev_rxq *rx, struct dp_packet_batch *batch);
+    int (*rxq_recv)(struct netdev_rxq *rx, struct dp_packet_batch *batch,
+                    int *qfill);
 
     /* Registers with the poll loop to wake up from the next call to
      * poll_block() when a packet is ready to be received with

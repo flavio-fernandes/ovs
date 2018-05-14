@@ -38,6 +38,7 @@ noinst_SCRIPTS += utilities/ovs-sim
 utilities/ovs-lib: $(top_builddir)/config.status
 
 EXTRA_DIST += \
+	utilities/gdb/ovs_gdb.py \
 	utilities/ovs-appctl-bashcomp.bash \
 	utilities/ovs-check-dead-ifs.in \
 	utilities/ovs-ctl.in \
@@ -146,6 +147,7 @@ endif
 
 FLAKE8_PYFILES += utilities/ovs-pcap.in \
 	utilities/checkpatch.py utilities/ovs-dev.py \
-	utilities/ovs-tcpdump.in
+	utilities/ovs-tcpdump.in \
+	utilities/ovs-pipegen.py
 
 include utilities/bugtool/automake.mk

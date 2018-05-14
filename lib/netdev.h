@@ -175,7 +175,8 @@ void netdev_rxq_close(struct netdev_rxq *);
 const char *netdev_rxq_get_name(const struct netdev_rxq *);
 int netdev_rxq_get_queue_id(const struct netdev_rxq *);
 
-int netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet_batch *);
+int netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet_batch *,
+                    int *qfill);
 void netdev_rxq_wait(struct netdev_rxq *);
 int netdev_rxq_drain(struct netdev_rxq *);
 
@@ -282,6 +283,7 @@ void netdev_restore_flags(struct netdev_saved_flags *);
 /* TCP/IP stack interface. */
 int netdev_set_in4(struct netdev *, struct in_addr addr, struct in_addr mask);
 int netdev_get_in4_by_name(const char *device_name, struct in_addr *in4);
+int netdev_get_ip_by_name(const char *device_name, struct in6_addr *);
 int netdev_get_addr_list(const struct netdev *netdev, struct in6_addr **addr,
                          struct in6_addr **mask, int *n_in6);
 
@@ -296,6 +298,8 @@ struct netdev *netdev_find_dev_by_in4(const struct in_addr *);
 
 /* Statistics. */
 int netdev_get_stats(const struct netdev *, struct netdev_stats *);
+int netdev_get_custom_stats(const struct netdev *,
+                            struct netdev_custom_stats *);
 
 /* Quality of service. */
 struct netdev_qos_capabilities {

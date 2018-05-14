@@ -1,3 +1,6 @@
+Do not use commands to add or remove or modify datapaths if
+\fBovs\-vswitchd\fR is running because this interferes with
+\fBovs\-vswitchd\fR's own datapath management.
 .TP
 \*(DX\fBadd\-dp \fIdp\fR [\fInetdev\fR[\fB,\fIoption\fR]...]
 Creates datapath \fIdp\fR, with a local port also named \fIdp\fR.
@@ -89,8 +92,10 @@ The following commands are primarily useful for debugging Open
 vSwitch.  The flow table entries (both matches and actions) that they
 work with are not OpenFlow flow entries.  Instead, they are different
 and considerably simpler flows maintained by the Open vSwitch kernel
-module.  Use \fBovs\-ofctl\fR(8), instead, to work with OpenFlow flow
-entries.
+module.  Do not use commands to add or remove or modify datapath flows
+if \fBovs\-vswitchd\fR is running because it interferes with
+\fBovs\-vswitchd\fR's own datapath flow management.  Use
+\fBovs\-ofctl\fR(8), instead, to work with OpenFlow flow entries.
 .
 .PP
 The \fIdp\fR argument to each of these commands is optional when
@@ -247,3 +252,24 @@ For each ConnTracker bucket, displays the number of connections used
 by \fIdp\fR.
 If \fBgt=\fIThreshold\fR is specified, bucket numbers are displayed when
 the number of connections in a bucket is greater than \fIThreshold\fR.
+.
+.TP
+\*(DX\fBct\-set\-maxconns\fR [\fIdp\fR] \fBparam\fR
+Set the maximum limit of connection tracker connections.
+Can be used to reduce the processing load on the system due to
+connection tracking or simply limiting connection tracking.
+If the number of connections is already beyond the new maximum limit
+request for the number of connections then the new maximum limit will
+be enforced when the number of connections decreases to that limit, which
+normally happens due to connection expiry.  Only supported for userspace
+datapath.
+.
+.TP
+\*(DX\fBct\-get\-maxconns\fR [\fIdp\fR]
+Read the maximum limit of connection tracker connections.
+Only supported for userspace datapath.
+.
+.TP
+\*(DX\fBct\-get\-nconns\fR [\fIdp\fR]
+Read the current number of connection tracker connections.
+Only supported for userspace datapath.
