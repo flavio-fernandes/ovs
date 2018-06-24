@@ -571,6 +571,7 @@ vconn_connect(struct vconn *vconn)
             break;
 
         case VCS_DISCONNECTED:
+            ovs_assert(vconn->error != 0);
             return vconn->error;
 
         default:
@@ -1407,10 +1408,6 @@ pvconn_close(struct pvconn *pvconn)
 /* Tries to accept a new connection on 'pvconn'.  If successful, stores the new
  * connection in '*new_vconn' and returns 0.  Otherwise, returns a positive
  * errno value.
- *
- * The new vconn will automatically negotiate an OpenFlow protocol version
- * acceptable to both peers on the connection.  The version negotiated will be
- * no lower than 'min_version' and no higher than 'max_version'.
  *
  * pvconn_accept() will not block waiting for a connection.  If no connection
  * is ready to be accepted, it returns EAGAIN immediately. */

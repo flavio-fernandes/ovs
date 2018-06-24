@@ -647,7 +647,8 @@ static int dpif_netdev_open(const struct dpif_class *, const char *name,
                             bool create, struct dpif **);
 static void dp_netdev_execute_actions(struct dp_netdev_pmd_thread *pmd,
                                       struct dp_packet_batch *,
-                                      bool may_steal, const struct flow *flow,
+                                      bool should_steal,
+                                      const struct flow *flow,
                                       const struct nlattr *actions,
                                       size_t actions_len);
 static void dp_netdev_input(struct dp_netdev_pmd_thread *,
@@ -855,15 +856,15 @@ pmd_info_show_stats(struct ds *reply,
     }
 
     ds_put_format(reply,
-                  "\tpackets received: %"PRIu64"\n"
-                  "\tpacket recirculations: %"PRIu64"\n"
-                  "\tavg. datapath passes per packet: %.02f\n"
-                  "\temc hits: %"PRIu64"\n"
-                  "\tmegaflow hits: %"PRIu64"\n"
-                  "\tavg. subtable lookups per megaflow hit: %.02f\n"
-                  "\tmiss with success upcall: %"PRIu64"\n"
-                  "\tmiss with failed upcall: %"PRIu64"\n"
-                  "\tavg. packets per output batch: %.02f\n",
+                  "  packets received: %"PRIu64"\n"
+                  "  packet recirculations: %"PRIu64"\n"
+                  "  avg. datapath passes per packet: %.02f\n"
+                  "  emc hits: %"PRIu64"\n"
+                  "  megaflow hits: %"PRIu64"\n"
+                  "  avg. subtable lookups per megaflow hit: %.02f\n"
+                  "  miss with success upcall: %"PRIu64"\n"
+                  "  miss with failed upcall: %"PRIu64"\n"
+                  "  avg. packets per output batch: %.02f\n",
                   total_packets, stats[PMD_STAT_RECIRC],
                   passes_per_pkt, stats[PMD_STAT_EXACT_HIT],
                   stats[PMD_STAT_MASKED_HIT], lookups_per_hit,
@@ -875,8 +876,8 @@ pmd_info_show_stats(struct ds *reply,
     }
 
     ds_put_format(reply,
-                  "\tidle cycles: %"PRIu64" (%.02f%%)\n"
-                  "\tprocessing cycles: %"PRIu64" (%.02f%%)\n",
+                  "  idle cycles: %"PRIu64" (%.02f%%)\n"
+                  "  processing cycles: %"PRIu64" (%.02f%%)\n",
                   stats[PMD_CYCLES_ITER_IDLE],
                   stats[PMD_CYCLES_ITER_IDLE] / (double) total_cycles * 100,
                   stats[PMD_CYCLES_ITER_BUSY],
@@ -887,12 +888,12 @@ pmd_info_show_stats(struct ds *reply,
     }
 
     ds_put_format(reply,
-                  "\tavg cycles per packet: %.02f (%"PRIu64"/%"PRIu64")\n",
+                  "  avg cycles per packet: %.02f (%"PRIu64"/%"PRIu64")\n",
                   total_cycles / (double) total_packets,
                   total_cycles, total_packets);
 
     ds_put_format(reply,
-                  "\tavg processing cycles per packet: "
+                  "  avg processing cycles per packet: "
                   "%.02f (%"PRIu64"/%"PRIu64")\n",
                   stats[PMD_CYCLES_ITER_BUSY] / (double) total_packets,
                   stats[PMD_CYCLES_ITER_BUSY], total_packets);
@@ -990,7 +991,7 @@ pmd_info_show_rxq(struct ds *reply, struct dp_netdev_pmd_thread *pmd)
         uint64_t total_cycles = 0;
 
         ds_put_format(reply,
-                      "pmd thread numa_id %d core_id %u:\n\tisolated : %s\n",
+                      "pmd thread numa_id %d core_id %u:\n  isolated : %s\n",
                       pmd->numa_id, pmd->core_id, (pmd->isolated)
                                                   ? "true" : "false");
 
@@ -1010,9 +1011,9 @@ pmd_info_show_rxq(struct ds *reply, struct dp_netdev_pmd_thread *pmd)
             for (int j = 0; j < PMD_RXQ_INTERVAL_MAX; j++) {
                 proc_cycles += dp_netdev_rxq_get_intrvl_cycles(rxq, j);
             }
-            ds_put_format(reply, "\tport: %-16s\tqueue-id: %2d", name,
+            ds_put_format(reply, "  port: %-16s  queue-id: %2d", name,
                           netdev_rxq_get_queue_id(list[i].rxq->rx));
-            ds_put_format(reply, "\tpmd usage: ");
+            ds_put_format(reply, "  pmd usage: ");
             if (total_cycles) {
                 ds_put_format(reply, "%2"PRIu64"",
                               proc_cycles * 100 / total_cycles);
@@ -3060,19 +3061,19 @@ dpif_netdev_operate(struct dpif *dpif, struct dpif_op **ops, size_t n_ops)
 
         switch (op->type) {
         case DPIF_OP_FLOW_PUT:
-            op->error = dpif_netdev_flow_put(dpif, &op->u.flow_put);
+            op->error = dpif_netdev_flow_put(dpif, &op->flow_put);
             break;
 
         case DPIF_OP_FLOW_DEL:
-            op->error = dpif_netdev_flow_del(dpif, &op->u.flow_del);
+            op->error = dpif_netdev_flow_del(dpif, &op->flow_del);
             break;
 
         case DPIF_OP_EXECUTE:
-            op->error = dpif_netdev_execute(dpif, &op->u.execute);
+            op->error = dpif_netdev_execute(dpif, &op->execute);
             break;
 
         case DPIF_OP_FLOW_GET:
-            op->error = dpif_netdev_flow_get(dpif, &op->u.flow_get);
+            op->error = dpif_netdev_flow_get(dpif, &op->flow_get);
             break;
         }
     }
@@ -3480,8 +3481,6 @@ port_reconfigure(struct dp_netdev_port *port)
     struct netdev *netdev = port->netdev;
     int i, err;
 
-    port->need_reconfigure = false;
-
     /* Closes the existing 'rxq's. */
     for (i = 0; i < port->n_rxq; i++) {
         netdev_rxq_close(port->rxqs[i].rx);
@@ -3491,7 +3490,7 @@ port_reconfigure(struct dp_netdev_port *port)
     port->n_rxq = 0;
 
     /* Allows 'netdev' to apply the pending configuration changes. */
-    if (netdev_is_reconf_required(netdev)) {
+    if (netdev_is_reconf_required(netdev) || port->need_reconfigure) {
         err = netdev_reconfigure(netdev);
         if (err && (err != EOPNOTSUPP)) {
             VLOG_ERR("Failed to set interface %s new configuration",
@@ -3524,6 +3523,9 @@ port_reconfigure(struct dp_netdev_port *port)
 
     /* Parse affinity list to apply configuration for new queues. */
     dpif_netdev_port_set_rxq_affinity(port, port->rxq_affinity_list);
+
+    /* If reconfiguration was successful mark it as such, so we can use it */
+    port->need_reconfigure = false;
 
     return 0;
 }
@@ -5594,7 +5596,7 @@ error:
 
 static void
 dp_execute_userspace_action(struct dp_netdev_pmd_thread *pmd,
-                            struct dp_packet *packet, bool may_steal,
+                            struct dp_packet *packet, bool should_steal,
                             struct flow *flow, ovs_u128 *ufid,
                             struct ofpbuf *actions,
                             const struct nlattr *userdata)
@@ -5609,16 +5611,16 @@ dp_execute_userspace_action(struct dp_netdev_pmd_thread *pmd,
                              NULL);
     if (!error || error == ENOSPC) {
         dp_packet_batch_init_packet(&b, packet);
-        dp_netdev_execute_actions(pmd, &b, may_steal, flow,
+        dp_netdev_execute_actions(pmd, &b, should_steal, flow,
                                   actions->data, actions->size);
-    } else if (may_steal) {
+    } else if (should_steal) {
         dp_packet_delete(packet);
     }
 }
 
 static void
 dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
-              const struct nlattr *a, bool may_steal)
+              const struct nlattr *a, bool should_steal)
     OVS_NO_THREAD_SAFETY_ANALYSIS
 {
     struct dp_netdev_execute_aux *aux = aux_;
@@ -5635,7 +5637,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
             struct dp_packet *packet;
             struct dp_packet_batch out;
 
-            if (!may_steal) {
+            if (!should_steal) {
                 dp_packet_batch_clone(&out, packets_);
                 dp_packet_batch_reset_cutlen(packets_);
                 packets_ = &out;
@@ -5672,12 +5674,16 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
         break;
 
     case OVS_ACTION_ATTR_TUNNEL_PUSH:
-        if (*depth < MAX_RECIRC_DEPTH) {
-            dp_packet_batch_apply_cutlen(packets_);
-            push_tnl_action(pmd, a, packets_);
-            return;
+        if (should_steal) {
+            /* We're requested to push tunnel header, but also we need to take
+             * the ownership of these packets. Thus, we can avoid performing
+             * the action, because the caller will not use the result anyway.
+             * Just break to free the batch. */
+            break;
         }
-        break;
+        dp_packet_batch_apply_cutlen(packets_);
+        push_tnl_action(pmd, a, packets_);
+        return;
 
     case OVS_ACTION_ATTR_TUNNEL_POP:
         if (*depth < MAX_RECIRC_DEPTH) {
@@ -5688,7 +5694,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
             if (p) {
                 struct dp_packet_batch tnl_pkt;
 
-                if (!may_steal) {
+                if (!should_steal) {
                     dp_packet_batch_clone(&tnl_pkt, packets_);
                     packets_ = &tnl_pkt;
                     dp_packet_batch_reset_cutlen(orig_packets_);
@@ -5728,7 +5734,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
             ofpbuf_init(&actions, 0);
 
             if (packets_->trunc) {
-                if (!may_steal) {
+                if (!should_steal) {
                     dp_packet_batch_clone(&usr_pkt, packets_);
                     packets_ = &usr_pkt;
                     clone = true;
@@ -5742,7 +5748,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
             DP_PACKET_BATCH_FOR_EACH (i, packet, packets_) {
                 flow_extract(packet, &flow);
                 dpif_flow_hash(dp->dpif, &flow, sizeof flow, &ufid);
-                dp_execute_userspace_action(pmd, packet, may_steal, &flow,
+                dp_execute_userspace_action(pmd, packet, should_steal, &flow,
                                             &ufid, &actions, userdata);
             }
 
@@ -5761,7 +5767,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
         if (*depth < MAX_RECIRC_DEPTH) {
             struct dp_packet_batch recirc_pkts;
 
-            if (!may_steal) {
+            if (!should_steal) {
                dp_packet_batch_clone(&recirc_pkts, packets_);
                packets_ = &recirc_pkts;
             }
@@ -5934,18 +5940,18 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
         OVS_NOT_REACHED();
     }
 
-    dp_packet_delete_batch(packets_, may_steal);
+    dp_packet_delete_batch(packets_, should_steal);
 }
 
 static void
 dp_netdev_execute_actions(struct dp_netdev_pmd_thread *pmd,
                           struct dp_packet_batch *packets,
-                          bool may_steal, const struct flow *flow,
+                          bool should_steal, const struct flow *flow,
                           const struct nlattr *actions, size_t actions_len)
 {
     struct dp_netdev_execute_aux aux = { pmd, flow };
 
-    odp_execute_actions(&aux, packets, may_steal, actions,
+    odp_execute_actions(&aux, packets, should_steal, actions,
                         actions_len, dp_execute_cb);
 }
 

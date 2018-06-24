@@ -3377,6 +3377,9 @@ propagate_tunnel_data_to_flow(struct xlate_ctx *ctx, struct eth_addr dmac,
 
     switch (tnl_type) {
     case OVS_VPORT_TYPE_GRE:
+    case OVS_VPORT_TYPE_ERSPAN:
+    case OVS_VPORT_TYPE_IP6ERSPAN:
+    case OVS_VPORT_TYPE_IP6GRE:
         nw_proto = IPPROTO_GRE;
         break;
     case OVS_VPORT_TYPE_VXLAN:
@@ -3429,7 +3432,7 @@ native_tunnel_output(struct xlate_ctx *ctx, const struct xport *xport,
     /* Backup flow & base_flow data. */
     memcpy(&old_base_flow, &ctx->base_flow, sizeof old_base_flow);
     memcpy(&old_flow, &ctx->xin->flow, sizeof old_flow);
-	
+
     if (flow->tunnel.ip_src) {
         in6_addr_set_mapped_ipv4(&s_ip6, flow->tunnel.ip_src);
     }
@@ -3914,7 +3917,7 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
 
     /* If 'struct flow' gets additional metadata, we'll need to zero it out
      * before traversing a patch port. */
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 40);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 41);
     memset(&flow_tnl, 0, sizeof flow_tnl);
 
     if (!check_output_prerequisites(ctx, xport, flow, check_stp)) {
@@ -4002,10 +4005,15 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
             struct ovs_action_hash *act_hash;
 
             /* Hash action. */
+            enum ovs_hash_alg hash_alg = xr->hash_alg;
+            if (hash_alg > ctx->xbridge->support.max_hash_alg) {
+                /* Algorithm supported by all datapaths. */
+                hash_alg = OVS_HASH_ALG_L4;
+            }
             act_hash = nl_msg_put_unspec_uninit(ctx->odp_actions,
                                                 OVS_ACTION_ATTR_HASH,
                                                 sizeof *act_hash);
-            act_hash->hash_alg = xr->hash_alg;
+            act_hash->hash_alg = hash_alg;
             act_hash->hash_basis = xr->hash_basis;
 
             /* Recirc action. */
@@ -4384,27 +4392,37 @@ pick_hash_fields_select_group(struct xlate_ctx *ctx, struct group_dpif *group)
 static struct ofputil_bucket *
 pick_dp_hash_select_group(struct xlate_ctx *ctx, struct group_dpif *group)
 {
+    uint32_t dp_hash = ctx->xin->flow.dp_hash;
+
     /* dp_hash value 0 is special since it means that the dp_hash has not been
      * computed, as all computed dp_hash values are non-zero.  Therefore
      * compare to zero can be used to decide if the dp_hash value is valid
      * without masking the dp_hash field. */
-    if (!ctx->xin->flow.dp_hash) {
-        uint64_t param = group->up.props.selection_method_param;
-
-        ctx_trigger_recirculate_with_hash(ctx, param >> 32, (uint32_t)param);
+    if (!dp_hash) {
+        enum ovs_hash_alg hash_alg = group->hash_alg;
+        if (hash_alg > ctx->xbridge->support.max_hash_alg) {
+            /* Algorithm supported by all datapaths. */
+            hash_alg = OVS_HASH_ALG_L4;
+        }
+        ctx_trigger_recirculate_with_hash(ctx, hash_alg, group->hash_basis);
         return NULL;
     } else {
-        uint32_t n_buckets = group->up.n_buckets;
-        if (n_buckets) {
-            /* Minimal mask to cover the number of buckets. */
-            uint32_t mask = (1 << log_2_ceil(n_buckets)) - 1;
-            /* Multiplier chosen to make the trivial 1 bit case to
-             * actually distribute amongst two equal weight buckets. */
-            uint32_t basis = 0xc2b73583 * (ctx->xin->flow.dp_hash & mask);
+        uint32_t hash_mask = group->hash_mask;
+        ctx->wc->masks.dp_hash |= hash_mask;
 
-            ctx->wc->masks.dp_hash |= mask;
-            return group_best_live_bucket(ctx, group, basis);
+        /* Starting from the original masked dp_hash value iterate over the
+         * hash mapping table to find the first live bucket. As the buckets
+         * are quasi-randomly spread over the hash values, this maintains
+         * a distribution according to bucket weights even when some buckets
+         * are non-live. */
+        for (int i = 0; i <= hash_mask; i++) {
+            struct ofputil_bucket *b =
+                    group->hash_map[(dp_hash + i) & hash_mask];
+            if (bucket_is_alive(ctx, b, 0)) {
+                return b;
+            }
         }
+
         return NULL;
     }
 }
@@ -4419,17 +4437,22 @@ pick_select_group(struct xlate_ctx *ctx, struct group_dpif *group)
         ctx_trigger_freeze(ctx);
     }
 
-    const char *selection_method = group->up.props.selection_method;
-    if (selection_method[0] == '\0') {
+    switch (group->selection_method) {
+    case SEL_METHOD_DEFAULT:
         return pick_default_select_group(ctx, group);
-    } else if (!strcasecmp("hash", selection_method)) {
+        break;
+    case SEL_METHOD_HASH:
         return pick_hash_fields_select_group(ctx, group);
-    } else if (!strcasecmp("dp_hash", selection_method)) {
+        break;
+    case SEL_METHOD_DP_HASH:
         return pick_dp_hash_select_group(ctx, group);
-    } else {
-        /* Parsing of groups should ensure this never happens */
+        break;
+    default:
+        /* Parsing of groups ensures this never happens */
         OVS_NOT_REACHED();
     }
+
+    return NULL;
 }
 
 static void
@@ -4723,8 +4746,8 @@ finish_freezing__(struct xlate_ctx *ctx, uint8_t table)
             act_hash = nl_msg_put_unspec_uninit(ctx->odp_actions,
                                                 OVS_ACTION_ATTR_HASH,
                                                 sizeof *act_hash);
-            act_hash->hash_alg = OVS_HASH_ALG_L4;  /* Make configurable. */
-            act_hash->hash_basis = 0;              /* Make configurable. */
+            act_hash->hash_alg = ctx->dp_hash_alg;
+            act_hash->hash_basis = ctx->dp_hash_basis;
         }
         nl_msg_put_u32(ctx->odp_actions, OVS_ACTION_ATTR_RECIRC, recirc_id);
     }

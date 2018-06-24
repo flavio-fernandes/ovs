@@ -547,6 +547,7 @@ static const struct net_device_ops lisp_netdev_ops = {
 	.ndo_stop               = lisp_stop,
 	.ndo_start_xmit         = lisp_dev_xmit,
 #ifdef  HAVE_RHEL7_MAX_MTU
+	.ndo_size		= sizeof(struct net_device_ops),
 	.extended.ndo_change_mtu = lisp_change_mtu,
 #else
 	.ndo_change_mtu         = lisp_change_mtu,
@@ -597,10 +598,8 @@ static void lisp_setup(struct net_device *dev)
 	dev->features    |= NETIF_F_RXCSUM;
 	dev->features    |= NETIF_F_GSO_SOFTWARE;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,39)
 	dev->hw_features |= NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_RXCSUM;
 	dev->hw_features |= NETIF_F_GSO_SOFTWARE;
-#endif
 #ifdef USE_UPSTREAM_TUNNEL
 	netif_keep_dst(dev);
 #endif

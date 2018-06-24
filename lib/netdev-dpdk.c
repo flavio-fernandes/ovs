@@ -272,7 +272,7 @@ struct dpdk_qos_ops {
      * For all QoS implementations it should always be non-null.
      */
     int (*qos_run)(struct qos_conf *qos_conf, struct rte_mbuf **pkts,
-                   int pkt_cnt, bool may_steal);
+                   int pkt_cnt, bool should_steal);
 };
 
 /* dpdk_qos_ops for each type of user space QoS implementation */
@@ -341,6 +341,7 @@ struct ingress_policer {
 
 enum dpdk_hw_ol_features {
     NETDEV_RX_CHECKSUM_OFFLOAD = 1 << 0,
+    NETDEV_RX_HW_CRC_STRIP = 1 << 1,
 };
 
 /*
@@ -366,6 +367,8 @@ struct netdev_dpdk {
 
         /* If true, device was attached by rte_eth_dev_attach(). */
         bool attached;
+        /* If true, rte_eth_dev_start() was successfully called */
+        bool started;
         struct eth_addr hwaddr;
         int mtu;
         int socket_id;
@@ -529,19 +532,20 @@ ovs_rte_pktmbuf_init(struct rte_mempool *mp OVS_UNUSED,
 static int
 dpdk_mp_full(const struct rte_mempool *mp) OVS_REQUIRES(dpdk_mp_mutex)
 {
-    unsigned ring_count;
-    /* This logic is needed because rte_mempool_full() is not guaranteed to
-     * be atomic and mbufs could be moved from mempool cache --> mempool ring
-     * during the call. However, as no mbufs will be taken from the mempool
-     * at this time, we can work around it by also checking the ring entries
-     * separately and ensuring that they have not changed.
+    /* At this point we want to know if all the mbufs are back
+     * in the mempool. rte_mempool_full() is not atomic but it's
+     * the best available and as we are no longer requesting mbufs
+     * from the mempool, it means mbufs will not move from
+     * 'mempool ring' --> 'mempool cache'. In rte_mempool_full()
+     * the ring is counted before caches, so we won't get false
+     * positives in this use case and we handle false negatives.
+     *
+     * If future implementations of rte_mempool_full() were to change
+     * it could be possible for a false positive. Even that would
+     * likely be ok, as there are additional checks during mempool
+     * freeing but it would make things racey.
      */
-    ring_count = rte_mempool_ops_get_count(mp);
-    if (rte_mempool_full(mp) && rte_mempool_ops_get_count(mp) == ring_count) {
-        return 1;
-    }
-
-    return 0;
+    return rte_mempool_full(mp);
 }
 
 /* Free unused mempools. */
@@ -776,6 +780,7 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
     int i;
     struct rte_eth_conf conf = port_conf;
     struct rte_eth_dev_info info;
+    uint16_t conf_mtu;
 
     /* As of DPDK 17.11.1 a few PMDs require to explicitly enable
      * scatter to support jumbo RX. Checking the offload capabilities
@@ -785,7 +790,7 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
      * than highlighting the one known not to need scatter */
     if (dev->mtu > ETHER_MTU) {
         rte_eth_dev_info_get(dev->port_id, &info);
-        if (strncmp(info.driver_name, "net_nfp", 6)) {
+        if (strncmp(info.driver_name, "net_nfp", 7)) {
             conf.rxmode.enable_scatter = 1;
         }
     }
@@ -793,6 +798,11 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
     conf.intr_conf.lsc = dev->lsc_interrupt_mode;
     conf.rxmode.hw_ip_checksum = (dev->hw_ol_features &
                                   NETDEV_RX_CHECKSUM_OFFLOAD) != 0;
+
+    if (dev->hw_ol_features & NETDEV_RX_HW_CRC_STRIP) {
+        conf.rxmode.hw_strip_crc = 1;
+    }
+
     /* A device may report more queues than it makes available (this has
      * been observed for Intel xl710, which reserves some of them for
      * SRIOV):  rte_eth_*_queue_setup will fail if a queue is not
@@ -812,9 +822,19 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
 
         diag = rte_eth_dev_set_mtu(dev->port_id, dev->mtu);
         if (diag) {
-            VLOG_ERR("Interface %s MTU (%d) setup error: %s",
-                    dev->up.name, dev->mtu, rte_strerror(-diag));
-            break;
+            /* A device may not support rte_eth_dev_set_mtu, in this case
+             * flag a warning to the user and include the devices configured
+             * MTU value that will be used instead. */
+            if (-ENOTSUP == diag) {
+                rte_eth_dev_get_mtu(dev->port_id, &conf_mtu);
+                VLOG_WARN("Interface %s does not support MTU configuration, "
+                          "max packet size supported is %"PRIu16".",
+                          dev->up.name, conf_mtu);
+            } else {
+                VLOG_ERR("Interface %s MTU (%d) setup error: %s",
+                         dev->up.name, dev->mtu, rte_strerror(-diag));
+                break;
+            }
         }
 
         for (i = 0; i < n_txq; i++) {
@@ -882,6 +902,13 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
 
     rte_eth_dev_info_get(dev->port_id, &info);
 
+    if (strstr(info.driver_name, "vf") != NULL) {
+        VLOG_INFO("Virtual function detected, HW_CRC_STRIP will be enabled");
+        dev->hw_ol_features |= NETDEV_RX_HW_CRC_STRIP;
+    } else {
+        dev->hw_ol_features &= ~NETDEV_RX_HW_CRC_STRIP;
+    }
+
     if ((info.rx_offload_capa & rx_chksm_offload_capa) !=
             rx_chksm_offload_capa) {
         VLOG_WARN("Rx checksum offload is not supported on port "
@@ -910,6 +937,7 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
                  rte_strerror(-diag));
         return -diag;
     }
+    dev->started = true;
 
     rte_eth_promiscuous_enable(dev->port_id);
     rte_eth_allmulticast_enable(dev->port_id);
@@ -1193,6 +1221,7 @@ netdev_dpdk_destruct(struct netdev *netdev)
     ovs_mutex_lock(&dpdk_mutex);
 
     rte_eth_dev_stop(dev->port_id);
+    dev->started = false;
 
     if (dev->attached) {
         rte_eth_dev_close(dev->port_id);
@@ -1803,7 +1832,7 @@ netdev_dpdk_policer_pkt_handle(struct rte_meter_srtcm *meter,
 static int
 netdev_dpdk_policer_run(struct rte_meter_srtcm *meter,
                         struct rte_mbuf **pkts, int pkt_cnt,
-                        bool may_steal)
+                        bool should_steal)
 {
     int i = 0;
     int cnt = 0;
@@ -1819,7 +1848,7 @@ netdev_dpdk_policer_run(struct rte_meter_srtcm *meter,
             }
             cnt++;
         } else {
-            if (may_steal) {
+            if (should_steal) {
                 rte_pktmbuf_free(pkt);
             }
         }
@@ -1830,13 +1859,13 @@ netdev_dpdk_policer_run(struct rte_meter_srtcm *meter,
 
 static int
 ingress_policer_run(struct ingress_policer *policer, struct rte_mbuf **pkts,
-                    int pkt_cnt, bool may_steal)
+                    int pkt_cnt, bool should_steal)
 {
     int cnt = 0;
 
     rte_spinlock_lock(&policer->policer_lock);
     cnt = netdev_dpdk_policer_run(&policer->in_policer, pkts,
-                                  pkt_cnt, may_steal);
+                                  pkt_cnt, should_steal);
     rte_spinlock_unlock(&policer->policer_lock);
 
     return cnt;
@@ -2016,13 +2045,13 @@ netdev_dpdk_rxq_recv(struct netdev_rxq *rxq, struct dp_packet_batch *batch,
 
 static inline int
 netdev_dpdk_qos_run(struct netdev_dpdk *dev, struct rte_mbuf **pkts,
-                    int cnt, bool may_steal)
+                    int cnt, bool should_steal)
 {
     struct qos_conf *qos_conf = ovsrcu_get(struct qos_conf *, &dev->qos_conf);
 
     if (qos_conf) {
         rte_spinlock_lock(&qos_conf->lock);
-        cnt = qos_conf->ops->qos_run(qos_conf, pkts, cnt, may_steal);
+        cnt = qos_conf->ops->qos_run(qos_conf, pkts, cnt, should_steal);
         rte_spinlock_unlock(&qos_conf->lock);
     }
 
@@ -2854,11 +2883,10 @@ netdev_dpdk_vhost_user_get_status(const struct netdev *netdev,
 
     for (int i = 0; i < vring_num; i++) {
         struct rte_vhost_vring vring;
-        char vhost_vring[16];
 
         rte_vhost_get_vhost_vring(vid, i, &vring);
-        snprintf(vhost_vring, 16, "vring_%d_size", i);
-        smap_add_format(args, vhost_vring, "%d", vring.size);
+        smap_add_nocopy(args, xasprintf("vring_%d_size", i),
+                        xasprintf("%d", vring.size));
     }
 
     ovs_mutex_unlock(&dev->mutex);
@@ -3655,14 +3683,14 @@ egress_policer_qos_is_equal(const struct qos_conf *conf,
 
 static int
 egress_policer_run(struct qos_conf *conf, struct rte_mbuf **pkts, int pkt_cnt,
-                   bool may_steal)
+                   bool should_steal)
 {
     int cnt = 0;
     struct egress_policer *policer =
         CONTAINER_OF(conf, struct egress_policer, qos_conf);
 
     cnt = netdev_dpdk_policer_run(&policer->egress_meter, pkts,
-                                  pkt_cnt, may_steal);
+                                  pkt_cnt, should_steal);
 
     return cnt;
 }
@@ -3690,13 +3718,15 @@ netdev_dpdk_reconfigure(struct netdev *netdev)
         && dev->lsc_interrupt_mode == dev->requested_lsc_interrupt_mode
         && dev->rxq_size == dev->requested_rxq_size
         && dev->txq_size == dev->requested_txq_size
-        && dev->socket_id == dev->requested_socket_id) {
+        && dev->socket_id == dev->requested_socket_id
+        && dev->started) {
         /* Reconfiguration is unnecessary */
 
         goto out;
     }
 
     rte_eth_dev_stop(dev->port_id);
+    dev->started = false;
 
     err = netdev_dpdk_mempool_configure(dev);
     if (err && err != EEXIST) {

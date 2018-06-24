@@ -20,6 +20,7 @@ endif
 scripts_SCRIPTS += \
 	utilities/ovs-check-dead-ifs \
 	utilities/ovs-ctl \
+	utilities/ovs-kmod-ctl \
 	utilities/ovs-save
 scripts_DATA += utilities/ovs-lib
 
@@ -31,8 +32,7 @@ check_SCRIPTS += \
 	utilities/ovs-appctl-bashcomp.bash \
 	utilities/ovs-vsctl-bashcomp.bash
 
-EXTRA_DIST += utilities/ovs-sim.in utilities/ovs-sim.1.xml
-noinst_man_MANS += utilities/ovs-sim.1
+EXTRA_DIST += utilities/ovs-sim.in
 noinst_SCRIPTS += utilities/ovs-sim
 
 utilities/ovs-lib: $(top_builddir)/config.status
@@ -45,6 +45,7 @@ EXTRA_DIST += \
 	utilities/ovs-dev.py \
 	utilities/ovs-docker \
 	utilities/ovs-dpctl-top.in \
+	utilities/ovs-kmod-ctl.in \
 	utilities/ovs-l3ping.in \
 	utilities/ovs-lib.in \
 	utilities/ovs-parse-backtrace.in \
@@ -64,6 +65,7 @@ MAN_ROOTS += \
 	utilities/ovs-ctl.8 \
 	utilities/ovs-dpctl.8.in \
 	utilities/ovs-dpctl-top.8.in \
+	utilities/ovs-kmod-ctl.8 \
 	utilities/ovs-l3ping.8.in \
 	utilities/ovs-ofctl.8.in \
 	utilities/ovs-parse-backtrace.8 \
@@ -82,6 +84,7 @@ CLEANFILES += \
 	utilities/ovs-dpctl.8 \
 	utilities/ovs-dpctl-top \
 	utilities/ovs-dpctl-top.8 \
+	utilities/ovs-kmod-ctl \
 	utilities/ovs-l3ping \
 	utilities/ovs-l3ping.8 \
 	utilities/ovs-lib \
@@ -92,7 +95,6 @@ CLEANFILES += \
 	utilities/ovs-pki \
 	utilities/ovs-pki.8 \
 	utilities/ovs-sim \
-	utilities/ovs-sim.1 \
 	utilities/ovs-tcpdump \
 	utilities/ovs-tcpdump.8 \
 	utilities/ovs-tcpundump \
@@ -108,6 +110,7 @@ man_MANS += \
 	utilities/ovs-testcontroller.8 \
 	utilities/ovs-dpctl.8 \
 	utilities/ovs-dpctl-top.8 \
+	utilities/ovs-kmod-ctl.8 \
 	utilities/ovs-l3ping.8 \
 	utilities/ovs-ofctl.8 \
 	utilities/ovs-parse-backtrace.8 \

@@ -33,6 +33,7 @@
 #include "util.h"
 
 struct dpif_flow_stats;
+struct dpif_flow_attrs;
 struct ds;
 struct flow_wildcards;
 struct minimask;
@@ -236,6 +237,7 @@ hash_odp_port(odp_port_t odp_port)
 
 uint32_t flow_hash_5tuple(const struct flow *flow, uint32_t basis);
 uint32_t flow_hash_symmetric_l4(const struct flow *flow, uint32_t basis);
+uint32_t flow_hash_symmetric_l2(const struct flow *flow, uint32_t basis);
 uint32_t flow_hash_symmetric_l3l4(const struct flow *flow, uint32_t basis,
                          bool inc_udp_ports );
 
@@ -959,7 +961,7 @@ static inline void
 pkt_metadata_from_flow(struct pkt_metadata *md, const struct flow *flow)
 {
     /* Update this function whenever struct flow changes. */
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 40);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 41);
 
     md->recirc_id = flow->recirc_id;
     md->dp_hash = flow->dp_hash;

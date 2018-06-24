@@ -314,7 +314,8 @@ struct netdev_class {
      * flow.  Push header is called for packet to build header specific to
      * a packet on actual transmit.  It uses partial header build by
      * build_header() which is passed as data. */
-    void (*push_header)(struct dp_packet *packet,
+    void (*push_header)(const struct netdev *,
+                        struct dp_packet *packet,
                         const struct ovs_action_push_tnl *data);
 
     /* Pop tunnel header from packet, build tunnel metadata and resize packet
@@ -836,7 +837,8 @@ struct netdev_class {
      * to be pre allocated by the caller. */
     bool (*flow_dump_next)(struct netdev_flow_dump *, struct match *,
                            struct nlattr **actions,
-                           struct dpif_flow_stats *stats, ovs_u128 *ufid,
+                           struct dpif_flow_stats *stats,
+                           struct dpif_flow_attrs *attrs, ovs_u128 *ufid,
                            struct ofpbuf *rbuffer, struct ofpbuf *wbuffer);
 
     /* Offload the given flow on netdev.
@@ -856,7 +858,7 @@ struct netdev_class {
      * Return 0 if successful, otherwise returns a positive errno value. */
     int (*flow_get)(struct netdev *, struct match *, struct nlattr **actions,
                     const ovs_u128 *ufid, struct dpif_flow_stats *,
-                    struct ofpbuf *wbuffer);
+                    struct dpif_flow_attrs *, struct ofpbuf *wbuffer);
 
     /* Delete a flow specified by ufid from netdev.
      * 'stats' is populated according to the rules set out in the description

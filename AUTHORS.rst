@@ -158,6 +158,7 @@ Ian Stokes                         ian.stokes@intel.com
 Ilya Maximets                      i.maximets@samsung.com
 Iman Tabrizian                     tabrizian@outlook.com
 Isaku Yamahata                     yamahata@valinux.co.jp
+Ivan Dyukov                        i.dyukov@samsung.com
 IWASE Yusuke                       iwase.yusuke@gmail.com
 Jakub Libosvar                     libosvar@redhat.com
 Jakub Sitnicki                     jkbs@redhat.com
@@ -197,6 +198,7 @@ Kmindg G                           kmindg@gmail.com
 Kris Murphy                        kriskend@linux.vnet.ibm.com
 Krishna Kondaka                    kkondaka@vmware.com
 Kyle Mestery                       mestery@mestery.com
+Kyle Simpson                       kyleandrew.simpson@gmail.com
 Kyle Upton                         kupton@baymicrosystems.com
 Lance Richardson                   lrichard@redhat.com
 Lars Kellogg-Stedman               lars@redhat.com
@@ -328,6 +330,7 @@ Timo Puha                          timox.puha@intel.com
 Timothy Redaelli                   tredaelli@redhat.com
 Todd Deshane                       deshantm@gmail.com
 Tom Everman                        teverman@google.com
+Toms Atteka                        cpp.code.lv@gmail.com
 Torgny Lindberg                    torgny.lindberg@ericsson.com
 Tsvi Slonim                        tsvi@toroki.com
 Tuan Nguyen                        tuan.nguyen@veriksystems.com
@@ -430,6 +433,7 @@ Darragh O'Reilly                darragh.oreilly@hpe.com
 Dave Walker                     DaveWalker@ubuntu.com
 David Evans                     davidjoshuaevans@gmail.com
 David Palma                     palma@onesource.pt
+David van Moolenbroek           dvmoolenbroek@aimvalley.nl
 Derek Cormier                   derek.cormier@lab.ntt.co.jp
 Dhaval Badiani                  dbadiani@vmware.com
 DK Moon                         dkmoon@nicira.com
@@ -533,6 +537,7 @@ Niklas Andersson                nandersson@nicira.com
 Pankaj Thakkar                  thakkar@nicira.com
 Pasi Kärkkäinen                 pasik@iki.fi
 Patrik Andersson R              patrik.r.andersson@ericsson.com
+Paul Greenberg
 Paulo Cravero                   pcravero@as2594.net
 Pawan Shukla                    shuklap@vmware.com
 Periyasamy Palanisamy           periyasamy.palanisamy@ericsson.com

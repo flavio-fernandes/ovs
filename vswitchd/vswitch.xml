@@ -302,9 +302,10 @@
         </p>
         <p>
           If dpdk-socket-mem and dpdk-alloc-mem are not specified, dpdk-socket-mem
-          will be used and the default value is 1024,0. If dpdk-socket-mem and
-          dpdk-alloc-mem are specified at same time, dpdk-socket-mem will be
-          used as default. Changing this value requires restarting the daemon.
+          will be used and the default value is 1024 for each numa node. If
+          dpdk-socket-mem and dpdk-alloc-mem are specified at same time,
+          dpdk-socket-mem will be used as default. Changing this value
+          requires restarting the daemon.
         </p>
       </column>
 
@@ -490,6 +491,11 @@
         configuration changes.
       </column>
 
+      <column name="dpdk_initialized">
+        True if <ref column="other_config" key="dpdk-init"/> is set to
+        true and the DPDK library is successfully initialized.
+      </column>
+
       <group title="Statistics">
         <p>
           The <code>statistics</code> column contains key-value pairs that
@@ -670,6 +676,12 @@
         <p>
           System integrators are responsible for choosing and setting an
           appropriate value for this column.
+        </p>
+      </column>
+
+      <column name="dpdk_version">
+        <p>
+          The version of the linked DPDK library.
         </p>
       </column>
 
@@ -2135,7 +2147,7 @@
         </ul>
         <p>Some interfaces may not have a software-controllable MAC
         address.  This option only affects internal ports.  For other type ports,
-	you can change the MAC address outside Open vSwitch, using ip command.</p>
+        you can change the MAC address outside Open vSwitch, using ip command.</p>
       </column>
 
       <column name="error">
@@ -2596,6 +2608,13 @@
             </li>
           </ul>
         </column>
+        <column name="options" key="seq" type='{"type": "boolean"}'>
+          <p>
+            Optional.  A 4-byte sequence number field for GRE tunnel only.
+            Default is disabled, set to <code>true</code> to enable.
+            Sequence number is incremented by one on each outgoing packet.
+          </p>
+        </column>
       </group>
 
       <group title="Tunnel Options: gre, geneve, and vxlan">
@@ -2624,6 +2643,40 @@
 
         </column>
       </group>
+    </group>
+
+    <group title="Tunnel Options: erspan only">
+      <p>
+        Only <code>erspan</code> interfaces support these options.
+      </p>
+      <column name="options" key="erspan_idx">
+        <p>
+          20 bit index/port number associated with the ERSPAN traffic's
+          source port and direction (ingress/egress).  This field is
+          platform dependent.
+        </p>
+      </column>
+
+      <column name="options" key="erspan_ver">
+        <p>
+          ERSPAN version: 1 for version 1 (type II)
+          or 2 for version 2 (type III).
+        </p>
+      </column>
+
+      <column name="options" key="erspan_dir">
+        <p>
+          Specifies the ERSPAN v2 mirrored traffic's direction.
+          1 for egress traffic, and 0 for ingress traffic.
+        </p>
+      </column>
+
+      <column name="options" key="erspan_hwid">
+        <p>
+          ERSPAN hardware ID is a 6-bit unique identifier of an
+          ERSPAN v2 engine within a system.
+        </p>
+      </column>
     </group>
 
     <group title="Patch Options">

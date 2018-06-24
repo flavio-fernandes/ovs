@@ -127,6 +127,18 @@ struct netdev_tunnel_config {
     bool csum;
     bool dont_fragment;
     enum netdev_pt_mode pt_mode;
+
+    bool set_seq;
+    uint32_t seqno;
+    uint32_t erspan_idx;
+    uint8_t erspan_ver;
+    uint8_t erspan_dir;
+    uint8_t erspan_hwid;
+
+    bool erspan_ver_flow;
+    bool erspan_idx_flow;
+    bool erspan_dir_flow;
+    bool erspan_hwid_flow;
 };
 
 void netdev_run(void);
@@ -197,14 +209,14 @@ int netdev_flow_dump_create(struct netdev *, struct netdev_flow_dump **dump);
 int netdev_flow_dump_destroy(struct netdev_flow_dump *);
 bool netdev_flow_dump_next(struct netdev_flow_dump *, struct match *,
                           struct nlattr **actions, struct dpif_flow_stats *,
-                          ovs_u128 *ufid, struct ofpbuf *rbuffer,
-                          struct ofpbuf *wbuffer);
+                          struct dpif_flow_attrs *, ovs_u128 *ufid,
+                          struct ofpbuf *rbuffer, struct ofpbuf *wbuffer);
 int netdev_flow_put(struct netdev *, struct match *, struct nlattr *actions,
                     size_t actions_len, const ovs_u128 *,
                     struct offload_info *, struct dpif_flow_stats *);
 int netdev_flow_get(struct netdev *, struct match *, struct nlattr **actions,
                     const ovs_u128 *, struct dpif_flow_stats *,
-                    struct ofpbuf *wbuffer);
+                    struct dpif_flow_attrs *, struct ofpbuf *wbuffer);
 int netdev_flow_del(struct netdev *, const ovs_u128 *,
                     struct dpif_flow_stats *);
 int netdev_init_flow_api(struct netdev *);
@@ -227,6 +239,7 @@ int netdev_ports_flow_get(const struct dpif_class *, struct match *match,
                           struct nlattr **actions,
                           const ovs_u128 *ufid,
                           struct dpif_flow_stats *stats,
+                          struct dpif_flow_attrs *attrs,
                           struct ofpbuf *buf);
 
 /* native tunnel APIs */
