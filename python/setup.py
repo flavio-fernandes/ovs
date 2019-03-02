@@ -63,7 +63,8 @@ setup_args = dict(
     url='http://www.openvswitch.org/',
     author='Open vSwitch',
     author_email='dev@openvswitch.org',
-    packages=['ovs', 'ovs.db', 'ovs.unixctl'],
+    packages=['ovs', 'ovs.compat', 'ovs.compat.sortedcontainers',
+              'ovs.db', 'ovs.unixctl'],
     keywords=['openvswitch', 'ovs', 'OVSDB'],
     license='Apache 2.0',
     classifiers=[
@@ -81,7 +82,8 @@ setup_args = dict(
     ext_modules=[setuptools.Extension("ovs._json", sources=["ovs/_json.c"],
                                       libraries=['openvswitch'])],
     cmdclass={'build_ext': try_build_ext},
-    install_requires=['sortedcontainers'],
+    install_requires=['sortedcontainers',
+                      'pywin32>=1.0;platform_system=="Windows"'],
 )
 
 try:

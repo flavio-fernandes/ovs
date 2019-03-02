@@ -21,7 +21,6 @@
 #include "Actions.h"
 #include "Debug.h"
 #include "Flow.h"
-#include "Actions.h"
 #include <stddef.h>
 
 #ifdef OVS_DBG_MOD
@@ -99,9 +98,7 @@ typedef struct _NAT_ACTION_INFO {
 } NAT_ACTION_INFO, *PNAT_ACTION_INFO;
 
 typedef struct OVS_CT_ENTRY {
-    /* Reference to ovsCtBucketLock of ovsConntrackTable.*/
-    PNDIS_RW_LOCK_EX bucketLockRef;
-    PNDIS_RW_LOCK_EX lock;       /* Protects OVS_CT_ENTRY. */
+    NDIS_SPIN_LOCK lock;       /* Protects OVS_CT_ENTRY. */
     OVS_CT_KEY  key;
     OVS_CT_KEY  rev_key;
     UINT64      expiration;
@@ -134,6 +131,18 @@ typedef struct OvsConntrackKeyLookupCtx {
     BOOLEAN         related;
 } OvsConntrackKeyLookupCtx;
 
+/* Per zone strucuture. */
+typedef struct _OVS_CT_ZONE_INFO {
+    ULONG limit;
+    ULONG entries;
+} OVS_CT_ZONE_INFO, *POVS_CT_ZONE_INFO;
+
+typedef struct _OVS_CT_ZONE_LIMIT {
+    int zone_id;
+    ULONG limit;
+    ULONG count;
+} OVS_CT_ZONE_LIMIT, *POVS_CT_ZONE_LIMIT;
+
 #define CT_MAX_ENTRIES 1 << 21
 #define CT_HASH_TABLE_SIZE ((UINT32)1 << 10)
 #define CT_HASH_TABLE_MASK (CT_HASH_TABLE_SIZE - 1)
@@ -156,23 +165,32 @@ OvsConntrackUpdateExpiration(OVS_CT_ENTRY *ctEntry,
     ctEntry->expiration = now + interval;
 }
 
-static __inline UINT32
-OvsGetTcpPayloadLength(PNET_BUFFER_LIST nbl)
+static const TCPHdr*
+OvsGetTcpHeader(PNET_BUFFER_LIST nbl,
+                OVS_PACKET_HDR_INFO *layers,
+                VOID *storage,
+                UINT32 *tcpPayloadLen)
 {
     IPHdr *ipHdr;
     TCPHdr *tcp;
-    char *ipBuf[sizeof(EthHdr) + sizeof(IPHdr) + sizeof(TCPHdr)];
+    VOID *dest = storage;
 
-    ipHdr = NdisGetDataBuffer(NET_BUFFER_LIST_FIRST_NB(nbl), sizeof *ipBuf,
-                              (PVOID)&ipBuf, 1 /*no align*/, 0);
+    ipHdr = NdisGetDataBuffer(NET_BUFFER_LIST_FIRST_NB(nbl),
+                              layers->l4Offset + sizeof(TCPHdr),
+                              NULL, 1 /*no align*/, 0);
     if (ipHdr == NULL) {
-        return 0;
+        return NULL;
     }
 
-    ipHdr = (IPHdr *)((PCHAR)ipHdr + sizeof(EthHdr));
+    ipHdr = (IPHdr *)((PCHAR)ipHdr + layers->l3Offset);
     tcp = (TCPHdr *)((PCHAR)ipHdr + ipHdr->ihl * 4);
+    if (tcp->doff * 4 >= sizeof *tcp) {
+        NdisMoveMemory(dest, tcp, sizeof(TCPHdr));
+        *tcpPayloadLen = TCP_DATA_LENGTH(ipHdr, tcp);
+        return storage;
+    }
 
-    return (ntohs(ipHdr->tot_len) - (ipHdr->ihl * 4) - (TCP_HDR_LEN(tcp)));
+    return NULL;
 }
 
 VOID OvsCleanupConntrack(VOID);
@@ -184,17 +202,17 @@ NDIS_STATUS OvsExecuteConntrackAction(OvsForwardingContext *fwdCtx,
 BOOLEAN OvsConntrackValidateTcpPacket(const TCPHdr *tcp);
 BOOLEAN OvsConntrackValidateIcmpPacket(const ICMPHdr *icmp);
 OVS_CT_ENTRY * OvsConntrackCreateTcpEntry(const TCPHdr *tcp,
-                                          PNET_BUFFER_LIST nbl,
-                                          UINT64 now);
+                                          UINT64 now,
+                                          UINT32 tcpPayloadLen);
 NDIS_STATUS OvsCtMapTcpProtoInfoToNl(PNL_BUFFER nlBuf,
                                      OVS_CT_ENTRY *conn_);
 OVS_CT_ENTRY * OvsConntrackCreateOtherEntry(UINT64 now);
 OVS_CT_ENTRY * OvsConntrackCreateIcmpEntry(UINT64 now);
 enum CT_UPDATE_RES OvsConntrackUpdateTcpEntry(OVS_CT_ENTRY* conn_,
                                               const TCPHdr *tcp,
-                                              PNET_BUFFER_LIST nbl,
                                               BOOLEAN reply,
-                                              UINT64 now);
+                                              UINT64 now,
+                                              UINT32 tcpPayloadLen);
 enum CT_UPDATE_RES OvsConntrackUpdateOtherEntry(OVS_CT_ENTRY *conn_,
                                                 BOOLEAN reply,
                                                 UINT64 now);
@@ -229,6 +247,4 @@ NDIS_STATUS OvsCtHandleFtp(PNET_BUFFER_LIST curNbl,
                            UINT64 currentTime,
                            POVS_CT_ENTRY entry,
                            BOOLEAN request);
-
-UINT32 OvsHashCtKey(const OVS_CT_KEY *key);
 #endif /* __OVS_CONNTRACK_H_ */

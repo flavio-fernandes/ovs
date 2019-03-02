@@ -69,7 +69,7 @@ static bool oneline;
 static bool dry_run;
 
 /* --timeout: Time to wait for a connection to 'db'. */
-static int timeout;
+static unsigned int timeout;
 
 /* Format for table output. */
 static struct table_style table_style = TABLE_STYLE_DEFAULT;
@@ -112,14 +112,15 @@ main(int argc, char *argv[])
     char *args = process_escape_args(argv);
     shash_init(&local_options);
     parse_options(argc, argv, &local_options);
-    commands = ctl_parse_commands(argc - optind, argv + optind, &local_options,
-                                  &n_commands);
+    char *error = ctl_parse_commands(argc - optind, argv + optind,
+                                     &local_options, &commands, &n_commands);
+    if (error) {
+        ctl_fatal("%s", error);
+    }
     VLOG(ctl_might_write_to_db(commands, n_commands) ? VLL_INFO : VLL_DBG,
          "Called as %s", args);
 
-    if (timeout) {
-        time_alarm(timeout);
-    }
+    ctl_timeout_setup(timeout);
 
     /* Initialize IDL. */
     idl = the_idl = ovsdb_idl_create(db, &sbrec_idl_class, false, true);
@@ -265,8 +266,7 @@ parse_options(int argc, char *argv[], struct shash *local_options)
             exit(EXIT_SUCCESS);
 
         case 't':
-            timeout = strtoul(optarg, NULL, 10);
-            if (timeout < 0) {
+            if (!str_to_uint(optarg, 10, &timeout) || !timeout) {
                 ctl_fatal("value %s on -t or --timeout is invalid", optarg);
             }
             break;
@@ -777,7 +777,7 @@ sbctl_open_vconn(struct shash *options)
 
     char *remote = ovs->data ? xstrdup(ovs->data) : default_ovs();
     struct vconn *vconn;
-    int retval = vconn_open_block(remote, 1 << OFP13_VERSION, 0, &vconn);
+    int retval = vconn_open_block(remote, 1 << OFP13_VERSION, 0, -1, &vconn);
     if (retval) {
         VLOG_WARN("%s: connection failed (%s)", remote, ovs_strerror(retval));
     }
@@ -842,9 +842,14 @@ cmd_lflow_list(struct ctl_context *ctx)
 {
     const struct sbrec_datapath_binding *datapath = NULL;
     if (ctx->argc > 1) {
-        datapath = (const struct sbrec_datapath_binding *)
-            ctl_get_row(ctx, &sbrec_table_datapath_binding,
-                        ctx->argv[1], false);
+        const struct ovsdb_idl_row *row;
+        char *error = ctl_get_row(ctx, &sbrec_table_datapath_binding,
+                                  ctx->argv[1], false, &row);
+        if (error) {
+            ctl_fatal("%s", error);
+        }
+
+        datapath = (const struct sbrec_datapath_binding *)row;
         if (datapath) {
             ctx->argc--;
             ctx->argv++;
@@ -1234,6 +1239,9 @@ run_prerequisites(struct ctl_command *commands, size_t n_commands,
 
             sbctl_context_init(&sbctl_ctx, c, idl, NULL, NULL);
             (c->syntax->prerequisites)(&sbctl_ctx.base);
+            if (sbctl_ctx.base.error) {
+                ctl_fatal("%s", sbctl_ctx.base.error);
+            }
             sbctl_context_done(&sbctl_ctx, c);
 
             ovs_assert(!c->output.string);
@@ -1252,7 +1260,6 @@ do_sbctl(const char *args, struct ctl_command *commands, size_t n_commands,
     struct sbctl_context sbctl_ctx;
     struct ctl_command *c;
     struct shash_node *node;
-    char *error = NULL;
 
     txn = the_idl_txn = ovsdb_idl_txn_create(idl);
     if (dry_run) {
@@ -1277,6 +1284,9 @@ do_sbctl(const char *args, struct ctl_command *commands, size_t n_commands,
         sbctl_context_init_command(&sbctl_ctx, c);
         if (c->syntax->run) {
             (c->syntax->run)(&sbctl_ctx.base);
+        }
+        if (sbctl_ctx.base.error) {
+            ctl_fatal("%s", sbctl_ctx.base.error);
         }
         sbctl_context_done_command(&sbctl_ctx, c);
 
@@ -1313,11 +1323,13 @@ do_sbctl(const char *args, struct ctl_command *commands, size_t n_commands,
             if (c->syntax->postprocess) {
                 sbctl_context_init(&sbctl_ctx, c, idl, txn, symtab);
                 (c->syntax->postprocess)(&sbctl_ctx.base);
+                if (sbctl_ctx.base.error) {
+                    ctl_fatal("%s", sbctl_ctx.base.error);
+                }
                 sbctl_context_done(&sbctl_ctx, c);
             }
         }
     }
-    error = xstrdup(ovsdb_idl_txn_get_error(txn));
 
     switch (status) {
     case TXN_UNCOMMITTED:
@@ -1336,7 +1348,7 @@ do_sbctl(const char *args, struct ctl_command *commands, size_t n_commands,
         goto try_again;
 
     case TXN_ERROR:
-        ctl_fatal("transaction error: %s", error);
+        ctl_fatal("transaction error: %s", ovsdb_idl_txn_get_error(txn));
 
     case TXN_NOT_LOCKED:
         /* Should not happen--we never call ovsdb_idl_set_lock(). */
@@ -1345,7 +1357,6 @@ do_sbctl(const char *args, struct ctl_command *commands, size_t n_commands,
     default:
         OVS_NOT_REACHED();
     }
-    free(error);
 
     ovsdb_symbol_table_destroy(symtab);
 
@@ -1402,7 +1413,6 @@ try_again:
         table_destroy(c->table);
         free(c->table);
     }
-    free(error);
     return false;
 }
 

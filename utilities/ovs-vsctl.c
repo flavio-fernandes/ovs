@@ -69,7 +69,7 @@ static bool dry_run;
 static bool wait_for_reload = true;
 
 /* --timeout: Time to wait for a connection to 'db'. */
-static int timeout;
+static unsigned int timeout;
 
 /* --retry: If true, ovs-vsctl will retry connecting to the database forever.
  * If false and --db says to use an active connection method (e.g. "unix:",
@@ -148,14 +148,15 @@ main(int argc, char *argv[])
     char *args = process_escape_args(argv);
     shash_init(&local_options);
     parse_options(argc, argv, &local_options);
-    commands = ctl_parse_commands(argc - optind, argv + optind, &local_options,
-                                  &n_commands);
+    char *error = ctl_parse_commands(argc - optind, argv + optind,
+                                     &local_options, &commands, &n_commands);
+    if (error) {
+        ctl_fatal("%s", error);
+    }
     VLOG(ctl_might_write_to_db(commands, n_commands) ? VLL_INFO : VLL_DBG,
          "Called as %s", args);
 
-    if (timeout) {
-        time_alarm(timeout);
-    }
+    ctl_timeout_setup(timeout);
 
     /* Initialize IDL. */
     idl = the_idl = ovsdb_idl_create(db, &ovsrec_idl_class, false, retry);
@@ -308,10 +309,8 @@ parse_options(int argc, char *argv[], struct shash *local_options)
             exit(EXIT_SUCCESS);
 
         case 't':
-            timeout = strtoul(optarg, NULL, 10);
-            if (timeout < 0) {
-                ctl_fatal("value %s on -t or --timeout is invalid",
-                            optarg);
+            if (!str_to_uint(optarg, 10, &timeout) || !timeout) {
+                ctl_fatal("value %s on -t or --timeout is invalid", optarg);
             }
             break;
 
@@ -1591,8 +1590,11 @@ add_port(struct ctl_context *ctx,
     }
 
     for (i = 0; i < n_settings; i++) {
-        ctl_set_column("Port", &port->header_, settings[i],
-                       ctx->symtab);
+        char *error = ctl_set_column("Port", &port->header_, settings[i],
+                                     ctx->symtab);
+        if (error) {
+            ctl_fatal("%s", error);
+        }
     }
 
     bridge_insert_port((bridge->parent ? bridge->parent->br_cfg
@@ -2525,6 +2527,9 @@ run_prerequisites(struct ctl_command *commands, size_t n_commands,
 
             vsctl_context_init(&vsctl_ctx, c, idl, NULL, NULL, NULL);
             (c->syntax->prerequisites)(&vsctl_ctx.base);
+            if (vsctl_ctx.base.error) {
+                ctl_fatal("%s", vsctl_ctx.base.error);
+            }
             vsctl_context_done(&vsctl_ctx, c);
 
             ovs_assert(!c->output.string);
@@ -2580,7 +2585,6 @@ do_vsctl(const char *args, struct ctl_command *commands, size_t n_commands,
     struct ctl_command *c;
     struct shash_node *node;
     int64_t next_cfg = 0;
-    char *error = NULL;
     char *ppid_info = NULL;
 
     txn = the_idl_txn = ovsdb_idl_txn_create(idl);
@@ -2620,6 +2624,9 @@ do_vsctl(const char *args, struct ctl_command *commands, size_t n_commands,
         if (c->syntax->run) {
             (c->syntax->run)(&vsctl_ctx.base);
         }
+        if (vsctl_ctx.base.error) {
+            ctl_fatal("%s", vsctl_ctx.base.error);
+        }
         vsctl_context_done_command(&vsctl_ctx, c);
 
         if (vsctl_ctx.base.try_again) {
@@ -2658,11 +2665,13 @@ do_vsctl(const char *args, struct ctl_command *commands, size_t n_commands,
             if (c->syntax->postprocess) {
                 vsctl_context_init(&vsctl_ctx, c, idl, txn, ovs, symtab);
                 (c->syntax->postprocess)(&vsctl_ctx.base);
+                if (vsctl_ctx.base.error) {
+                    ctl_fatal("%s", vsctl_ctx.base.error);
+                }
                 vsctl_context_done(&vsctl_ctx, c);
             }
         }
     }
-    error = xstrdup(ovsdb_idl_txn_get_error(txn));
 
     switch (status) {
     case TXN_UNCOMMITTED:
@@ -2681,7 +2690,7 @@ do_vsctl(const char *args, struct ctl_command *commands, size_t n_commands,
         goto try_again;
 
     case TXN_ERROR:
-        ctl_fatal("transaction error: %s", error);
+        ctl_fatal("transaction error: %s", ovsdb_idl_txn_get_error(txn));
 
     case TXN_NOT_LOCKED:
         /* Should not happen--we never call ovsdb_idl_set_lock(). */
@@ -2690,7 +2699,6 @@ do_vsctl(const char *args, struct ctl_command *commands, size_t n_commands,
     default:
         OVS_NOT_REACHED();
     }
-    free(error);
 
     ovsdb_symbol_table_destroy(symtab);
 
@@ -2767,7 +2775,6 @@ try_again:
         table_destroy(c->table);
         free(c->table);
     }
-    free(error);
     return false;
 }
 
