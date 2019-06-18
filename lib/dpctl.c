@@ -38,7 +38,6 @@
 #include "flow.h"
 #include "openvswitch/match.h"
 #include "netdev.h"
-#include "netdev-dpdk.h"
 #include "netlink.h"
 #include "odp-util.h"
 #include "openvswitch/ofpbuf.h"
@@ -52,8 +51,6 @@
 #include "util.h"
 #include "openvswitch/ofp-flow.h"
 #include "openvswitch/ofp-port.h"
-#include "openvswitch/vlog.h"
-VLOG_DEFINE_THIS_MODULE(dpctl);
 
 typedef int dpctl_command_handler(int argc, const char *argv[],
                                   struct dpctl_params *);
@@ -966,6 +963,13 @@ dpctl_dump_flows(int argc, const char *argv[], struct dpctl_params *dpctl_p)
         if (!strncmp(argv[argc - 1], "filter=", 7) && !filter) {
             filter = xstrdup(argv[--argc] + 7);
         } else if (!strncmp(argv[argc - 1], "type=", 5) && !types_list) {
+            if (!dpctl_p->is_appctl) {
+                dpctl_error(dpctl_p, 0,
+                            "Invalid argument 'type'. "
+                            "Use 'ovs-appctl dpctl/dump-flows' instead.");
+                error = EINVAL;
+                goto out_free;
+            }
             types_list = xstrdup(argv[--argc] + 5);
         }
     }
@@ -1348,6 +1352,10 @@ dpctl_list_commands(int argc OVS_UNUSED, const char *argv[] OVS_UNUSED,
     ds_put_cstr(&ds, "The available commands are:\n");
     for (; commands->name; commands++) {
         const struct dpctl_command *c = commands;
+
+        if (dpctl_p->is_appctl && !strcmp(c->name, "help")) {
+            continue;
+        }
 
         ds_put_format(&ds, "  %s%-23s %s\n", dpctl_p->is_appctl ? "dpctl/" : "",
                       c->name, c->usage);
@@ -2581,8 +2589,6 @@ dpctl_unixctl_handler(struct unixctl_conn *conn, int argc, const char *argv[],
     if (!set_names) {
         dpctl_p.names = dpctl_p.verbosity > 0;
     }
-    VLOG_INFO("set_names=%d verbosity=%d names=%d", set_names,
-              dpctl_p.verbosity, dpctl_p.names);
 
     if (!error) {
         dpctl_command_handler *handler = (dpctl_command_handler *) aux;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2017 Nicira, Inc.
+ * Copyright (c) 2008-2017, 2019 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -355,6 +355,9 @@ enum ofp_raw_action_type {
     /* NX1.3+(48): void. */
     NXAST_RAW_DEC_NSH_TTL,
 
+    /* NX1.0+(49): struct nx_action_check_pkt_larger, ... VLMFF */
+    NXAST_RAW_CHECK_PKT_LARGER,
+
 /* ## ------------------ ## */
 /* ## Debugging actions. ## */
 /* ## ------------------ ## */
@@ -405,7 +408,8 @@ static void pad_ofpat(struct ofpbuf *openflow, size_t start_ofs);
 
 static enum ofperr ofpacts_verify(const struct ofpact[], size_t ofpacts_len,
                                   uint32_t allowed_ovsinsts,
-                                  enum ofpact_type outer_action);
+                                  enum ofpact_type outer_action,
+                                  char **errorp);
 
 static void put_set_field(struct ofpbuf *openflow, enum ofp_version,
                           enum mf_field_id, uint64_t value);
@@ -492,6 +496,7 @@ ofpact_next_flattened(const struct ofpact *ofpact)
     case OFPACT_ENCAP:
     case OFPACT_DECAP:
     case OFPACT_DEC_NSH_TTL:
+    case OFPACT_CHECK_PKT_LARGER:
         return ofpact_next(ofpact);
 
     case OFPACT_CLONE:
@@ -635,6 +640,12 @@ parse_truncate_subfield(const char *arg_,
             err = str_to_u32(value, &output_trunc->max_len);
             if (err) {
                 return err;
+            }
+
+            if (output_trunc->max_len < ETH_HEADER_LEN) {
+                return xasprintf("max_len %"PRIu32" is less than the minimum "
+                                 "value %d",
+                                 output_trunc->max_len, ETH_HEADER_LEN);
             }
         } else {
             return xasprintf("invalid key '%s' in output_trunc argument",
@@ -989,6 +1000,11 @@ parse_CONTROLLER(char *arg, const struct ofpact_parse_params *pp)
             controller = pp->ofpacts->header;
             controller->userdata_len = userdata_len;
         }
+
+        if (ofpbuf_oversized(pp->ofpacts)) {
+            return xasprintf("input too big");
+        }
+
         ofpact_finish_CONTROLLER(pp->ofpacts, &controller);
     }
 
@@ -3690,6 +3706,11 @@ parse_DEC_TTL(char *arg, const struct ofpact_parse_params *pp)
             return xstrdup("dec_ttl_cnt_ids: expected at least one controller "
                            "id.");
         }
+
+        if (ofpbuf_oversized(pp->ofpacts)) {
+            return xasprintf("input too big");
+        }
+
         ofpact_finish_DEC_TTL(pp->ofpacts, &ids);
     }
     return NULL;
@@ -4416,6 +4437,8 @@ parse_ed_props(const uint16_t prop_class, char **arg, int *n_props, struct ofpbu
 static char * OVS_WARN_UNUSED_RESULT
 parse_ENCAP(char *arg, const struct ofpact_parse_params *pp)
 {
+    *pp->usable_protocols &= OFPUTIL_P_OF13_UP;
+
     struct ofpact_encap *encap;
     char *key, *value, *str;
     char *error = NULL;
@@ -4443,6 +4466,11 @@ parse_ENCAP(char *arg, const struct ofpact_parse_params *pp)
     /* ofpbuf may have been re-allocated. */
     encap = pp->ofpacts->header;
     encap->n_props = n_props;
+
+    if (ofpbuf_oversized(pp->ofpacts)) {
+        return xasprintf("input too big");
+    }
+
     ofpact_finish_ENCAP(pp->ofpacts, &encap);
     return NULL;
 }
@@ -4604,7 +4632,7 @@ format_DECAP(const struct ofpact_decap *a,
 {
     ds_put_format(fp->s, "%sdecap(%s", colors.paren, colors.end);
     if (a->new_pkt_type != htonl(PT_USE_NEXT_PROTO)) {
-        ds_put_format(fp->s, "packet_type(ns=%"PRIu16",id=%#"PRIx16")",
+        ds_put_format(fp->s, "packet_type(ns=%"PRIu16",type=%#"PRIx16")",
                       pt_ns(a->new_pkt_type),
                       pt_ns_type(a->new_pkt_type));
     }
@@ -4853,7 +4881,7 @@ parse_RESUBMIT(char *arg, const struct ofpact_parse_params *pp)
 
     if (resubmit->in_port == OFPP_IN_PORT && resubmit->table_id == 255) {
         return xstrdup("at least one \"in_port\" or \"table\" must be "
-                       "specified  on resubmit");
+                       "specified on resubmit");
     }
     return NULL;
 }
@@ -5772,6 +5800,11 @@ parse_NOTE(const char *arg, const struct ofpact_parse_params *pp)
     struct ofpact_note *note = ofpbuf_at_assert(pp->ofpacts, start_ofs,
                                                 sizeof *note);
     note->length = pp->ofpacts->size - (start_ofs + sizeof *note);
+
+    if (ofpbuf_oversized(pp->ofpacts)) {
+        return xasprintf("input too big");
+    }
+
     ofpact_finish_NOTE(pp->ofpacts, &note);
     return NULL;
 }
@@ -5928,6 +5961,10 @@ parse_CLONE(char *arg, const struct ofpact_parse_params *pp)
     /* header points to the action list */
     pp->ofpacts->header = ofpbuf_push_uninit(pp->ofpacts, sizeof *clone);
     clone = pp->ofpacts->header;
+
+    if (ofpbuf_oversized(pp->ofpacts)) {
+        return xasprintf("input too big");
+    }
 
     ofpact_finish_CLONE(pp->ofpacts, &clone);
     ofpbuf_push_uninit(pp->ofpacts, clone_offset);
@@ -6615,6 +6652,11 @@ parse_CT(char *arg, const struct ofpact_parse_params *pp)
     if (!error && oc->flags & NX_CT_F_FORCE && !(oc->flags & NX_CT_F_COMMIT)) {
         error = xasprintf("\"force\" flag requires \"commit\" flag.");
     }
+
+    if (ofpbuf_oversized(pp->ofpacts)) {
+        return xasprintf("input too big");
+    }
+
     ofpact_finish_CT(pp->ofpacts, &oc);
     ofpbuf_push_uninit(pp->ofpacts, ct_offset);
     return error;
@@ -7400,6 +7442,124 @@ check_WRITE_METADATA(const struct ofpact_metadata *a OVS_UNUSED,
     return 0;
 }
 
+/* Check packet length action. */
+
+struct nx_action_check_pkt_larger {
+    ovs_be16 type;              /* OFPAT_VENDOR. */
+    ovs_be16 len;               /* 24. */
+    ovs_be32 vendor;            /* NX_VENDOR_ID. */
+    ovs_be16 subtype;           /* NXAST_OUTPUT_REG. */
+    ovs_be16 pkt_len;           /* Length of the packet to check. */
+    ovs_be16 offset;            /* Result bit offset in destination. */
+    /* Followed by:
+     * - 'dst', as an OXM/NXM header (either 4 or 8 bytes).
+     * - Enough 0-bytes to pad the action out to 24 bytes. */
+    uint8_t pad[10];
+};
+
+OFP_ASSERT(sizeof(struct nx_action_check_pkt_larger) == 24);
+
+static enum ofperr
+decode_NXAST_RAW_CHECK_PKT_LARGER(
+    const struct nx_action_check_pkt_larger *ncpl,
+    enum ofp_version ofp_version OVS_UNUSED,
+    const struct vl_mff_map *vl_mff_map, uint64_t *tlv_bitmap,
+    struct ofpbuf *out)
+{
+    struct ofpact_check_pkt_larger *check_pkt_larger;
+    enum ofperr error;
+
+    check_pkt_larger = ofpact_put_CHECK_PKT_LARGER(out);
+    check_pkt_larger->pkt_len = ntohs(ncpl->pkt_len);
+    check_pkt_larger->dst.ofs = ntohs(ncpl->offset);
+    check_pkt_larger->dst.n_bits = 1;
+
+    struct ofpbuf b = ofpbuf_const_initializer(ncpl, ntohs(ncpl->len));
+    ofpbuf_pull(&b, OBJECT_OFFSETOF(ncpl, pad));
+
+    error = mf_vl_mff_nx_pull_header(&b, vl_mff_map,
+                                     &check_pkt_larger->dst.field,
+                                     NULL, tlv_bitmap);
+    if (error) {
+        return error;
+    }
+
+    if (!is_all_zeros(b.data, b.size)) {
+        return OFPERR_NXBRC_MUST_BE_ZERO;
+    }
+
+    return mf_check_dst(&check_pkt_larger->dst, NULL);
+}
+
+static void
+encode_CHECK_PKT_LARGER(const struct ofpact_check_pkt_larger *check_pkt_larger,
+                 enum ofp_version ofp_version OVS_UNUSED,
+                 struct ofpbuf *out)
+{
+    struct nx_action_check_pkt_larger *ncpl = put_NXAST_CHECK_PKT_LARGER(out);
+    ncpl->pkt_len = htons(check_pkt_larger->pkt_len);
+    ncpl->offset = htons(check_pkt_larger->dst.ofs);
+
+    if (check_pkt_larger->dst.field) {
+        size_t size = out->size;
+        out->size = size - sizeof ncpl->pad;
+        nx_put_mff_header(out, check_pkt_larger->dst.field, 0, false);
+        out->size = size;
+    }
+}
+
+static char * OVS_WARN_UNUSED_RESULT
+parse_CHECK_PKT_LARGER(char *arg, const struct ofpact_parse_params *pp)
+{
+    char *value;
+    char *delim;
+    char *key;
+    char *error = set_field_split_str(arg, &key, &value, &delim);
+    if (error) {
+        return error;
+    }
+
+    delim[0] = '\0';
+    if (value[strlen(value) - 1] == ')') {
+        value[strlen(value) - 1] = '\0';
+    }
+    struct mf_subfield dst;
+    error = mf_parse_subfield(&dst, key);
+    if (error) {
+        return error;
+    }
+
+    if (dst.n_bits != 1) {
+        return xstrdup("Only 1-bit destination field is allowed");
+    }
+
+    struct ofpact_check_pkt_larger *check_pkt_larger =
+        ofpact_put_CHECK_PKT_LARGER(pp->ofpacts);
+    error = str_to_u16(value, NULL, &check_pkt_larger->pkt_len);
+    if (error) {
+        return error;
+    }
+    check_pkt_larger->dst = dst;
+    return NULL;
+}
+
+static void
+format_CHECK_PKT_LARGER(const struct ofpact_check_pkt_larger *a,
+                        const struct ofpact_format_params *fp)
+{
+    ds_put_format(fp->s, "%scheck_pkt_larger(%s%"PRIu32")->",
+                  colors.param, colors.end, a->pkt_len);
+    mf_format_subfield(&a->dst, fp->s);
+}
+
+static enum ofperr
+check_CHECK_PKT_LARGER(const struct ofpact_check_pkt_larger *a OVS_UNUSED,
+                       const struct ofpact_check_params *cp OVS_UNUSED)
+{
+    return 0;
+}
+
+
 /* Goto-Table instruction. */
 
 static void
@@ -7524,7 +7684,7 @@ ofpacts_pull_openflow_actions__(struct ofpbuf *openflow,
                            ofpacts_tlv_bitmap, ofpacts);
     if (!error) {
         error = ofpacts_verify(ofpacts->data, ofpacts->size, allowed_ovsinsts,
-                               outer_action);
+                               outer_action, NULL);
     }
     if (error) {
         ofpbuf_clear(ofpacts);
@@ -7686,6 +7846,7 @@ action_set_classify(const struct ofpact *a)
     case OFPACT_WRITE_METADATA:
     case OFPACT_DEBUG_RECIRC:
     case OFPACT_DEBUG_SLOW:
+    case OFPACT_CHECK_PKT_LARGER:
         return ACTION_SLOT_INVALID;
 
     default:
@@ -7885,6 +8046,7 @@ ovs_instruction_type_from_ofpact_type(enum ofpact_type type)
     case OFPACT_ENCAP:
     case OFPACT_DECAP:
     case OFPACT_DEC_NSH_TTL:
+    case OFPACT_CHECK_PKT_LARGER:
     default:
         return OVSINST_OFPIT11_APPLY_ACTIONS;
     }
@@ -8183,7 +8345,7 @@ ofpacts_pull_openflow_instructions(struct ofpbuf *openflow,
     }
 
     error = ofpacts_verify(ofpacts->data, ofpacts->size,
-                           (1u << N_OVS_INSTRUCTIONS) - 1, 0);
+                           (1u << N_OVS_INSTRUCTIONS) - 1, 0, NULL);
 exit:
     if (error) {
         ofpbuf_clear(ofpacts);
@@ -8344,11 +8506,28 @@ ofpact_get_mf_dst(const struct ofpact *ofpact)
     return NULL;
 }
 
-static enum ofperr
-unsupported_nesting(enum ofpact_type action, enum ofpact_type outer_action)
+static void OVS_PRINTF_FORMAT(2, 3)
+verify_error(char **errorp, const char *format, ...)
 {
-    VLOG_WARN("%s action doesn't support nested action %s",
-              ofpact_name(outer_action), ofpact_name(action));
+    va_list args;
+    va_start(args, format);
+    char *error = xvasprintf(format, args);
+    va_end(args);
+
+    if (errorp) {
+        *errorp = error;
+    } else {
+        VLOG_WARN("%s", error);
+        free(error);
+    }
+}
+
+static enum ofperr
+unsupported_nesting(enum ofpact_type action, enum ofpact_type outer_action,
+                    char **errorp)
+{
+    verify_error(errorp, "%s action doesn't support nested action %s",
+                 ofpact_name(outer_action), ofpact_name(action));
     return OFPERR_OFPBAC_BAD_ARGUMENT;
 }
 
@@ -8360,17 +8539,19 @@ field_requires_ct(enum mf_field_id field)
 
 /* Apply nesting constraints for actions */
 static enum ofperr
-ofpacts_verify_nested(const struct ofpact *a, enum ofpact_type outer_action)
+ofpacts_verify_nested(const struct ofpact *a, enum ofpact_type outer_action,
+                      char **errorp)
 {
     const struct mf_field *field = ofpact_get_mf_dst(a);
 
     if (field && field_requires_ct(field->id) && outer_action != OFPACT_CT) {
-        VLOG_WARN("cannot set CT fields outside of ct action");
+        verify_error(errorp, "cannot set CT fields outside of ct action");
         return OFPERR_OFPBAC_BAD_SET_ARGUMENT;
     }
     if (a->type == OFPACT_NAT) {
         if (outer_action != OFPACT_CT) {
-            VLOG_WARN("Cannot have NAT action outside of \"ct\" action");
+            verify_error(errorp,
+                         "Cannot have NAT action outside of \"ct\" action");
             return OFPERR_OFPBAC_BAD_SET_ARGUMENT;
         }
         return 0;
@@ -8382,10 +8563,11 @@ ofpacts_verify_nested(const struct ofpact *a, enum ofpact_type outer_action)
 
         if (outer_action == OFPACT_CT) {
             if (!field) {
-                return unsupported_nesting(a->type, outer_action);
+                return unsupported_nesting(a->type, outer_action, errorp);
             } else if (!field_requires_ct(field->id)) {
-                VLOG_WARN("%s action doesn't support nested modification "
-                          "of %s", ofpact_name(outer_action), field->name);
+                verify_error(errorp,
+                             "%s action doesn't support nested modification "
+                             "of %s", ofpact_name(outer_action), field->name);
                 return OFPERR_OFPBAC_BAD_ARGUMENT;
             }
         }
@@ -8405,7 +8587,8 @@ ofpacts_verify_nested(const struct ofpact *a, enum ofpact_type outer_action)
  * within another action of type 'outer_action'. */
 static enum ofperr
 ofpacts_verify(const struct ofpact ofpacts[], size_t ofpacts_len,
-               uint32_t allowed_ovsinsts, enum ofpact_type outer_action)
+               uint32_t allowed_ovsinsts, enum ofpact_type outer_action,
+               char **errorp)
 {
     const struct ofpact *a;
     enum ovs_instruction_type inst;
@@ -8418,17 +8601,17 @@ ofpacts_verify(const struct ofpact ofpacts[], size_t ofpacts_len,
         if (a->type == OFPACT_CONJUNCTION) {
             OFPACT_FOR_EACH (a, ofpacts, ofpacts_len) {
                 if (a->type != OFPACT_CONJUNCTION && a->type != OFPACT_NOTE) {
-                    VLOG_WARN("\"conjunction\" actions may be used along with "
-                              "\"note\" but not any other kind of action "
-                              "(such as the \"%s\" action used here)",
-                              ofpact_name(a->type));
+                    verify_error(errorp, "\"conjunction\" actions may be used "
+                                 "along with \"note\" but not any other kind "
+                                 "of action (such as the \"%s\" action used "
+                                 "here)", ofpact_name(a->type));
                     return OFPERR_NXBAC_BAD_CONJUNCTION;
                 }
             }
             return 0;
         }
 
-        error = ofpacts_verify_nested(a, outer_action);
+        error = ofpacts_verify_nested(a, outer_action, errorp);
         if (error) {
             return error;
         }
@@ -8442,19 +8625,20 @@ ofpacts_verify(const struct ofpact ofpacts[], size_t ofpacts_len,
             const char *next_name = ovs_instruction_name_from_type(next);
 
             if (next == inst) {
-                VLOG_WARN("duplicate %s instruction not allowed, for OpenFlow "
-                          "1.1+ compatibility", name);
+                verify_error(errorp, "duplicate %s instruction not allowed, "
+                             "for OpenFlow 1.1+ compatibility", name);
             } else {
-                VLOG_WARN("invalid instruction ordering: %s must appear "
-                          "before %s, for OpenFlow 1.1+ compatibility",
-                          next_name, name);
+                verify_error(errorp, "invalid instruction ordering: "
+                             "%s must appear before %s, "
+                             "for OpenFlow 1.1+ compatibility",
+                             next_name, name);
             }
             return OFPERR_OFPBAC_UNSUPPORTED_ORDER;
         }
         if (!((1u << next) & allowed_ovsinsts)) {
             const char *name = ovs_instruction_name_from_type(next);
 
-            VLOG_WARN("%s instruction not allowed here", name);
+            verify_error(errorp, "%s instruction not allowed here", name);
             return OFPERR_OFPBIC_UNSUP_INST;
         }
 
@@ -8754,6 +8938,7 @@ ofpact_outputs_to_port(const struct ofpact *ofpact, ofp_port_t port)
     case OFPACT_ENCAP:
     case OFPACT_DECAP:
     case OFPACT_DEC_NSH_TTL:
+    case OFPACT_CHECK_PKT_LARGER:
     default:
         return false;
     }
@@ -8978,22 +9163,17 @@ static char * OVS_WARN_UNUSED_RESULT
 ofpacts_parse__(char *str, const struct ofpact_parse_params *pp,
                 bool allow_instructions, enum ofpact_type outer_action)
 {
-    int prev_inst = -1;
-    enum ofperr retval;
     char *key, *value;
     bool drop = false;
     char *pos;
 
     pos = str;
     while (ofputil_parse_key_value(&pos, &key, &value)) {
-        enum ovs_instruction_type inst = OVSINST_OFPIT11_APPLY_ACTIONS;
         enum ofpact_type type;
         char *error = NULL;
         ofp_port_t port;
-
         if (ofpact_type_from_name(key, &type)) {
             error = ofpact_parse(type, value, pp);
-            inst = ovs_instruction_type_from_ofpact_type(type);
         } else if (!strcasecmp(key, "mod_vlan_vid")) {
             error = parse_set_vlan_vid(value, true, pp);
         } else if (!strcasecmp(key, "mod_vlan_pcp")) {
@@ -9020,24 +9200,6 @@ ofpacts_parse__(char *str, const struct ofpact_parse_params *pp,
         if (error) {
             return error;
         }
-
-        if (inst != OVSINST_OFPIT11_APPLY_ACTIONS) {
-            if (!allow_instructions) {
-                return xasprintf("only actions are allowed here (not "
-                                 "instruction %s)",
-                                 ovs_instruction_name_from_type(inst));
-            }
-            if (inst == prev_inst) {
-                return xasprintf("instruction %s may be specified only once",
-                                 ovs_instruction_name_from_type(inst));
-            }
-        }
-        if (prev_inst != -1 && inst < prev_inst) {
-            return xasprintf("instruction %s must be specified before %s",
-                             ovs_instruction_name_from_type(inst),
-                             ovs_instruction_name_from_type(prev_inst));
-        }
-        prev_inst = inst;
     }
 
     if (drop && pp->ofpacts->size) {
@@ -9045,13 +9207,15 @@ ofpacts_parse__(char *str, const struct ofpact_parse_params *pp,
                        "or instruction");
     }
 
-    retval = ofpacts_verify(pp->ofpacts->data, pp->ofpacts->size,
-                            (allow_instructions
-                             ? (1u << N_OVS_INSTRUCTIONS) - 1
-                             : 1u << OVSINST_OFPIT11_APPLY_ACTIONS),
-                            outer_action);
-    if (retval) {
-        return xstrdup("Incorrect instruction ordering");
+    char *error = NULL;
+    ofpacts_verify(pp->ofpacts->data, pp->ofpacts->size,
+                   (allow_instructions
+                    ? (1u << N_OVS_INSTRUCTIONS) - 1
+                    : ((1u << OVSINST_OFPIT11_APPLY_ACTIONS)
+                       | (1u << OVSINST_OFPIT13_METER))),
+                   outer_action, &error);
+    if (error) {
+        return error;
     }
 
     return NULL;
