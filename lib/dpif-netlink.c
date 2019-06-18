@@ -38,6 +38,7 @@
 #include "fat-rwlock.h"
 #include "flow.h"
 #include "netdev-linux.h"
+#include "netdev-offload.h"
 #include "netdev-provider.h"
 #include "netdev-vport.h"
 #include "netdev.h"
@@ -2068,6 +2069,7 @@ parse_flow_put(struct dpif_netlink *dpif, struct dpif_flow_put *put)
         VLOG_DBG("added flow");
     } else if (err != EEXIST) {
         struct netdev *oor_netdev = NULL;
+        enum vlog_level level;
         if (err == ENOSPC && netdev_is_offload_rebalance_policy_enabled()) {
             /*
              * We need to set OOR on the input netdev (i.e, 'dev') for the
@@ -2082,8 +2084,10 @@ parse_flow_put(struct dpif_netlink *dpif, struct dpif_flow_put *put)
             }
             netdev_set_hw_info(oor_netdev, HW_INFO_TYPE_OOR, true);
         }
-        VLOG_ERR_RL(&rl, "failed to offload flow: %s: %s", ovs_strerror(err),
-                    (oor_netdev ? oor_netdev->name : dev->name));
+        level = (err == ENOSPC || err == EOPNOTSUPP) ? VLL_DBG : VLL_ERR;
+        VLOG_RL(&rl, level, "failed to offload flow: %s: %s",
+                ovs_strerror(err),
+                (oor_netdev ? oor_netdev->name : dev->name));
     }
 
 out:
@@ -2884,7 +2888,7 @@ dpif_netlink_ct_set_limits(struct dpif *dpif OVS_UNUSED,
     nl_msg_end_nested(request, opt_offset);
 
     int err = nl_transact(NETLINK_GENERIC, request, NULL);
-    ofpbuf_uninit(request);
+    ofpbuf_delete(request);
     return err;
 }
 
@@ -2984,8 +2988,8 @@ dpif_netlink_ct_get_limits(struct dpif *dpif OVS_UNUSED,
                                                zone_limits_reply);
 
 out:
-    ofpbuf_uninit(request);
-    ofpbuf_uninit(reply);
+    ofpbuf_delete(request);
+    ofpbuf_delete(reply);
     return err;
 }
 
@@ -3021,7 +3025,7 @@ dpif_netlink_ct_del_limits(struct dpif *dpif OVS_UNUSED,
 
     int err = nl_transact(NETLINK_GENERIC, request, NULL);
 
-    ofpbuf_uninit(request);
+    ofpbuf_delete(request);
     return err;
 }
 

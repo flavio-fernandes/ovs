@@ -68,7 +68,7 @@ Q: What Linux kernel versions does each Open vSwitch release work with?
     2.8.x        3.10 to 4.12
     2.9.x        3.10 to 4.13
     2.10.x       3.10 to 4.17
-    2.11.x       3.10 to 4.18
+    2.11.x       3.10 to 5.0
     ============ ==============
 
     Open vSwitch userspace should also work with the Linux kernel module built
@@ -110,8 +110,8 @@ Q: Are all features available with all datapaths?
     ========================== ============== ============== ========= =======
     Connection tracking             4.3            YES          YES      YES
     Conntrack Fragment Reass.       4.3            YES          YES      YES
-    NAT                             4.6            YES          YES      NO
-    Conntrack zone limit            4.18           YES          NO       NO
+    NAT                             4.6            YES          YES      YES
+    Conntrack zone limit            4.18           YES          NO       YES
     Tunnel - LISP                   NO             YES          NO       NO
     Tunnel - STT                    NO             YES          NO       YES
     Tunnel - GRE                    3.11           YES          YES      YES
@@ -125,7 +125,7 @@ Q: Are all features available with all datapaths?
     QoS - Policing                  YES            YES          YES      NO
     QoS - Shaping                   YES            YES          NO       NO
     sFlow                           YES            YES          YES      NO
-    IPFIX                           3.10           YES          YES      NO
+    IPFIX                           3.10           YES          YES      YES
     Set action                      YES            YES          YES    PARTIAL
     NIC Bonding                     YES            YES          YES      YES
     Multiple VTEPs                  YES            YES          YES      YES
@@ -173,11 +173,11 @@ Q: What DPDK version does each Open vSwitch release work with?
     2.4.x        2.0
     2.5.x        2.2
     2.6.x        16.07.2
-    2.7.x        16.11.8
+    2.7.x        16.11.9
     2.8.x        17.05.2
     2.9.x        17.11.4
     2.10.x       17.11.4
-    2.11.x       18.11
+    2.11.x       18.11.1
     ============ =======
 
 Q: Are all the DPDK releases that OVS versions work with maintained?
