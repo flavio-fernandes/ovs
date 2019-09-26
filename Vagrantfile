@@ -6,7 +6,6 @@ VAGRANTFILE_API_VERSION = "2"
 Vagrant.require_version ">=1.7.0"
 
 $bootstrap_fedora = <<SCRIPT
-dnf -y update
 dnf -y install autoconf automake openssl-devel libtool \
                python-devel python3-devel \
                python-twisted python-zope-interface \
@@ -34,7 +33,6 @@ aptitude -y install -R \
 SCRIPT
 
 $bootstrap_centos = <<SCRIPT
-yum -y update
 yum -y install autoconf automake openssl-devel libtool \
                python-twisted-core python-zope-interface \
                desktop-file-utils groff graphviz rpmdevtools nc curl \
@@ -117,6 +115,9 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.vm.define "debian-8" do |debian|
        debian.vm.box = "debian/jessie64"
        debian.vm.synced_folder ".", "/vagrant", type: "rsync"
+       debian.vm.provision "update", type: "shell", inline: "aptitude -y update"
+       debian.vm.provision "upgrade", type: "shell", inline: "aptitude -y upgrade"
+       debian.vm.provision :reload
        debian.vm.provision "bootstrap", type: "shell", inline: $bootstrap_debian
        debian.vm.provision "configure_ovs", type: "shell", inline: $configure_ovs
        debian.vm.provision "build_ovs", type: "shell", inline: $build_ovs
@@ -127,6 +128,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.vm.define "fedora-23" do |fedora|
        fedora.vm.box = "fedora/23-cloud-base"
        fedora.vm.synced_folder ".", "/vagrant", type: "rsync"
+       fedora.vm.provision "update", type: "shell", inline: "dnf -y update"
+       fedora.vm.provision :reload
        fedora.vm.provision "bootstrap", type: "shell", inline: $bootstrap_fedora
        fedora.vm.provision "configure_ovs", type: "shell", inline: $configure_ovs
        fedora.vm.provision "build_ovs", type: "shell", inline: $build_ovs
@@ -137,6 +140,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.vm.define "centos-7" do |centos|
        centos.vm.box = "centos/7"
        centos.vm.synced_folder ".", "/vagrant", type: "rsync"
+       centos.vm.provision "update", type: "shell", inline: "yum -y update"
+       centos.vm.provision :reload
        centos.vm.provision "bootstrap", type: "shell", inline: $bootstrap_centos
        centos.vm.provision "configure_ovs", type: "shell", inline: $configure_ovs
        centos.vm.provision "build_ovs", type: "shell", inline: $build_ovs
