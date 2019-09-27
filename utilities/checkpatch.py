@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # Copyright (c) 2016, 2017 Red Hat, Inc.
 # Copyright (c) 2018 Nicira, Inc.
 #
@@ -172,7 +172,7 @@ __regex_has_xxx_mark = re.compile(r'.*xxx.*', re.IGNORECASE)
 __regex_added_doc_rst = re.compile(
                     r'\ndiff .*Documentation/.*rst\nnew file mode')
 __regex_empty_return = re.compile(r'\s*return;')
-__regex_if_macros = re.compile(r'^ +(%s) \([\S][\s\S]+[\S]\) { \\' %
+__regex_if_macros = re.compile(r'^ +(%s) \([\S]([\s\S]+[\S])*\) { +\\' %
                                __parenthesized_constructs)
 
 skip_leading_whitespace_check = False
@@ -843,6 +843,8 @@ def ovs_checkpatch_parse(text, filename, author=None, committer=None):
             # like DPDK or Linux and could contain workarounds not suitable
             # for a common style.
             if current_file.startswith('include/sparse'):
+                continue
+            if current_file.startswith('utilities/bugtool'):
                 continue
             run_checks(current_file, cmp_line, lineno)
 

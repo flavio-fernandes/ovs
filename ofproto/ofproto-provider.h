@@ -524,6 +524,14 @@ extern unsigned ofproto_flow_limit;
  * on system load and other factors. This variable is subject to change. */
 extern unsigned ofproto_max_idle;
 
+/* Maximum timeout (in ms) for revalidator timer.
+ * Revalidator timeout is a minimum of max_idle and max_revalidator values. */
+extern unsigned ofproto_max_revalidator;
+
+/* Minimum pps that flow must have in order to be revalidated when revalidation
+ * duration exceeds half of max-revalidator config variable. */
+extern unsigned ofproto_min_revalidate_pps;
+
 /* Number of upcall handler and revalidator threads. Only affects the
  * ofproto-dpif implementation. */
 extern size_t n_handlers, n_revalidators;
@@ -1872,6 +1880,15 @@ struct ofproto_class {
     /* Flushes the connection tracking tables. If 'zone' is not NULL,
      * only deletes connections in '*zone'. */
     void (*ct_flush)(const struct ofproto *, const uint16_t *zone);
+
+    /* Sets conntrack timeout policy specified by 'timeout_policy' to 'zone'
+     * in datapath type 'dp_type'. */
+    void (*ct_set_zone_timeout_policy)(const char *dp_type, uint16_t zone,
+                                       struct simap *timeout_policy);
+
+    /* Deletes the timeout policy associated with 'zone' in datapath type
+     * 'dp_type'. */
+    void (*ct_del_zone_timeout_policy)(const char *dp_type, uint16_t zone);
 };
 
 extern const struct ofproto_class ofproto_dpif_class;

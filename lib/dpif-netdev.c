@@ -1517,8 +1517,17 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
                  struct dp_netdev **dpp)
     OVS_REQUIRES(dp_netdev_mutex)
 {
+    static struct ovsthread_once tsc_freq_check = OVSTHREAD_ONCE_INITIALIZER;
     struct dp_netdev *dp;
     int error;
+
+    /* Avoid estimating TSC frequency for dummy datapath to not slow down
+     * unit tests. */
+    if (!dpif_netdev_class_is_dummy(class)
+        && ovsthread_once_start(&tsc_freq_check)) {
+        pmd_perf_estimate_tsc_frequency();
+        ovsthread_once_done(&tsc_freq_check);
+    }
 
     dp = xzalloc(sizeof *dp);
     shash_add(&dp_netdevs, name, dp);
@@ -1862,7 +1871,8 @@ do_add_port(struct dp_netdev *dp, const char *devname, const char *type,
 
     reconfigure_datapath(dp);
 
-    return 0;
+    /* Check that port was successfully configured. */
+    return dp_netdev_lookup_port(dp, port_no) ? 0 : EINVAL;
 }
 
 static int
@@ -4260,7 +4270,7 @@ dp_netdev_process_rxq_port(struct dp_netdev_pmd_thread *pmd,
         /* At least one packet received. */
         *recirc_depth_get() = 0;
         pmd_thread_ctx_time_update(pmd);
-        batch_cnt = batch.count;
+        batch_cnt = dp_packet_batch_size(&batch);
         if (pmd_perf_metrics_enabled(pmd)) {
             /* Update batch histogram. */
             s->current.batches++;
@@ -4735,9 +4745,16 @@ reconfigure_pmd_threads(struct dp_netdev *dp)
     FOR_EACH_CORE_ON_DUMP(core, pmd_cores) {
         pmd = dp_netdev_get_pmd(dp, core->core_id);
         if (!pmd) {
+            struct ds name = DS_EMPTY_INITIALIZER;
+
             pmd = xzalloc(sizeof *pmd);
             dp_netdev_configure_pmd(pmd, dp, core->core_id, core->numa_id);
-            pmd->thread = ovs_thread_create("pmd", pmd_thread_main, pmd);
+
+            ds_put_format(&name, "pmd-c%02d/id:", core->core_id);
+            pmd->thread = ovs_thread_create(ds_cstr(&name),
+                                            pmd_thread_main, pmd);
+            ds_destroy(&name);
+
             VLOG_INFO("PMD thread on numa_id: %d, core id: %2d created.",
                       pmd->numa_id, pmd->core_id);
             changed = true;
@@ -6291,7 +6308,7 @@ packet_batch_per_flow_update(struct packet_batch_per_flow *batch,
 {
     batch->byte_count += dp_packet_size(packet);
     batch->tcp_flags |= tcp_flags;
-    batch->array.packets[batch->array.count++] = packet;
+    dp_packet_batch_add(&batch->array, packet);
 }
 
 static inline void
@@ -6313,7 +6330,8 @@ packet_batch_per_flow_execute(struct packet_batch_per_flow *batch,
     struct dp_netdev_actions *actions;
     struct dp_netdev_flow *flow = batch->flow;
 
-    dp_netdev_flow_used(flow, batch->array.count, batch->byte_count,
+    dp_netdev_flow_used(flow, dp_packet_batch_size(&batch->array),
+                        batch->byte_count,
                         batch->tcp_flags, pmd->ctx.now / 1000);
 
     actions = dp_netdev_flow_get_actions(flow);
@@ -6583,6 +6601,7 @@ handle_packet_upcall(struct dp_netdev_pmd_thread *pmd,
 
     match.tun_md.valid = false;
     miniflow_expand(&key->mf, &match.flow);
+    memset(&match.wc, 0, sizeof match.wc);
 
     ofpbuf_clear(actions);
     ofpbuf_clear(put_actions);
@@ -7204,6 +7223,10 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
                 /* Silently ignored, as userspace datapath does not generate
                  * netlink events. */
                 break;
+            case OVS_CT_ATTR_TIMEOUT:
+                /* Userspace datapath does not support customized timeout
+                 * policy yet. */
+                break;
             case OVS_CT_ATTR_NAT: {
                 const struct nlattr *b_nest;
                 unsigned int left_nest;
@@ -7423,6 +7446,22 @@ dpif_netdev_ct_get_nconns(struct dpif *dpif, uint32_t *nconns)
 }
 
 static int
+dpif_netdev_ct_set_tcp_seq_chk(struct dpif *dpif, bool enabled)
+{
+    struct dp_netdev *dp = get_dp_netdev(dpif);
+
+    return conntrack_set_tcp_seq_chk(dp->conntrack, enabled);
+}
+
+static int
+dpif_netdev_ct_get_tcp_seq_chk(struct dpif *dpif, bool *enabled)
+{
+    struct dp_netdev *dp = get_dp_netdev(dpif);
+    *enabled = conntrack_get_tcp_seq_chk(dp->conntrack);
+    return 0;
+}
+
+static int
 dpif_netdev_ipf_set_enabled(struct dpif *dpif, bool v6, bool enable)
 {
     struct dp_netdev *dp = get_dp_netdev(dpif);
@@ -7526,9 +7565,18 @@ const struct dpif_class dpif_netdev_class = {
     dpif_netdev_ct_set_maxconns,
     dpif_netdev_ct_get_maxconns,
     dpif_netdev_ct_get_nconns,
+    dpif_netdev_ct_set_tcp_seq_chk,
+    dpif_netdev_ct_get_tcp_seq_chk,
     NULL,                       /* ct_set_limits */
     NULL,                       /* ct_get_limits */
     NULL,                       /* ct_del_limits */
+    NULL,                       /* ct_set_timeout_policy */
+    NULL,                       /* ct_get_timeout_policy */
+    NULL,                       /* ct_del_timeout_policy */
+    NULL,                       /* ct_timeout_policy_dump_start */
+    NULL,                       /* ct_timeout_policy_dump_next */
+    NULL,                       /* ct_timeout_policy_dump_done */
+    NULL,                       /* ct_get_timeout_policy_name */
     dpif_netdev_ipf_set_enabled,
     dpif_netdev_ipf_set_min_frag,
     dpif_netdev_ipf_set_max_nfrags,

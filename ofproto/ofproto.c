@@ -306,6 +306,8 @@ struct ovs_mutex ofproto_mutex = OVS_MUTEX_INITIALIZER;
 
 unsigned ofproto_flow_limit = OFPROTO_FLOW_LIMIT_DEFAULT;
 unsigned ofproto_max_idle = OFPROTO_MAX_IDLE_DEFAULT;
+unsigned ofproto_max_revalidator = OFPROTO_MAX_REVALIDATOR_DEFAULT;
+unsigned ofproto_min_revalidate_pps = OFPROTO_MIN_REVALIDATE_PPS_DEFAULT;
 
 size_t n_handlers, n_revalidators;
 
@@ -702,6 +704,23 @@ ofproto_set_max_idle(unsigned max_idle)
     ofproto_max_idle = max_idle;
 }
 
+/* Sets the maximum allowed revalidator timeout. */
+void
+ofproto_set_max_revalidator(unsigned max_revalidator)
+{
+    if (max_revalidator >= 100) {
+        ofproto_max_revalidator = max_revalidator;
+    }
+}
+
+/* Set minimum pps that flow must have in order to be revalidated when
+ * revalidation duration exceeds half of max-revalidator config variable. */
+void
+ofproto_set_min_revalidate_pps(unsigned min_revalidate_pps)
+{
+    ofproto_min_revalidate_pps = min_revalidate_pps ? min_revalidate_pps : 1;
+}
+
 /* If forward_bpdu is true, the NORMAL action will forward frames with
  * reserved (e.g. STP) destination Ethernet addresses. if forward_bpdu is false,
  * the NORMAL action will drop these frames. */
@@ -933,6 +952,32 @@ bool
 ofproto_get_flow_restore_wait(void)
 {
     return flow_restore_wait;
+}
+
+/* Connection tracking configuration. */
+void
+ofproto_ct_set_zone_timeout_policy(const char *datapath_type, uint16_t zone_id,
+                                   struct simap *timeout_policy)
+{
+    datapath_type = ofproto_normalize_type(datapath_type);
+    const struct ofproto_class *class = ofproto_class_find__(datapath_type);
+
+    if (class->ct_set_zone_timeout_policy) {
+        class->ct_set_zone_timeout_policy(datapath_type, zone_id,
+                                          timeout_policy);
+    }
+}
+
+void
+ofproto_ct_del_zone_timeout_policy(const char *datapath_type, uint16_t zone_id)
+{
+    datapath_type = ofproto_normalize_type(datapath_type);
+    const struct ofproto_class *class = ofproto_class_find__(datapath_type);
+
+    if (class->ct_del_zone_timeout_policy) {
+        class->ct_del_zone_timeout_policy(datapath_type, zone_id);
+    }
+
 }
 
 
