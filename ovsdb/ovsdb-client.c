@@ -1627,7 +1627,9 @@ is_database_clustered(struct jsonrpc *rpc, const char *database)
 
     const struct json *row = parse_database_info_reply(
         reply, jsonrpc_get_name(rpc), database, NULL);
-    return !strcmp(parse_string_column(row, "model"), "clustered");
+    bool clustered = !strcmp(parse_string_column(row, "model"), "clustered");
+    jsonrpc_msg_destroy(reply);
+    return clustered;
 }
 
 static void
@@ -1654,6 +1656,7 @@ do_convert(struct jsonrpc *rpc, const char *database_ OVS_UNUSED,
                             ovsdb_schema_to_json(new_schema)), NULL);
     check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
     jsonrpc_msg_destroy(reply);
+    ovsdb_schema_destroy(new_schema);
 }
 
 static void

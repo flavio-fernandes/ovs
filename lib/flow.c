@@ -343,7 +343,6 @@ parse_vlan(const void **datap, size_t *sizep, union flow_vlan_hdr *vlan_hdrs)
 {
     const ovs_be16 *eth_type;
 
-    memset(vlan_hdrs, 0, sizeof(union flow_vlan_hdr) * FLOW_MAX_VLAN_HEADERS);
     data_pull(datap, sizep, ETH_ADDR_LEN * 2);
 
     eth_type = *datap;
@@ -354,6 +353,7 @@ parse_vlan(const void **datap, size_t *sizep, union flow_vlan_hdr *vlan_hdrs)
             break;
         }
 
+        memset(vlan_hdrs + n, 0, sizeof(union flow_vlan_hdr));
         const ovs_16aligned_be32 *qp = data_pull(datap, sizep, sizeof *qp);
         vlan_hdrs[n].qtag = get_16aligned_be32(qp);
         vlan_hdrs[n].tci |= htons(VLAN_CFI);
@@ -699,7 +699,7 @@ ipv6_sanity_check(const struct ovs_16aligned_ip6_hdr *nh, size_t size)
         return false;
     }
     /* Jumbo Payload option not supported yet. */
-    if (OVS_UNLIKELY(size - plen > UINT8_MAX)) {
+    if (OVS_UNLIKELY(size - (plen + IPV6_HEADER_LEN) > UINT8_MAX)) {
         return false;
     }
 
@@ -786,20 +786,17 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
         ct_nw_proto_p = miniflow_pointer(mf, ct_nw_proto);
         miniflow_push_uint8(mf, ct_nw_proto, 0);
         miniflow_push_uint16(mf, ct_zone, md->ct_zone);
-    } else if (md->recirc_id) {
-        miniflow_push_uint32(mf, recirc_id, md->recirc_id);
-        miniflow_pad_to_64(mf, recirc_id);
-    }
-
-    if (md->ct_state) {
         miniflow_push_uint32(mf, ct_mark, md->ct_mark);
         miniflow_push_be32(mf, packet_type, packet_type);
-
         if (!ovs_u128_is_zero(md->ct_label)) {
             miniflow_push_words(mf, ct_label, &md->ct_label,
                                 sizeof md->ct_label / sizeof(uint64_t));
         }
     } else {
+        if (md->recirc_id) {
+            miniflow_push_uint32(mf, recirc_id, md->recirc_id);
+            miniflow_pad_to_64(mf, recirc_id);
+        }
         miniflow_pad_from_64(mf, packet_type);
         miniflow_push_be32(mf, packet_type, packet_type);
     }
@@ -1101,7 +1098,7 @@ parse_tcp_flags(struct dp_packet *packet)
     ovs_be16 dl_type;
     uint8_t nw_frag = 0, nw_proto = 0;
 
-    if (packet->packet_type != htonl(PT_ETH)) {
+    if (!dp_packet_is_eth(packet)) {
         return 0;
     }
 

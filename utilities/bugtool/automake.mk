@@ -1,4 +1,3 @@
-if HAVE_PYTHON2
 sbin_SCRIPTS += utilities/bugtool/ovs-bugtool
 CLEANFILES += utilities/bugtool/ovs-bugtool
 
@@ -32,8 +31,7 @@ bugtoolpluginsdir = $(pkgdatadir)/bugtool-plugins
 INSTALL_DATA_LOCAL += bugtool-install-data-local
 bugtool-install-data-local:
 	for plugin in $(bugtool_plugins); do \
-	  stem=`echo "$$plugin" | sed 's,ovn/,,'`; \
-	  stem=`echo "$$stem" | sed 's,utilities/bugtool/plugins/,,'`; \
+	  stem=`echo "$$plugin" | sed 's,utilities/bugtool/plugins/,,'`; \
 	  dir=`expr "$$stem" : '\(.*\)/[^/]*$$'`; \
 	  $(MKDIR_P) "$(DESTDIR)$(bugtoolpluginsdir)/$$dir"; \
 	  $(INSTALL_DATA) "$(srcdir)/$$plugin" "$(DESTDIR)$(bugtoolpluginsdir)/$$stem"; \
@@ -42,19 +40,16 @@ bugtool-install-data-local:
 UNINSTALL_LOCAL += bugtool-uninstall-local
 bugtool-uninstall-local:
 	for plugin in $(bugtool_plugins); do \
-	  stem=`echo "$$plugin" | sed 's,ovn/,,'`; \
-	  stem=`echo "$$stem" | sed 's,utilities/bugtool/plugins/,,'`; \
+	  stem=`echo "$$plugin" | sed 's,utilities/bugtool/plugins/,,'`; \
 	  rm -f "$(DESTDIR)$(bugtoolpluginsdir)/$$stem"; \
 	done
 	for plugin in $(bugtool_plugins); do \
-	  stem=`echo "$$plugin" | sed 's,ovn/,,'`; \
-	  stem=`echo "$$stem" | sed 's,utilities/bugtool/plugins/,,'`; \
+	  stem=`echo "$$plugin" | sed 's,utilities/bugtool/plugins/,,'`; \
 	  dir=`expr "$$stem" : '\(.*\)/[^/]*$$'`; \
 	  if [ ! -z "$$dir" ]; then \
 	    rm -rf "$(DESTDIR)$(bugtoolpluginsdir)/$$dir"; \
 	  fi \
 	done; exit 0
-endif
 
 EXTRA_DIST += \
 	$(bugtool_plugins) \
