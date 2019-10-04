@@ -1,15 +1,5 @@
 # Generated automatically -- do not modify!    -*- buffer-read-only: t -*-
 
-ovn/utilities/ovn-detrace.1: \
-	ovn/utilities/ovn-detrace.1.in \
-	lib/common-syn.man \
-	lib/common.man \
-	lib/ovs.tmac
-ovn/utilities/ovn-detrace.1.in:
-lib/common-syn.man:
-lib/common.man:
-lib/ovs.tmac:
-
 ovn/utilities/ovn-sbctl.8: \
 	ovn/utilities/ovn-sbctl.8.in \
 	lib/common.man \
@@ -125,12 +115,6 @@ lib/ovs.tmac:
 lib/vlog-syn.man:
 lib/vlog.man:
 ovsdb/ovsdb-schemas.man:
-
-utilities/bugtool/ovs-bugtool.8: \
-	utilities/bugtool/ovs-bugtool.8.in \
-	lib/ovs.tmac
-utilities/bugtool/ovs-bugtool.8.in:
-lib/ovs.tmac:
 
 utilities/ovs-appctl.8: \
 	utilities/ovs-appctl.8.in \
