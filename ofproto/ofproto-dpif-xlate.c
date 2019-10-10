@@ -4027,10 +4027,14 @@ is_neighbor_reply_correct(const struct xlate_ctx *ctx, const struct flow *flow)
         HMAP_FOR_EACH (port, ofp_node, &ctx->xbridge->xports) {
             error = netdev_get_addr_list(port->netdev, &ip_addr,
                                          &mask, &n_in6);
-            if (!error && is_neighbor_reply_matched(flow, ip_addr)) {
-                /* Found a match. */
-                ret = true;
-                break;
+            if (!error) {
+                ret = is_neighbor_reply_matched(flow, ip_addr);
+                free(ip_addr);
+                free(mask);
+                if (ret) {
+                   /* Found a match. */
+                   break;
+                }
             }
         }
     }
@@ -7338,6 +7342,26 @@ xlate_wc_finish(struct xlate_ctx *ctx)
     if (ctx->xin->flow.nw_frag & FLOW_NW_FRAG_LATER) {
         ctx->wc->masks.tp_src = 0;
         ctx->wc->masks.tp_dst = 0;
+    }
+
+    /* Clear flow wildcard bits for fields which are not present
+     * in the original packet header. These wildcards may get set
+     * due to push/set_field actions. This results into frequent
+     * invalidation of datapath flows by revalidator thread. */
+
+    /* Clear mpls label wc bits if original packet is non-mpls. */
+    if (!eth_type_mpls(ctx->xin->upcall_flow->dl_type)) {
+        for (i = 0; i < FLOW_MAX_MPLS_LABELS; i++) {
+            ctx->wc->masks.mpls_lse[i] = 0;
+        }
+    }
+    /* Clear vlan header wc bits if original packet does not have
+     * vlan header. */
+    for (i = 0; i < FLOW_MAX_VLAN_HEADERS; i++) {
+        if (!eth_type_vlan(ctx->xin->upcall_flow->vlans[i].tpid)) {
+            ctx->wc->masks.vlans[i].tpid = 0;
+            ctx->wc->masks.vlans[i].tci = 0;
+        }
     }
 }
 
