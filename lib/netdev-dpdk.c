@@ -47,6 +47,7 @@
 #include "dpdk.h"
 #include "dpif-netdev.h"
 #include "fatal-signal.h"
+#include "if-notifier.h"
 #include "netdev-provider.h"
 #include "netdev-vport.h"
 #include "odp-util.h"
@@ -86,12 +87,13 @@ COVERAGE_DEFINE(vhost_tx_contention);
  * The minimum mbuf size is limited to avoid scatter behaviour and drop in
  * performance for standard Ethernet MTU.
  */
-#define ETHER_HDR_MAX_LEN           (ETHER_HDR_LEN + ETHER_CRC_LEN \
+#define ETHER_HDR_MAX_LEN           (RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN \
                                      + (2 * VLAN_HEADER_LEN))
-#define MTU_TO_FRAME_LEN(mtu)       ((mtu) + ETHER_HDR_LEN + ETHER_CRC_LEN)
+#define MTU_TO_FRAME_LEN(mtu)       ((mtu) + RTE_ETHER_HDR_LEN + \
+                                     RTE_ETHER_CRC_LEN)
 #define MTU_TO_MAX_FRAME_LEN(mtu)   ((mtu) + ETHER_HDR_MAX_LEN)
 #define FRAME_LEN_TO_MTU(frame_len) ((frame_len)                    \
-                                     - ETHER_HDR_LEN - ETHER_CRC_LEN)
+                                     - RTE_ETHER_HDR_LEN - RTE_ETHER_CRC_LEN)
 #define NETDEV_DPDK_MBUF_ALIGN      1024
 #define NETDEV_DPDK_MAX_PKT_LEN     9728
 
@@ -382,6 +384,8 @@ struct netdev_dpdk {
         bool attached;
         /* If true, rte_eth_dev_start() was successfully called */
         bool started;
+        bool reset_needed;
+        /* 1 pad byte here. */
         struct eth_addr hwaddr;
         int mtu;
         int socket_id;
@@ -602,7 +606,7 @@ dpdk_calculate_mbufs(struct netdev_dpdk *dev, int mtu, bool per_port_mp)
          * can change dynamically at runtime. For now, use this rough
          * heurisitic.
          */
-        if (mtu >= ETHER_MTU) {
+        if (mtu >= RTE_ETHER_MTU) {
             n_mbufs = MAX_NB_MBUF;
         } else {
             n_mbufs = MIN_NB_MBUF;
@@ -917,7 +921,7 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
      * scatter to support jumbo RX.
      * Setting scatter for the device is done after checking for
      * scatter support in the device capabilites. */
-    if (dev->mtu > ETHER_MTU) {
+    if (dev->mtu > RTE_ETHER_MTU) {
         if (dev->hw_ol_features & NETDEV_RX_HW_SCATTER) {
             conf.rxmode.offloads |= DEV_RX_OFFLOAD_SCATTER;
         }
@@ -1029,7 +1033,7 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
 {
     struct rte_pktmbuf_pool_private *mbp_priv;
     struct rte_eth_dev_info info;
-    struct ether_addr eth_addr;
+    struct rte_ether_addr eth_addr;
     int diag;
     int n_rxq, n_txq;
     uint32_t rx_chksm_offload_capa = DEV_RX_OFFLOAD_UDP_CKSUM |
@@ -1154,12 +1158,14 @@ common_construct(struct netdev *netdev, dpdk_port_t port_no,
     dev->port_id = port_no;
     dev->type = type;
     dev->flags = 0;
-    dev->requested_mtu = ETHER_MTU;
+    dev->requested_mtu = RTE_ETHER_MTU;
     dev->max_packet_len = MTU_TO_FRAME_LEN(dev->mtu);
     dev->requested_lsc_interrupt_mode = 0;
     ovsrcu_index_init(&dev->vid, -1);
     dev->vhost_reconfigured = false;
     dev->attached = false;
+    dev->started = false;
+    dev->reset_needed = false;
 
     ovsrcu_init(&dev->qos_conf, NULL);
 
@@ -1683,7 +1689,7 @@ netdev_dpdk_get_port_by_mac(const char *mac_str)
     }
 
     RTE_ETH_FOREACH_DEV (port_id) {
-        struct ether_addr ea;
+        struct rte_ether_addr ea;
 
         rte_eth_macaddr_get(port_id, &ea);
         memcpy(port_mac.ea, ea.addr_bytes, ETH_ADDR_LEN);
@@ -1756,6 +1762,34 @@ netdev_dpdk_process_devargs(struct netdev_dpdk *dev,
     }
 
     return new_port_id;
+}
+
+static int
+dpdk_eth_event_callback(dpdk_port_t port_id, enum rte_eth_event_type type,
+                        void *param OVS_UNUSED, void *ret_param OVS_UNUSED)
+{
+    struct netdev_dpdk *dev;
+
+    switch ((int) type) {
+    case RTE_ETH_EVENT_INTR_RESET:
+        ovs_mutex_lock(&dpdk_mutex);
+        dev = netdev_dpdk_lookup_by_port_id(port_id);
+        if (dev) {
+            ovs_mutex_lock(&dev->mutex);
+            dev->reset_needed = true;
+            netdev_request_reconfigure(&dev->up);
+            VLOG_DBG_RL(&rl, "%s: Device reset requested.",
+                        netdev_get_name(&dev->up));
+            ovs_mutex_unlock(&dev->mutex);
+        }
+        ovs_mutex_unlock(&dpdk_mutex);
+        break;
+
+    default:
+        /* Ignore all other types. */
+        break;
+   }
+   return 0;
 }
 
 static void
@@ -2086,10 +2120,10 @@ netdev_dpdk_policer_pkt_handle(struct rte_meter_srtcm *meter,
                                struct rte_meter_srtcm_profile *profile,
                                struct rte_mbuf *pkt, uint64_t time)
 {
-    uint32_t pkt_len = rte_pktmbuf_pkt_len(pkt) - sizeof(struct ether_hdr);
+    uint32_t pkt_len = rte_pktmbuf_pkt_len(pkt) - sizeof(struct rte_ether_hdr);
 
     return rte_meter_srtcm_color_blind_check(meter, profile, time, pkt_len) ==
-                                             e_RTE_METER_GREEN;
+                                             RTE_COLOR_GREEN;
 }
 
 static int
@@ -2173,7 +2207,6 @@ netdev_dpdk_vhost_update_rx_counters(struct netdev_dpdk *dev,
                                      struct dp_packet **packets, int count,
                                      int qos_drops)
 {
-    struct netdev_dpdk_sw_stats *sw_stats = dev->sw_stats;
     struct netdev_stats *stats = &dev->stats;
     struct dp_packet *packet;
     unsigned int packet_size;
@@ -2204,7 +2237,9 @@ netdev_dpdk_vhost_update_rx_counters(struct netdev_dpdk *dev,
         stats->rx_bytes += packet_size;
     }
 
-    sw_stats->rx_qos_drops += qos_drops;
+    if (OVS_UNLIKELY(qos_drops)) {
+        dev->sw_stats->rx_qos_drops += qos_drops;
+    }
 }
 
 /*
@@ -2368,7 +2403,6 @@ netdev_dpdk_vhost_update_tx_counters(struct netdev_dpdk *dev,
                                      int attempted,
                                      struct netdev_dpdk_sw_stats *sw_stats_add)
 {
-    struct netdev_dpdk_sw_stats *sw_stats = dev->sw_stats;
     int dropped = sw_stats_add->tx_mtu_exceeded_drops +
                   sw_stats_add->tx_qos_drops +
                   sw_stats_add->tx_failure_drops;
@@ -2383,10 +2417,14 @@ netdev_dpdk_vhost_update_tx_counters(struct netdev_dpdk *dev,
         stats->tx_bytes += dp_packet_size(packets[i]);
     }
 
-    sw_stats->tx_retries            += sw_stats_add->tx_retries;
-    sw_stats->tx_failure_drops      += sw_stats_add->tx_failure_drops;
-    sw_stats->tx_mtu_exceeded_drops += sw_stats_add->tx_mtu_exceeded_drops;
-    sw_stats->tx_qos_drops          += sw_stats_add->tx_qos_drops;
+    if (OVS_UNLIKELY(dropped || sw_stats_add->tx_retries)) {
+        struct netdev_dpdk_sw_stats *sw_stats = dev->sw_stats;
+
+        sw_stats->tx_retries            += sw_stats_add->tx_retries;
+        sw_stats->tx_failure_drops      += sw_stats_add->tx_failure_drops;
+        sw_stats->tx_mtu_exceeded_drops += sw_stats_add->tx_mtu_exceeded_drops;
+        sw_stats->tx_qos_drops          += sw_stats_add->tx_qos_drops;
+    }
 }
 
 static void
@@ -2675,7 +2713,7 @@ netdev_dpdk_set_mtu(struct netdev *netdev, int mtu)
      * a method to retrieve the upper bound MTU for a given device.
      */
     if (MTU_TO_MAX_FRAME_LEN(mtu) > NETDEV_DPDK_MAX_PKT_LEN
-        || mtu < ETHER_MIN_MTU) {
+        || mtu < RTE_ETHER_MIN_MTU) {
         VLOG_WARN("%s: unsupported MTU %d\n", dev->up.name, mtu);
         return EINVAL;
     }
@@ -3876,6 +3914,8 @@ netdev_dpdk_class_init(void)
     /* This function can be called for different classes.  The initialization
      * needs to be done only once */
     if (ovsthread_once_start(&once)) {
+        int ret;
+
         ovs_thread_create("dpdk_watchdog", dpdk_watchdog, NULL);
         unixctl_command_register("netdev-dpdk/set-admin-state",
                                  "[netdev] up|down", 1, 2,
@@ -3888,6 +3928,14 @@ netdev_dpdk_class_init(void)
         unixctl_command_register("netdev-dpdk/get-mempool-info",
                                  "[netdev]", 0, 1,
                                  netdev_dpdk_get_mempool_info, NULL);
+
+        ret = rte_eth_dev_callback_register(RTE_ETH_ALL,
+                                            RTE_ETH_EVENT_INTR_RESET,
+                                            dpdk_eth_event_callback, NULL);
+        if (ret != 0) {
+            VLOG_ERR("Ethernet device callback register error: %s",
+                     rte_strerror(-ret));
+        }
 
         ovsthread_once_done(&once);
     }
@@ -4001,6 +4049,10 @@ netdev_dpdk_ring_construct(struct netdev *netdev)
 {
     dpdk_port_t port_no = 0;
     int err = 0;
+
+    VLOG_WARN_ONCE("dpdkr a.k.a. ring ports are considered deprecated.  "
+                   "Please migrate to virtio-based interfaces, e.g. "
+                   "dpdkvhostuserclient ports, net_virtio_user DPDK vdev.");
 
     ovs_mutex_lock(&dpdk_mutex);
 
@@ -4249,13 +4301,20 @@ netdev_dpdk_reconfigure(struct netdev *netdev)
         && dev->rxq_size == dev->requested_rxq_size
         && dev->txq_size == dev->requested_txq_size
         && dev->socket_id == dev->requested_socket_id
-        && dev->started) {
+        && dev->started && !dev->reset_needed) {
         /* Reconfiguration is unnecessary */
 
         goto out;
     }
 
-    rte_eth_dev_stop(dev->port_id);
+    if (dev->reset_needed) {
+        rte_eth_dev_reset(dev->port_id);
+        if_notifier_manual_report();
+        dev->reset_needed = false;
+    } else {
+        rte_eth_dev_stop(dev->port_id);
+    }
+
     dev->started = false;
 
     err = netdev_dpdk_mempool_configure(dev);
