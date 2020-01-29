@@ -65,6 +65,7 @@
 #include "system-stats.h"
 #include "timeval.h"
 #include "tnl-ports.h"
+#include "userspace-tso.h"
 #include "util.h"
 #include "unixctl.h"
 #include "lib/vswitch-idl.h"
@@ -2863,8 +2864,6 @@ port_refresh_rstp_status(struct port *port)
     struct ofproto *ofproto = port->bridge->ofproto;
     struct iface *iface;
     struct ofproto_port_rstp_status status;
-    const char *keys[4];
-    int64_t int_values[4];
     struct smap smap;
 
     if (port_is_synthetic(port)) {
@@ -2884,7 +2883,6 @@ port_refresh_rstp_status(struct port *port)
 
     if (!status.enabled) {
         ovsrec_port_set_rstp_status(port->cfg, NULL);
-        ovsrec_port_set_rstp_statistics(port->cfg, NULL, NULL, 0);
         return;
     }
     /* Set Status column. */
@@ -2905,6 +2903,36 @@ port_refresh_rstp_status(struct port *port)
 
     ovsrec_port_set_rstp_status(port->cfg, &smap);
     smap_destroy(&smap);
+}
+
+static void
+port_refresh_rstp_stats(struct port *port)
+{
+    struct ofproto *ofproto = port->bridge->ofproto;
+    struct iface *iface;
+    struct ofproto_port_rstp_status status;
+    const char *keys[4];
+    int64_t int_values[4];
+
+    if (port_is_synthetic(port)) {
+        return;
+    }
+
+    /* RSTP doesn't currently support bonds. */
+    if (!ovs_list_is_singleton(&port->ifaces)) {
+        ovsrec_port_set_rstp_statistics(port->cfg, NULL, NULL, 0);
+        return;
+    }
+
+    iface = CONTAINER_OF(ovs_list_front(&port->ifaces), struct iface, port_elem);
+    if (ofproto_port_get_rstp_status(ofproto, iface->ofp_port, &status)) {
+        return;
+    }
+
+    if (!status.enabled) {
+        ovsrec_port_set_rstp_statistics(port->cfg, NULL, NULL, 0);
+        return;
+    }
 
     /* Set Statistics column. */
     keys[0] = "rstp_tx_count";
@@ -3073,6 +3101,7 @@ run_stats_update(void)
                         iface_refresh_stats(iface);
                     }
                     port_refresh_stp_stats(port);
+                    port_refresh_rstp_stats(port);
                 }
                 HMAP_FOR_EACH (m, hmap_node, &br->mirrors) {
                     mirror_refresh_stats(m);
@@ -3257,6 +3286,7 @@ bridge_run(void)
     if (cfg) {
         netdev_set_flow_api_enabled(&cfg->other_config);
         dpdk_init(&cfg->other_config);
+        userspace_tso_init(&cfg->other_config);
     }
 
     /* Initialize the ofproto library.  This only needs to run once, but

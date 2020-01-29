@@ -128,6 +128,7 @@ Ed Swierk                          eswierk@skyportsystems.com
 Edouard Bourguignon                madko@linuxed.net
 Eelco Chaudron                     echaudro@redhat.com
 Eli Britstein                      elibr@mellanox.com
+Emma Finn                          emma.finn@intel.com
 Eric Lapointe                      elapointe@corsa.com
 Esteban Rodriguez Betancourt       estebarb@hpe.com
 Aymerich Edward                    edward.aymerich@hpe.com
@@ -215,12 +216,13 @@ Kevin Traynor                      kevin.traynor@intel.com
 Khem Raj                           raj.khem@gmail.com
 Kmindg G                           kmindg@gmail.com
 Kris Murphy                        kriskend@linux.vnet.ibm.com
+Krishna Kolakaluri                 kkolakaluri@plume.com
 Krishna Kondaka                    kkondaka@vmware.com
 Kyle Mestery                       mestery@mestery.com
 Kyle Simpson                       kyleandrew.simpson@gmail.com
 Kyle Upton                         kupton@baymicrosystems.com
 Lance Yang                         lance.yang@arm.com
-Lance Richardson                   lrichard@redhat.com
+Lance Richardson                   lance.richardson@broadcom.com
 Lars Kellogg-Stedman               lars@redhat.com
 Lei Huang                          huang.f.lei@gmail.com
 Leif Madsen                        lmadsen@redhat.com
