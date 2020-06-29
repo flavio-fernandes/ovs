@@ -152,6 +152,8 @@ ovs-appctl time/stop
 ovs-appctl time/warp 100
 ovs-appctl lacp/show > lacp.txt
 ovs-appctl bond/show > bond.txt
+# Check that lb_output is not enabled by default.
+AT_CHECK([grep -q '^lb_output action: disabled' bond.txt])
 (
 for i in `seq 0 255` ;
     do
@@ -164,9 +166,32 @@ AT_CHECK([ovs-appctl dpif/dump-flows br0 |grep tcp > br0_flows.txt])
 AT_CHECK([ovs-appctl dpif/dump-flows br1 |grep tcp > br1_flows.txt])
 # Make sure there is resonable distribution to all three ports.
 # We don't want to make this check precise, in case hash function changes.
-AT_CHECK([test `grep in_port.4 br1_flows.txt |wc -l` -gt 24])
-AT_CHECK([test `grep in_port.5 br1_flows.txt |wc -l` -gt 24])
-AT_CHECK([test `grep in_port.6 br1_flows.txt |wc -l` -gt 24])
+AT_CHECK([test $(grep -c in_port.4 br1_flows.txt) -gt 24])
+AT_CHECK([test $(grep -c in_port.5 br1_flows.txt) -gt 24])
+AT_CHECK([test $(grep -c in_port.6 br1_flows.txt) -gt 24])
+# Check that bonding is doing dp_hash.
+AT_CHECK([grep -q dp_hash br0_flows.txt])
+# Enabling lb_output.
+AT_CHECK([ovs-vsctl set Port bond0 other_config:lb-output-action=true])
+OVS_WAIT_UNTIL([ovs-appctl bond/show | grep -q '^lb_output action: enabled'])
+ovs-appctl time/warp 10000 500
+ovs-appctl revalidator/wait
+OVS_WAIT_WHILE([ovs-appctl dpif/dump-flows br1 | grep -q tcp])
+(
+for i in $(seq 256) ;
+    do
+    pkt="in_port(7),eth(src=50:54:00:00:00:05,dst=50:54:00:00:01:00),eth_type(0x0800),ipv4(src=10.0.0.2,dst=10.0.0.1,proto=6,tos=0,ttl=64,frag=no),tcp(src=8,dst=$i),tcp_flags(ack)"
+    AT_CHECK([ovs-appctl netdev-dummy/receive p7 $pkt])
+    done
+)
+ovs-appctl time/warp 300 100
+AT_CHECK([ovs-appctl dpif/dump-flows br0 | grep tcp > br0_flows.txt])
+AT_CHECK([ovs-appctl dpif/dump-flows br1 | grep tcp > br1_flows.txt])
+# Make sure there is resonable distribution to all three ports, again.
+AT_CHECK([test $(grep -c in_port.4 br1_flows.txt) -gt 24])
+AT_CHECK([test $(grep -c in_port.5 br1_flows.txt) -gt 24])
+AT_CHECK([test $(grep -c in_port.6 br1_flows.txt) -gt 24])
+AT_CHECK([grep -q lb_output br0_flows.txt])
 
 OVS_VSWITCHD_STOP()
 AT_CLEANUP
@@ -10677,6 +10702,42 @@ AT_CHECK([tail -1 stdout], [0],
 ])
 
 AT_CHECK([ovs-appctl ofproto/trace br0 'in_port=1,tcp' --ct-next 'trk,est' --ct-next 'trk,est' ], [0], [stdout])
+AT_CHECK([tail -1 stdout], [0],
+  [Datapath actions: 3
+])
+
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([ofproto-dpif - nat - ofproto/trace])
+OVS_VSWITCHD_START
+
+add_of_ports br0 1 2 3
+
+flow="in_port=1,udp,nw_src=1.1.1.1,nw_dst=1.1.1.2,udp_src=100,udp_dst=200"
+AT_DATA([flows.txt], [dnl
+table=0,priority=100,ip,nw_src=1.1.1.1,ct_state=-trk,action=ct(commit,nat(src=10.0.0.1-10.0.0.42:1000-1042),table=0)
+table=0,priority=100,udp,ct_state=+trk,nw_src=10.0.0.1,nw_dst=1.1.1.2,tp_src=1000,tp_dst=200,action=ct(commit,nat(dst=20.0.0.1-20.0.0.42:2000-2042),table=0)
+table=0,priority=100,udp,ct_state=+trk,nw_src=10.0.0.1,nw_dst=20.0.0.1,tp_src=1000,tp_dst=2000,action=3
+table=0,priority=90,ip,ct_state=+trk,action=2
+])
+AT_CHECK([ovs-ofctl del-flows br0])
+AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
+AT_CHECK([ovs-appctl ofproto/trace br0 "$flow"], [0], [stdout])
+AT_CHECK([tail -1 stdout], [0],
+  [Datapath actions: 3
+])
+
+flow="in_port=1,udp6,ipv6_src=1::1,ipv6_dst=1::2,udp_src=100,udp_dst=200"
+AT_DATA([flows.txt], [dnl
+table=0,priority=100,ip6,ipv6_src=1::1,ct_state=-trk,action=ct(commit,nat(src=[[10::1]]-[[10::42]]:1000-1042),table=0)
+table=0,priority=100,udp6,ct_state=+trk,ipv6_src=10::1,ipv6_dst=1::2,tp_src=1000,tp_dst=200,action=ct(commit,nat(dst=[[20::1]]-[[20::42]]:2000-2042),table=0)
+table=0,priority=100,udp6,ct_state=+trk,ipv6_src=10::1,ipv6_dst=20::1,tp_src=1000,tp_dst=2000,action=3
+table=0,priority=90,ip6,ct_state=+trk,action=2
+])
+AT_CHECK([ovs-ofctl del-flows br0])
+AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
+AT_CHECK([ovs-appctl ofproto/trace br0 "$flow"], [0], [stdout])
 AT_CHECK([tail -1 stdout], [0],
   [Datapath actions: 3
 ])

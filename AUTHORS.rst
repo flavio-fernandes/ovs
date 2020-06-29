@@ -357,6 +357,7 @@ Shu Shen                           shu.shen@radisys.com
 Simon Horman                       horms@verge.net.au
 Simon Horman                       simon.horman@netronome.com
 Sorin Vinturis                     svinturis@cloudbasesolutions.com
+Sriharsha Basavapatna              sriharsha.basavapatna@broadcom.com
 Steffen Gebert                     steffen.gebert@informatik.uni-wuerzburg.de
 Sten Spans                         sten@blinkenlights.nl
 Stephane A. Sezer                  sas@cd80.net
@@ -563,6 +564,7 @@ Krishna Miriyala                miriyalak@vmware.com
 Krishna Mohan Elluru            elluru.kri.mohan@hpe.com
 László Sürü                     laszlo.suru@ericsson.com
 Len Gao                         leng@vmware.com
+Linhaifeng                      haifeng.lin@huawei.com
 Logan Rosen                     logatronico@gmail.com
 Luca Falavigna                  dktrkranz@debian.org
 Luiz Henrique Ozaki             luiz.ozaki@gmail.com

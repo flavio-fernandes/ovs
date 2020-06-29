@@ -119,6 +119,7 @@ odp_action_len(uint16_t type)
 
     switch ((enum ovs_action_attr) type) {
     case OVS_ACTION_ATTR_OUTPUT: return sizeof(uint32_t);
+    case OVS_ACTION_ATTR_LB_OUTPUT: return sizeof(uint32_t);
     case OVS_ACTION_ATTR_TRUNC: return sizeof(struct ovs_action_trunc);
     case OVS_ACTION_ATTR_TUNNEL_PUSH: return ATTR_LEN_VARIABLE;
     case OVS_ACTION_ATTR_TUNNEL_POP: return sizeof(uint32_t);
@@ -1131,6 +1132,9 @@ format_odp_action(struct ds *ds, const struct nlattr *a,
         break;
     case OVS_ACTION_ATTR_OUTPUT:
         odp_portno_name_format(portno_names, nl_attr_get_odp_port(a), ds);
+        break;
+    case OVS_ACTION_ATTR_LB_OUTPUT:
+        ds_put_format(ds, "lb_output(%"PRIu32")", nl_attr_get_u32(a));
         break;
     case OVS_ACTION_ATTR_TRUNC: {
         const struct ovs_action_trunc *trunc =
@@ -2301,6 +2305,16 @@ parse_odp_action__(struct parse_odp_context *context, const char *s,
 
         if (ovs_scan(s, "%"SCNi32"%n", &port, &n)) {
             nl_msg_put_u32(actions, OVS_ACTION_ATTR_OUTPUT, port);
+            return n;
+        }
+    }
+
+    {
+        uint32_t bond_id;
+        int n;
+
+        if (ovs_scan(s, "lb_output(%"PRIu32")%n", &bond_id, &n)) {
+            nl_msg_put_u32(actions, OVS_ACTION_ATTR_LB_OUTPUT, bond_id);
             return n;
         }
     }
@@ -6125,7 +6139,8 @@ odp_flow_key_from_flow__(const struct odp_flow_key_parms *parms,
 
     nl_msg_put_u32(buf, OVS_KEY_ATTR_PRIORITY, data->skb_priority);
 
-    if (flow_tnl_dst_is_set(&flow->tunnel) || export_mask) {
+    if (flow_tnl_dst_is_set(&flow->tunnel) ||
+        flow_tnl_src_is_set(&flow->tunnel) || export_mask) {
         tun_key_to_attr(buf, &data->tunnel, &parms->flow->tunnel,
                         parms->key_buf, NULL);
     }
@@ -6391,6 +6406,10 @@ odp_key_from_dp_packet(struct ofpbuf *buf, const struct dp_packet *packet)
     const struct pkt_metadata *md = &packet->md;
 
     nl_msg_put_u32(buf, OVS_KEY_ATTR_PRIORITY, md->skb_priority);
+
+    if (md->dp_hash) {
+        nl_msg_put_u32(buf, OVS_KEY_ATTR_DP_HASH, md->dp_hash);
+    }
 
     if (flow_tnl_dst_is_set(&md->tunnel)) {
         tun_key_to_attr(buf, &md->tunnel, &md->tunnel, NULL, NULL);
@@ -7992,7 +8011,8 @@ get_arp_key(const struct flow *flow, struct ovs_key_arp *arp)
 
     arp->arp_sip = flow->nw_src;
     arp->arp_tip = flow->nw_dst;
-    arp->arp_op = htons(flow->nw_proto);
+    arp->arp_op = flow->nw_proto == UINT8_MAX ?
+                  OVS_BE16_MAX : htons(flow->nw_proto);
     arp->arp_sha = flow->arp_sha;
     arp->arp_tha = flow->arp_tha;
 }

@@ -635,8 +635,10 @@ static void
 get_timeout_policy_from_ovsrec(struct simap *tp,
                                const struct ovsrec_ct_timeout_policy *tp_cfg)
 {
-    for (size_t i = 0; i < tp_cfg->n_timeouts; i++) {
-        simap_put(tp, tp_cfg->key_timeouts[i], tp_cfg->value_timeouts[i]);
+    if (tp_cfg) {
+        for (size_t i = 0; i < tp_cfg->n_timeouts; i++) {
+            simap_put(tp, tp_cfg->key_timeouts[i], tp_cfg->value_timeouts[i]);
+        }
     }
 }
 
@@ -4600,6 +4602,11 @@ port_configure_bond(struct port *port, struct bond_settings *s)
         /* OVSDB did not store the last active interface */
         s->active_slave_mac = eth_addr_zero;
     }
+
+    /* lb_output action is disabled by default. */
+    s->use_lb_output_action = (s->balance == BM_TCP)
+                              && smap_get_bool(&port->cfg->other_config,
+                                               "lb-output-action", false);
 }
 
 /* Returns true if 'port' is synthetic, that is, if we constructed it locally
