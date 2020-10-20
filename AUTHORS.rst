@@ -80,6 +80,7 @@ Bert Vermeulen                     bert@biot.com
 Bhanuprakash Bodireddy             bhanuprakash.bodireddy@intel.com
 Billy O'Mahony                     billy.o.mahony@intel.com
 Binbin Xu                          xu.binbin1@zte.com.cn
+Boleslaw Tokarski                  boleslaw.tokarski@jollamobile.com
 Brian Haley                        haleyb.dev@gmail.com
 Brian Kruger                       bkruger+ovsdev@gmail.com
 Bruce Davie                        bdavie@vmware.com
@@ -130,7 +131,7 @@ Ed Swierk                          eswierk@skyportsystems.com
 Edouard Bourguignon                madko@linuxed.net
 Eelco Chaudron                     echaudro@redhat.com
 Eiichi Tsukata                     eiichi.tsukata@nutanix.com
-Eli Britstein                      elibr@mellanox.com
+Eli Britstein                      elibr@nvidia.com
 Emma Finn                          emma.finn@intel.com
 Eric Lapointe                      elapointe@corsa.com
 Esteban Rodriguez Betancourt       estebarb@hpe.com
@@ -255,7 +256,7 @@ Madhu Challa                       challa@noironetworks.com
 Manohar K C                        manukc@gmail.com
 Marcin Mirecki                     mmirecki@redhat.com
 Mario Cabrera                      mario.cabrera@hpe.com
-Mark D. Gray                       mark.d.gray@intel.com
+Mark D. Gray                       mark.d.gray@redhat.com
 Mark Hamilton
 Mark Kavanagh                      mark.b.kavanagh81@gmail.com
 Mark Maglana                       mmaglana@gmail.com
@@ -410,6 +411,7 @@ xu rong                            xu.rong@zte.com.cn
 YAMAMOTO Takashi                   yamamoto@midokura.com
 Yanqin Wei                         Yanqin.Wei@arm.com
 Yasuhito Takamiya                  yasuhito@gmail.com
+Yi Li                              yili@winhong.com
 Yi Yang                            yangyi01@inspur.com
 Yi-Hung Wei                        yihung.wei@gmail.com
 Yifeng Sun                         pkusunyifeng@gmail.com
