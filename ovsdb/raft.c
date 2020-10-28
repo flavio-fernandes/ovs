@@ -1044,13 +1044,22 @@ raft_get_memory_usage(const struct raft *raft, struct simap *usage)
 bool
 raft_is_connected(const struct raft *raft)
 {
+    static bool last_state = false;
     bool ret = (!raft->candidate_retrying
             && !raft->joining
             && !raft->leaving
             && !raft->left
             && !raft->failed
             && raft->ever_had_leader);
-    VLOG_DBG("raft_is_connected: %s\n", ret? "true": "false");
+
+    if (!ret) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 5);
+        VLOG_DBG_RL(&rl, "raft_is_connected: false");
+    } else if (!last_state) {
+        VLOG_DBG("raft_is_connected: true");
+    }
+    last_state = ret;
+
     return ret;
 }
 
@@ -3987,7 +3996,7 @@ raft_handle_install_snapshot_request__(
     struct ovsdb_error *error = raft_save_snapshot(raft, new_log_start,
                                                    &new_snapshot);
     if (error) {
-        char *error_s = ovsdb_error_to_string(error);
+        char *error_s = ovsdb_error_to_string_free(error);
         VLOG_WARN("could not save snapshot: %s", error_s);
         free(error_s);
         return false;
