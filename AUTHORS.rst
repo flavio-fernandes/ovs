@@ -376,6 +376,7 @@ Sugesh Chandran                    sugesh.chandran@intel.com
 SUGYO Kazushi                      sugyo.org@gmail.com
 Surya Rudra                        rudrasurya.r@altencalsoftlabs.com
 Tadaaki Nagao                      nagao@stratosphere.co.jp
+Tao YunXiang                       taoyunxiang@cmss.chinamobile.com
 Terry Wilson                       twilson@redhat.com
 Tetsuo NAKAGAWA                    nakagawa@mxc.nes.nec.co.jp
 Thadeu Lima de Souza Cascardo      cascardo@cascardo.eti.br
@@ -400,6 +401,7 @@ Valient Gough                      vgough@pobox.com
 Venkata Anil Kommaddi              vkommadi@redhat.com
 Vishal Deep Ajmera                 vishal.deep.ajmera@ericsson.com
 Vivien Bernet-Rollande             vbr@soprive.net
+Volkan Atlı                        volkan.atli@b-ulltech.com
 wangqianyu                         wang.qianyu@zte.com.cn
 Wang Li                            wangli39@baidu.com
 Wang Sheng-Hui                     shhuiw@gmail.com
@@ -580,13 +582,14 @@ Linhaifeng                      haifeng.lin@huawei.com
 Logan Rosen                     logatronico@gmail.com
 Luca Falavigna                  dktrkranz@debian.org
 Luiz Henrique Ozaki             luiz.ozaki@gmail.com
+Madhu Venugopal                 mavenugo@gmail.com
+Malvika Gupta                   malvika.gupta@arm.com
 Manpreet Singh                  er.manpreet25@gmail.com
+Mao YingMing                    maoyingming@baidu.com
 Marco d'Itri                    md@Linux.IT
 Martin Vizvary                  vizvary@ics.muni.cz
 Marvin Pascual                  marvin@pascual.com.ph
 Maxime Brun                     m.brun@alphalink.fr
-Madhu Venugopal                 mavenugo@gmail.com
-Malvika Gupta                   malvika.gupta@arm.com
 Michael A. Collins              mike.a.collins@ark-net.org
 Michael Ben-Ami                 mbenami@digitalocean.com
 Michael Hu                      humichael@vmware.com
